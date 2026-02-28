@@ -1390,6 +1390,110 @@ fn list_workspace_files(
     Ok(entries)
 }
 
+/// Attaches a file to a note. Reads the file from disk, encrypts it, and stores it.
+#[tauri::command]
+fn attach_file(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    note_id: String,
+    file_path: String,
+) -> std::result::Result<AttachmentMeta, String> {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
+
+    let path = std::path::Path::new(&file_path);
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Invalid file path")?
+        .to_string();
+
+    let mime_type = mime_guess::from_path(path)
+        .first()
+        .map(|m| m.to_string());
+
+    let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {e}"))?;
+    workspace
+        .attach_file(&note_id, &filename, mime_type.as_deref(), &data)
+        .map_err(|e| e.to_string())
+}
+
+/// Returns attachment metadata for all attachments on a note.
+#[tauri::command]
+fn get_attachments(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    note_id: String,
+) -> std::result::Result<Vec<AttachmentMeta>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let workspace = workspaces.get(label).ok_or("No workspace open")?;
+    workspace.get_attachments(&note_id).map_err(|e| e.to_string())
+}
+
+/// Returns the decrypted base64-encoded bytes of an attachment (for display in UI).
+#[tauri::command]
+fn get_attachment_data(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    attachment_id: String,
+) -> std::result::Result<String, String> {
+    use base64::Engine;
+    let label = window.label();
+    let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let workspace = workspaces.get(label).ok_or("No workspace open")?;
+    let bytes = workspace
+        .get_attachment_bytes(&attachment_id)
+        .map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+/// Deletes an attachment from a note.
+#[tauri::command]
+fn delete_attachment(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    attachment_id: String,
+) -> std::result::Result<(), String> {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
+    workspace
+        .delete_attachment(&attachment_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Decrypts an attachment to a temp file and opens it with the default system application.
+#[tauri::command]
+async fn open_attachment(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    attachment_id: String,
+    filename: String,
+) -> std::result::Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let bytes = {
+        let label = window.label();
+        let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+        let workspace = workspaces.get(label).ok_or("No workspace open")?;
+        workspace
+            .get_attachment_bytes(&attachment_id)
+            .map_err(|e| e.to_string())?
+    };
+
+    let tmp_dir = std::env::temp_dir().join("krillnotes-attachments");
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_path = tmp_dir.join(&filename);
+    std::fs::write(&tmp_path, &bytes).map_err(|e| e.to_string())?;
+
+    window
+        .app_handle()
+        .opener()
+        .open_path(tmp_path.to_string_lossy().as_ref(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Maps raw menu event IDs to the user-facing message strings emitted to the frontend.
 const MENU_MESSAGES: &[(&str, &str)] = &[
     ("file_new", "File > New Workspace clicked"),
@@ -1601,6 +1705,11 @@ pub fn run() {
             read_file_content,
             list_workspace_files,
             get_cached_password,
+            attach_file,
+            get_attachments,
+            get_attachment_data,
+            delete_attachment,
+            open_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
