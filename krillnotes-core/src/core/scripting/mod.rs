@@ -333,9 +333,9 @@ impl ScriptRegistry {
         });
 
         // Register get_attachments(note_id) — returns attachment metadata for a note.
-        let qc_for_atts = Arc::clone(&query_context);
+        let qc6 = Arc::clone(&query_context);
         engine.register_fn("get_attachments", move |note_id: String| -> rhai::Array {
-            let guard = qc_for_atts.lock().unwrap();
+            let guard = qc6.lock().unwrap();
             guard.as_ref()
                 .and_then(|ctx| ctx.attachments_by_note_id.get(&note_id).cloned())
                 .unwrap_or_default()
