@@ -8,8 +8,10 @@
 
 use pulldown_cmark::{html as md_html, Options, Parser};
 use rhai::{Array, Map};
+use std::sync::OnceLock;
 use std::collections::HashMap;
 use crate::{FieldValue, Note};
+use crate::core::attachment::AttachmentMeta;
 use super::schema::Schema;
 
 // ── Escaping ─────────────────────────────────────────────────────────────────
@@ -20,6 +22,96 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// ── Attachment resolution ─────────────────────────────────────────────────────
+
+/// Resolve a source string to an `AttachmentMeta` reference.
+///
+/// Formats:
+///   `"attach:<filename>"` — finds the first attachment with that filename
+///   `"field:<fieldName>"` — reads `fields[fieldName]` as `FieldValue::File(uuid)`
+///                           then finds the attachment with that UUID
+pub fn resolve_attachment_source<'a>(
+    source: &str,
+    fields: &HashMap<String, FieldValue>,
+    attachments: &'a [AttachmentMeta],
+) -> Option<&'a AttachmentMeta> {
+    if let Some(filename) = source.strip_prefix("attach:") {
+        attachments.iter().find(|a| a.filename == filename)
+    } else if let Some(field_name) = source.strip_prefix("field:") {
+        if let Some(FieldValue::File(Some(uuid))) = fields.get(field_name) {
+            attachments.iter().find(|a| &a.id == uuid)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+// ── Image block preprocessing ─────────────────────────────────────────────────
+
+/// Pre-process `{{image: ...}}` blocks in markdown text.
+///
+/// Each block is replaced with an `<img data-kn-attach-id="UUID" ...>`
+/// sentinel element. The frontend will later hydrate these by fetching the
+/// decrypted attachment bytes and replacing `src`.
+///
+/// Syntax examples:
+///   `{{image: attach:photo.png}}`
+///   `{{image: field:cover, width: 400}}`
+///   `{{image: attach:hero.jpg, width: 200, alt: My caption}}`
+static IMAGE_BLOCK_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+pub fn preprocess_image_blocks(
+    text: &str,
+    fields: &HashMap<String, FieldValue>,
+    attachments: &[AttachmentMeta],
+) -> String {
+    let re = IMAGE_BLOCK_RE.get_or_init(|| {
+        regex::Regex::new(r"\{\{image:\s*([^}]*)\}\}").expect("valid regex")
+    });
+
+    re.replace_all(text, |caps: &regex::Captures| {
+        let inner = caps[1].trim();
+        let (source, opts) = parse_image_block(inner);
+
+        match resolve_attachment_source(source, fields, attachments) {
+            Some(meta) => {
+                let width_attr = opts.get("width")
+                    .map(|w| format!(" data-kn-width=\"{}\"", html_escape(w)))
+                    .unwrap_or_default();
+                let alt_attr = opts.get("alt")
+                    .map(|a| format!(" alt=\"{}\"", html_escape(a)))
+                    .unwrap_or_default();
+                format!(
+                    "<img data-kn-attach-id=\"{}\"{}{} class=\"kn-image-embed\" />",
+                    meta.id, width_attr, alt_attr
+                )
+            }
+            None => format!(
+                "<span class=\"kn-image-error\">Image not found: {}</span>",
+                html_escape(source)
+            ),
+        }
+    }).into_owned()
+}
+
+/// Parse `"attach:photo.png, width: 200, alt: My caption"` into
+/// `(source, {width: "200", alt: "My caption"})`.
+fn parse_image_block(inner: &str) -> (&str, HashMap<&str, &str>) {
+    let mut parts = inner.splitn(2, ',');
+    let source = parts.next().unwrap_or("").trim();
+    let mut opts = HashMap::new();
+    if let Some(rest) = parts.next() {
+        for kv in rest.split(',') {
+            if let Some((k, v)) = kv.split_once(':') {
+                opts.insert(k.trim(), v.trim());
+            }
+        }
+    }
+    (source, opts)
 }
 
 // ── Markdown rendering ────────────────────────────────────────────────────────
@@ -808,5 +900,97 @@ mod tests {
     fn test_stars_value_exceeds_max_clamps_to_max() {
         // value > max: all filled stars up to max
         assert_eq!(rhai_stars(7, 5), "★★★★★");
+    }
+
+    // ── resolve_attachment_source tests ──────────────────────────────────────
+
+    fn make_meta(id: &str, filename: &str) -> AttachmentMeta {
+        AttachmentMeta {
+            id: id.to_string(),
+            note_id: "note1".to_string(),
+            filename: filename.to_string(),
+            mime_type: Some("image/png".to_string()),
+            size_bytes: 100,
+            hash_sha256: "abc".to_string(),
+            salt: "00".repeat(32),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_resolve_by_filename() {
+        let attachments = vec![make_meta("uuid-1", "photo.png")];
+        let fields = HashMap::new();
+        let result = resolve_attachment_source("attach:photo.png", &fields, &attachments);
+        assert_eq!(result.map(|a| a.id.as_str()), Some("uuid-1"));
+    }
+
+    #[test]
+    fn test_resolve_by_field() {
+        let attachments = vec![make_meta("uuid-2", "cover.jpg")];
+        let mut fields = HashMap::new();
+        fields.insert("cover".to_string(), FieldValue::File(Some("uuid-2".to_string())));
+        let result = resolve_attachment_source("field:cover", &fields, &attachments);
+        assert_eq!(result.map(|a| a.id.as_str()), Some("uuid-2"));
+    }
+
+    #[test]
+    fn test_resolve_missing_returns_none() {
+        let fields = HashMap::new();
+        assert!(resolve_attachment_source("attach:missing.png", &fields, &[]).is_none());
+    }
+
+    #[test]
+    fn test_resolve_field_not_set_returns_none() {
+        let mut fields = HashMap::new();
+        fields.insert("cover".to_string(), FieldValue::File(None));
+        assert!(resolve_attachment_source("field:cover", &fields, &[]).is_none());
+    }
+
+    // ── preprocess_image_blocks tests ────────────────────────────────────────
+
+    #[test]
+    fn test_preprocess_basic_attach() {
+        let attachments = vec![make_meta("uuid-1", "photo.png")];
+        let fields = HashMap::new();
+        let result = preprocess_image_blocks(
+            "Before {{image: attach:photo.png}} After",
+            &fields,
+            &attachments,
+        );
+        assert!(result.contains("data-kn-attach-id=\"uuid-1\""), "got: {result}");
+        assert!(result.contains("Before"));
+        assert!(result.contains("After"));
+    }
+
+    #[test]
+    fn test_preprocess_with_width_and_alt() {
+        let attachments = vec![make_meta("uuid-2", "cover.jpg")];
+        let fields = HashMap::new();
+        let result = preprocess_image_blocks(
+            "{{image: attach:cover.jpg, width: 300, alt: My cover}}",
+            &fields,
+            &attachments,
+        );
+        assert!(result.contains("data-kn-attach-id=\"uuid-2\""));
+        assert!(result.contains("data-kn-width=\"300\""));
+        assert!(result.contains("alt=\"My cover\""));
+    }
+
+    #[test]
+    fn test_preprocess_unresolvable_shows_error() {
+        let fields = HashMap::new();
+        let result = preprocess_image_blocks("{{image: attach:missing.png}}", &fields, &[]);
+        assert!(result.contains("kn-image-error"), "got: {result}");
+    }
+
+    #[test]
+    fn test_preprocess_field_source() {
+        let mut fields = HashMap::new();
+        fields.insert("cover".to_string(), FieldValue::File(Some("uuid-3".to_string())));
+        let attachments = vec![make_meta("uuid-3", "cover.jpg")];
+        let result = preprocess_image_blocks("{{image: field:cover, width: 200}}", &fields, &attachments);
+        assert!(result.contains("data-kn-attach-id=\"uuid-3\""));
+        assert!(result.contains("data-kn-width=\"200\""));
     }
 }

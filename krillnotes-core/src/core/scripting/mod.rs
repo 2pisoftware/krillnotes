@@ -14,12 +14,22 @@ pub use schema::{AddChildResult, FieldDefinition, Schema};
 // StarterScript is defined in this file and re-exported via lib.rs.
 
 use crate::{FieldValue, KrillnotesError, Note, Result};
+use crate::core::attachment::AttachmentMeta;
 use schema::HookEntry;
 use chrono::Local;
 use include_dir::{include_dir, Dir};
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map, AST};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// Per-run context injected before executing a Rhai script so that
+/// context-aware Rhai helpers (markdown, display_image, etc.) can resolve
+/// attachment references for the current note.
+#[derive(Debug)]
+pub struct NoteRunContext {
+    pub note: crate::core::note::Note,
+    pub attachments: Vec<AttachmentMeta>,
+}
 
 /// Pre-built index of all workspace notes, populated before each `on_view` hook call
 /// and cleared immediately afterwards.
@@ -73,6 +83,8 @@ pub struct ScriptRegistry {
     query_context: Arc<Mutex<Option<QueryContext>>>,
     /// Active transaction context for a running tree action; `None` outside a hook call.
     action_ctx: Arc<Mutex<Option<hooks::ActionTxContext>>>,
+    /// Per-run note + attachment context set before a hook call and cleared after.
+    pub run_context: Arc<Mutex<Option<NoteRunContext>>>,
 }
 
 impl ScriptRegistry {
@@ -228,6 +240,9 @@ impl ScriptRegistry {
 
         // ── Action transaction context for tree action hooks ─────────────────
         let action_ctx: Arc<Mutex<Option<hooks::ActionTxContext>>> = Arc::new(Mutex::new(None));
+
+        // ── Per-run note + attachment context ─────────────────────────────────
+        let run_context: Arc<Mutex<Option<NoteRunContext>>> = Arc::new(Mutex::new(None));
 
         // Register get_children() — returns direct children of a note by ID.
         let qc1           = Arc::clone(&query_context);
@@ -489,6 +504,7 @@ impl ScriptRegistry {
             hook_registry,
             query_context,
             action_ctx,
+            run_context,
         })
     }
 
@@ -717,6 +733,7 @@ impl ScriptRegistry {
         self.schema_owners.lock().unwrap().clear();
         self.hook_registry.clear();
         *self.query_context.lock().unwrap() = None;
+        *self.run_context.lock().unwrap() = None;
     }
 
     /// Returns a map of `note_type → [action_label, …]` for every registered tree action.
@@ -788,6 +805,17 @@ impl ScriptRegistry {
     /// Returns `true` if a schema with `name` is registered.
     pub fn schema_exists(&self, name: &str) -> bool {
         self.schema_registry.exists(name)
+    }
+
+    /// Sets the per-run note and attachment context before executing a hook.
+    pub fn set_run_context(&self, note: crate::core::note::Note, attachments: Vec<AttachmentMeta>) {
+        *self.run_context.lock().expect("run_context poisoned") =
+            Some(NoteRunContext { note, attachments });
+    }
+
+    /// Clears the per-run context after a hook has finished executing.
+    pub fn clear_run_context(&self) {
+        *self.run_context.lock().expect("run_context poisoned") = None;
     }
 
 }
