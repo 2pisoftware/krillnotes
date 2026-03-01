@@ -1016,7 +1016,8 @@ impl Workspace {
                     }
                 }
             }
-            return Ok(self.script_registry.render_default_view(&note, &resolved_titles));
+            let attachments = self.get_attachments(&note.id).unwrap_or_default();
+            return Ok(self.script_registry.render_default_view(&note, &resolved_titles, &attachments));
         }
 
         let all_notes = self.list_all_notes()?;
@@ -1054,13 +1055,17 @@ impl Workspace {
         // Set per-run context so markdown() and other helpers can resolve attachments.
         let attachments = self.get_attachments(&note.id).unwrap_or_default();
         self.script_registry.set_run_context(note.clone(), attachments);
+        // RAII guard: ensures run_context is cleared even if hook panics
+        struct RunContextGuard<'a>(&'a crate::core::scripting::ScriptRegistry);
+        impl Drop for RunContextGuard<'_> {
+            fn drop(&mut self) { self.0.clear_run_context(); }
+        }
+        let _guard = RunContextGuard(&self.script_registry);
         // run_on_view_hook returns Some(...) since we've confirmed a hook exists above.
-        let result = self
+        self
             .script_registry
             .run_on_view_hook(&note, context)
-            .map(|opt| opt.unwrap_or_default());
-        self.script_registry.clear_run_context();
-        result
+            .map(|opt| opt.unwrap_or_default())
     }
 
     /// Runs the `on_hover` hook for the given note, if one is registered.
@@ -1109,9 +1114,13 @@ impl Workspace {
         // Set per-run context so markdown() and other helpers can resolve attachments.
         let attachments = self.get_attachments(&note.id).unwrap_or_default();
         self.script_registry.set_run_context(note.clone(), attachments);
-        let result = self.script_registry.run_on_hover_hook(&note, context);
-        self.script_registry.clear_run_context();
-        result
+        // RAII guard: ensures run_context is cleared even if hook panics
+        struct RunContextGuard<'a>(&'a crate::core::scripting::ScriptRegistry);
+        impl Drop for RunContextGuard<'_> {
+            fn drop(&mut self) { self.0.clear_run_context(); }
+        }
+        let _guard = RunContextGuard(&self.script_registry);
+        self.script_registry.run_on_hover_hook(&note, context)
     }
 
     /// Returns the names of all registered note types (schema names).

@@ -174,6 +174,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
             img.style.height = 'auto';
           }
           img.removeAttribute('data-kn-attach-id');
+          img.removeAttribute('data-kn-width');
         } catch {
           const span = document.createElement('span');
           span.className = 'kn-image-error';
@@ -398,7 +399,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
                     a.href = url;
                     a.download = filename;
                     a.click();
-                    URL.revokeObjectURL(url);
+                    setTimeout(() => URL.revokeObjectURL(url), 100);
                   })
                   .catch(err => alert(String(err)));
                 return;
@@ -546,6 +547,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
                     fieldName={`${name}${t('notes.legacySuffix')}`}
                     fieldType="text"
                     value={selectedNote.fields[name]}
+                    noteId={selectedNote.id}
                   />
                 ))}
               </dl>

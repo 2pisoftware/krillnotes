@@ -490,12 +490,13 @@ impl ScriptRegistry {
         let ctx_for_markdown = Arc::clone(&run_context);
         engine.register_fn("markdown", move |text: String| -> String {
             let guard = ctx_for_markdown.lock().expect("run_context poisoned");
-            let processed = if let Some(ref ctx) = *guard {
-                display_helpers::preprocess_image_blocks(&text, &ctx.note.fields, &ctx.attachments)
+            let maybe_context = guard.as_ref().map(|ctx| (ctx.note.fields.clone(), ctx.attachments.clone()));
+            drop(guard);  // release lock before any further work
+            let processed = if let Some((fields, attachments)) = maybe_context {
+                display_helpers::preprocess_image_blocks(&text, &fields, &attachments)
             } else {
                 text
             };
-            drop(guard); // release lock before rendering
             display_helpers::rhai_markdown_raw(processed)
         });
         engine.register_fn("render_tags",  display_helpers::rhai_render_tags);
@@ -697,9 +698,9 @@ impl ScriptRegistry {
     /// `resolved_titles` maps note IDs to their display titles so that NoteLink
     /// fields render as clickable anchors. Pass `&Default::default()` when no
     /// resolution is needed.
-    pub fn render_default_view(&self, note: &Note, resolved_titles: &std::collections::HashMap<String, String>) -> String {
+    pub fn render_default_view(&self, note: &Note, resolved_titles: &std::collections::HashMap<String, String>, attachments: &[crate::core::attachment::AttachmentMeta]) -> String {
         let schema = self.schema_registry.get(&note.node_type).ok();
-        display_helpers::render_default_view(note, schema.as_ref(), resolved_titles)
+        display_helpers::render_default_view(note, schema.as_ref(), resolved_titles, attachments)
     }
 
     /// Runs the view hook registered for the given note's schema, if any.
@@ -1779,7 +1780,7 @@ mod tests {
             created_by: 0, modified_by: 0, fields, is_expanded: false, tags: vec![],
         };
 
-        let html = registry.render_default_view(&note, &Default::default());
+        let html = registry.render_default_view(&note, &Default::default(), &[]);
         assert!(html.contains("<strong>important</strong>"), "got: {html}");
     }
 

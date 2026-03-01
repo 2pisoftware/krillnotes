@@ -454,10 +454,21 @@ fn field_row_html(label: &str, value_html: &str) -> String {
 ///
 /// `resolved_titles` maps note IDs to their display titles so that NoteLink
 /// fields render as clickable anchors rather than raw UUIDs.
-fn format_field_value_html(value: &FieldValue, field_type: &str, max: i64, resolved_titles: &HashMap<String, String>) -> String {
+fn format_field_value_html(
+    value: &FieldValue,
+    field_type: &str,
+    max: i64,
+    resolved_titles: &HashMap<String, String>,
+    image_context: Option<(&HashMap<String, FieldValue>, &[AttachmentMeta])>,
+) -> String {
     match (value, field_type) {
         (FieldValue::Text(s), "textarea") => {
-            format!("<div class=\"kn-view-markdown\">{}</div>", render_markdown_to_html(s))
+            let preprocessed = if let Some((fields, attachments)) = image_context {
+                preprocess_image_blocks(s, fields, attachments)
+            } else {
+                s.clone()
+            };
+            format!("<div class=\"kn-view-markdown\">{}</div>", render_markdown_to_html(&preprocessed))
         }
         (FieldValue::Text(s), _) => {
             format!("<span>{}</span>", html_escape(s))
@@ -592,8 +603,15 @@ fn is_field_empty(value: &FieldValue) -> bool {
 ///
 /// Accepts `None` for `schema` — in that case all fields are rendered as plain
 /// text in sorted order.
-pub fn render_default_view(note: &Note, schema: Option<&Schema>, resolved_titles: &HashMap<String, String>) -> String {
+pub fn render_default_view(
+    note: &Note,
+    schema: Option<&Schema>,
+    resolved_titles: &HashMap<String, String>,
+    attachments: &[AttachmentMeta],
+) -> String {
     let mut sections: Vec<String> = Vec::new();
+    let image_ctx: Option<(&HashMap<String, FieldValue>, &[AttachmentMeta])> =
+        Some((&note.fields, attachments));
 
     if let Some(schema) = schema {
         // Render schema-defined fields in declaration order.
@@ -608,7 +626,7 @@ pub fn render_default_view(note: &Note, schema: Option<&Schema>, resolved_titles
             }
             let label = humanise_key(&field_def.name);
             let value_html =
-                format_field_value_html(value, &field_def.field_type, field_def.max, resolved_titles);
+                format_field_value_html(value, &field_def.field_type, field_def.max, resolved_titles, image_ctx);
             if value_html.is_empty() {
                 continue;
             }
@@ -637,7 +655,7 @@ pub fn render_default_view(note: &Note, schema: Option<&Schema>, resolved_titles
                 continue;
             }
             let label = humanise_key(key);
-            let value_html = format_field_value_html(value, "text", 0, resolved_titles);
+            let value_html = format_field_value_html(value, "text", 0, resolved_titles, None);
             if !value_html.is_empty() {
                 legacy_rows.push(field_row_html(&label, &value_html));
             }
@@ -661,7 +679,7 @@ pub fn render_default_view(note: &Note, schema: Option<&Schema>, resolved_titles
                 continue;
             }
             let label = humanise_key(key);
-            let value_html = format_field_value_html(value, "text", 0, resolved_titles);
+            let value_html = format_field_value_html(value, "text", 0, resolved_titles, None);
             if !value_html.is_empty() {
                 field_rows.push(field_row_html(&label, &value_html));
             }
@@ -786,7 +804,7 @@ mod tests {
             allowed_parent_types: vec![], allowed_children_types: vec![],
         };
 
-        let html = render_default_view(&note, Some(&schema), &HashMap::new());
+        let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
         assert!(html.contains("<strong>bold</strong>"), "expected rendered markdown, got: {html}");
         assert!(html.contains("kn-view-markdown"), "expected markdown wrapper class");
     }
@@ -816,7 +834,7 @@ mod tests {
             allowed_parent_types: vec![], allowed_children_types: vec![],
         };
 
-        let html = render_default_view(&note, Some(&schema), &HashMap::new());
+        let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
         assert!(!html.contains("<script>"), "raw script tag must not appear");
         assert!(html.contains("&lt;script&gt;"));
     }
@@ -846,7 +864,7 @@ mod tests {
             allowed_parent_types: vec![], allowed_children_types: vec![],
         };
 
-        let html = render_default_view(&note, Some(&schema), &HashMap::new());
+        let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
         assert!(!html.contains("hidden"), "can_view:false fields must not appear");
     }
 
@@ -879,7 +897,7 @@ mod tests {
             allowed_parent_types: vec![], allowed_children_types: vec![],
         };
 
-        let html = render_default_view(&note, Some(&schema), &HashMap::new());
+        let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
         // Must be wrapped in the markdown class (backend renders it).
         assert!(html.contains("kn-view-markdown"), "got: {html}");
         // pulldown-cmark renders **bold** as <strong>bold</strong>
@@ -936,7 +954,7 @@ mod tests {
             allowed_parent_types: vec![], allowed_children_types: vec![],
         };
 
-        let html = render_default_view(&note, Some(&schema), &HashMap::new());
+        let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
         assert!(html.contains("legacy value"), "legacy fields must be shown");
         assert!(html.contains("Legacy Fields"), "legacy section header must appear");
     }

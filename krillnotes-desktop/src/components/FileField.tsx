@@ -40,7 +40,7 @@ export function FileField({
   const [thumbSrc, setThumbSrc] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!attachmentId) { setMeta(null); setThumbSrc(null); return; }
+    if (!attachmentId || !noteId) { setMeta(null); setThumbSrc(null); return; }
     invoke<AttachmentMeta[]>('get_attachments', { noteId })
       .then(list => {
         const found = list.find(a => a.id === attachmentId) ?? null;
@@ -60,7 +60,11 @@ export function FileField({
     // Build extension filters from allowedTypes MIME list.
     // e.g. ["image/png", "image/jpeg"] → extensions: ["png", "jpeg"]
     const filters = allowedTypes.length > 0
-      ? [{ name: 'Allowed files', extensions: allowedTypes.map(mimeToExtension) }]
+      ? [{ name: 'Allowed files', extensions: allowedTypes.flatMap(m => {
+          const ext = mimeToExtension(m);
+          // jpeg files commonly have both extensions
+          return ext === 'jpeg' ? ['jpeg', 'jpg'] : [ext];
+        }) }]
       : [];
     const selected = await open({ multiple: false, filters });
     if (!selected || typeof selected !== 'string') return;
@@ -76,6 +80,10 @@ export function FileField({
       if (attachmentId) {
         await invoke('delete_attachment', { attachmentId }).catch(() => {});
       }
+      // Note: if the parent component never saves this new value to the DB
+      // (e.g. user navigates away without saving), newMeta is orphaned —
+      // it exists in the attachments table but no note field references it.
+      // A future orphan sweep can clean these up.
       onValueChange({ File: newMeta.id });
     } catch (err) {
       alert(`Failed to attach file: ${String(err)}`);

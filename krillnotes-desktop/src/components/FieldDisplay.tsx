@@ -33,7 +33,7 @@ interface FieldDisplayProps {
   fieldType: FieldType;
   value: FieldValue;
   max?: number;
-  noteId?: string;
+  noteId: string;
 }
 
 function FieldDisplay({ fieldName, fieldType, value, max = 5, noteId }: FieldDisplayProps) {
@@ -80,7 +80,7 @@ function FieldDisplay({ fieldName, fieldType, value, max = 5, noteId }: FieldDis
           attachmentId={fileId}
           allowedTypes={[]}
           isEditing={false}
-          noteId={noteId ?? ''}
+          noteId={noteId}
           onValueChange={() => {}}
         />
       );
