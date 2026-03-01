@@ -1824,6 +1824,41 @@ impl Workspace {
         let now = chrono::Utc::now().timestamp();
         let fields_json = serde_json::to_string(&fields)?;
 
+        // Clean up replaced or cleared File field attachments before the note UPDATE.
+        // Must run before connection_mut() is borrowed for the transaction below,
+        // since delete_attachment uses connection() (shared ref) which conflicts with
+        // an active connection_mut() Transaction.
+        //
+        // Note: if delete_attachment succeeds but the tx.commit() below fails, the
+        // note row still references old_uuid while the attachment is already gone,
+        // leaving a dangling File field reference. This is an accepted trade-off
+        // for a single-writer local store where commit failures are rare.
+        {
+            let old_fields_json: String = self
+                .storage
+                .connection()
+                .query_row(
+                    "SELECT fields_json FROM notes WHERE id = ?1",
+                    rusqlite::params![note_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| KrillnotesError::NoteNotFound(note_id.to_string()))?;
+            let old_fields: HashMap<String, FieldValue> =
+                serde_json::from_str(&old_fields_json).unwrap_or_default();
+
+            for (key, old_val) in &old_fields {
+                if let FieldValue::File(Some(old_uuid)) = old_val {
+                    let still_same = matches!(
+                        fields.get(key),
+                        Some(FieldValue::File(Some(u))) if u == old_uuid
+                    );
+                    if !still_same {
+                        let _ = self.delete_attachment(old_uuid); // best-effort
+                    }
+                }
+            }
+        }
+
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute(
@@ -4408,5 +4443,59 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         let big_data = vec![0u8; 100];
         let result = ws.attach_file(&root_id, "big.bin", None, &big_data);
         assert!(matches!(result, Err(KrillnotesError::AttachmentTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_update_note_cleans_up_replaced_file_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("notes.db");
+        let mut ws = Workspace::create(&db_path, "").unwrap();
+
+        // Use the root TextNote that is always created on workspace init.
+        let root_id = ws.list_all_notes().unwrap()[0].id.clone();
+
+        // Attach a first file to the note.
+        let meta1 = ws.attach_file(&root_id, "a.png", Some("image/png"), b"fake_bytes_1").unwrap();
+
+        // Set the File field to point at the first attachment.
+        let mut fields = ws.get_note(&root_id).unwrap().fields.clone();
+        fields.insert("photo".to_string(), FieldValue::File(Some(meta1.id.clone())));
+        ws.update_note(&root_id, "Test".to_string(), fields).unwrap();
+
+        // Attach a second file and replace the field value with it.
+        let meta2 = ws.attach_file(&root_id, "b.png", Some("image/png"), b"fake_bytes_2").unwrap();
+        let mut fields2 = ws.get_note(&root_id).unwrap().fields.clone();
+        fields2.insert("photo".to_string(), FieldValue::File(Some(meta2.id.clone())));
+        ws.update_note(&root_id, "Test".to_string(), fields2).unwrap();
+
+        // The first attachment must have been deleted when the field was replaced.
+        let result = ws.get_attachment_bytes(&meta1.id);
+        assert!(result.is_err(), "old attachment should have been deleted when field value was replaced");
+
+        // The second attachment must still be readable.
+        assert!(ws.get_attachment_bytes(&meta2.id).is_ok(), "new attachment should still exist");
+    }
+
+    #[test]
+    fn test_update_note_cleans_up_cleared_file_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("notes.db");
+        let mut ws = Workspace::create(&db_path, "").unwrap();
+
+        let root_id = ws.list_all_notes().unwrap()[0].id.clone();
+
+        // Attach a file and store its UUID in a File field.
+        let meta = ws.attach_file(&root_id, "x.png", Some("image/png"), b"fake").unwrap();
+        let mut fields = ws.get_note(&root_id).unwrap().fields.clone();
+        fields.insert("photo".to_string(), FieldValue::File(Some(meta.id.clone())));
+        ws.update_note(&root_id, "Test".to_string(), fields).unwrap();
+
+        // Clear the File field (set to None) — the attachment should be deleted.
+        let mut fields2 = ws.get_note(&root_id).unwrap().fields.clone();
+        fields2.insert("photo".to_string(), FieldValue::File(None));
+        ws.update_note(&root_id, "Test".to_string(), fields2).unwrap();
+
+        let result = ws.get_attachment_bytes(&meta.id);
+        assert!(result.is_err(), "attachment should have been deleted when field was cleared");
     }
 }
