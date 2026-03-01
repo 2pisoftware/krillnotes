@@ -391,9 +391,9 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
                 e.preventDefault();
                 const attachmentId = downloadLink.getAttribute('data-kn-download-id')!;
                 const filename = downloadLink.textContent?.trim() ?? 'download';
-                invoke<string>('get_attachment_data', { attachmentId })
-                  .then(b64 => {
-                    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                invoke<{ data: string; mime_type: string | null }>('get_attachment_data', { attachmentId })
+                  .then(result => {
+                    const bytes = Uint8Array.from(atob(result.data), c => c.charCodeAt(0));
                     const blob = new Blob([bytes]);
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
