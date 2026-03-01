@@ -332,6 +332,27 @@ impl ScriptRegistry {
                 .unwrap_or_default()
         });
 
+        // Register get_attachments(note_id) — returns attachment metadata for a note.
+        let qc_for_atts = Arc::clone(&query_context);
+        engine.register_fn("get_attachments", move |note_id: String| -> rhai::Array {
+            let guard = qc_for_atts.lock().unwrap();
+            guard.as_ref()
+                .and_then(|ctx| ctx.attachments_by_note_id.get(&note_id).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|att| {
+                    let mut m = rhai::Map::new();
+                    m.insert("id".into(),        Dynamic::from(att.id));
+                    m.insert("filename".into(),  Dynamic::from(att.filename));
+                    m.insert("mime_type".into(), att.mime_type
+                        .map(Dynamic::from)
+                        .unwrap_or(Dynamic::UNIT));
+                    m.insert("size_bytes".into(), Dynamic::from(att.size_bytes));
+                    Dynamic::from(m)
+                })
+                .collect()
+        });
+
         // create_note(parent_id, node_type) — available inside add_tree_action closures only.
         let action_ctx_create = Arc::clone(&action_ctx);
         let schema_reg_create = schema_registry.clone();
@@ -2603,6 +2624,45 @@ mod tests {
         let schema = registry.get_schema("HoverTest").unwrap();
         assert!(schema.fields[0].show_on_hover);
         assert!(!schema.fields[1].show_on_hover);
+    }
+
+    #[test]
+    fn test_get_attachments_returns_array_of_maps() {
+        use crate::core::attachment::AttachmentMeta;
+
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("PhotoNote", #{
+                fields: [],
+                on_view: |note| {
+                    let atts = get_attachments(note.id);
+                    if atts.len() == 0 { return text("none"); }
+                    let first = atts[0];
+                    text(first.id + "|" + first.filename)
+                }
+            });
+        "#, "test_script").unwrap();
+
+        let note = make_test_note("note-1", "PhotoNote");
+
+        let mut ctx = make_empty_ctx();
+        ctx.attachments_by_note_id.insert(
+            "note-1".to_string(),
+            vec![AttachmentMeta {
+                id: "att-uuid-1".to_string(),
+                note_id: "note-1".to_string(),
+                filename: "photo.png".to_string(),
+                mime_type: Some("image/png".to_string()),
+                size_bytes: 100,
+                hash_sha256: "abc".to_string(),
+                salt: "00".repeat(32),
+                created_at: 0,
+            }],
+        );
+
+        let html = registry.run_on_view_hook(&note, ctx).unwrap().unwrap();
+        assert!(html.contains("att-uuid-1"), "got: {html}");
+        assert!(html.contains("photo.png"), "got: {html}");
     }
 
 }
