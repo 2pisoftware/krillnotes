@@ -76,7 +76,7 @@ export default function HoverTooltip({
   // hoverHtml is already sanitized by DOMPurify below before being set as innerHTML.
   // This is the same pattern used in InfoPanel for on_view hook output.
   const sanitizedHtml = hoverHtml !== null
-    ? DOMPurify.sanitize(hoverHtml, { ADD_ATTR: ['data-note-id', 'data-kn-attach-id', 'data-kn-width', 'data-kn-download-id'] })
+    ? DOMPurify.sanitize(hoverHtml, { ADD_ATTR: ['data-note-id', 'data-kn-attach-id', 'data-kn-width', 'data-kn-download-id'], ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp):|data:image\/|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i })
     : null;
 
   return createPortal(

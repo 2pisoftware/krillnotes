@@ -1070,6 +1070,7 @@ impl Workspace {
             .script_registry
             .run_on_view_hook(&note, context)
             .map(|opt| opt.unwrap_or_default())
+            .map(|html| self.embed_attachment_images(html))
     }
 
     /// Runs the `on_hover` hook for the given note, if one is registered.
@@ -1128,7 +1129,9 @@ impl Workspace {
             fn drop(&mut self) { self.0.clear_run_context(); }
         }
         let _guard = RunContextGuard(&self.script_registry);
-        self.script_registry.run_on_hover_hook(&note, context)
+        self.script_registry
+            .run_on_hover_hook(&note, context)
+            .map(|opt| opt.map(|html| self.embed_attachment_images(html)))
     }
 
     /// Returns the names of all registered note types (schema names).
@@ -2514,6 +2517,60 @@ impl Workspace {
         let encrypted_bytes = std::fs::read(&enc_path)?;
         let bytes = decrypt_attachment(&encrypted_bytes, self.attachment_key.as_ref(), &salt_bytes)?;
         Ok((bytes, mime_type))
+    }
+
+    /// Replaces `<img data-kn-attach-id="UUID">` sentinels in `html` with real
+    /// `src="data:mime;base64,..."` attributes and converts `data-kn-width="N"`
+    /// to an inline `style="max-width:Npx;height:auto"`.
+    ///
+    /// Called after running `on_view` and `on_hover` hooks so the frontend
+    /// receives fully-embedded HTML without needing client-side hydration.
+    /// Sentinels whose attachment cannot be read are left in place so the
+    /// client-side fallback can show an error message.
+    fn embed_attachment_images(&self, html: String) -> String {
+        use base64::Engine as _;
+        use std::sync::OnceLock;
+
+        static ID_RE: OnceLock<regex::Regex> = OnceLock::new();
+        static WIDTH_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+        let id_re = ID_RE.get_or_init(|| {
+            regex::Regex::new(r#"data-kn-attach-id="([^"]+)""#).expect("valid regex")
+        });
+        let width_re = WIDTH_RE.get_or_init(|| {
+            regex::Regex::new(r#"data-kn-width="(\d+)""#).expect("valid regex")
+        });
+
+        // Collect unique attachment IDs present in the HTML.
+        let ids: Vec<String> = id_re
+            .captures_iter(&html)
+            .map(|cap| cap[1].to_string())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if ids.is_empty() {
+            return html;
+        }
+
+        // Replace each sentinel with a real data URL.
+        let mut result = html;
+        for id in ids {
+            if let Ok((bytes, mime_opt)) = self.get_attachment_bytes_and_mime(&id) {
+                let mime = mime_opt.as_deref().unwrap_or("image/png");
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let src = format!(r#"src="data:{mime};base64,{encoded}""#);
+                result = result.replace(&format!(r#"data-kn-attach-id="{id}""#), &src);
+            }
+            // If the attachment cannot be read, leave the sentinel; the client
+            // hydration fallback will display an "Image not found" error.
+        }
+
+        // Convert data-kn-width="N" → style="max-width:Npx;height:auto".
+        let result = width_re.replace_all(&result, |caps: &regex::Captures| {
+            format!(r#"style="max-width:{}px;height:auto""#, &caps[1])
+        });
+        result.into_owned()
     }
 
     /// Deletes an attachment: removes the `.enc` file and the DB row.

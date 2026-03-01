@@ -382,7 +382,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
         {!isEditing && customViewHtml && (
           <div
             ref={viewHtmlRef}
-            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(customViewHtml, { ADD_ATTR: ['data-note-id', 'data-kn-attach-id', 'data-kn-width', 'data-kn-download-id'] }) }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(customViewHtml, { ADD_ATTR: ['data-note-id', 'data-kn-attach-id', 'data-kn-width', 'data-kn-download-id'], ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp):|data:image\/|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i }) }}
             onClick={(e) => {
               const target = e.target as Element;
 
