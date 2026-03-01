@@ -398,6 +398,10 @@ fn format_field_value_html(value: &FieldValue, field_type: &str, max: i64, resol
             )
         }
         (FieldValue::NoteLink(None), _) => String::new(),
+        (FieldValue::File(Some(_)), _) => {
+            "<span class=\"kn-view-file\">📎 (file attached)</span>".to_string()
+        }
+        (FieldValue::File(None), _) => String::new(),
     }
 }
 
@@ -408,6 +412,7 @@ fn is_field_empty(value: &FieldValue) -> bool {
         FieldValue::Date(d) => d.is_none(),
         FieldValue::Number(_) | FieldValue::Boolean(_) => false,
         FieldValue::NoteLink(id) => id.is_none(),
+        FieldValue::File(id) => id.is_none(),
     }
 }
 
@@ -609,7 +614,7 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "notes".into(), field_type: "textarea".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false,
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
@@ -639,7 +644,7 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "name".into(), field_type: "text".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false,
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
@@ -669,7 +674,7 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "secret".into(), field_type: "text".into(),
                 required: false, can_view: false, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false,
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
@@ -702,7 +707,7 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "body".into(), field_type: "textarea".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false,
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
@@ -759,7 +764,7 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "known".into(), field_type: "text".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false,
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
