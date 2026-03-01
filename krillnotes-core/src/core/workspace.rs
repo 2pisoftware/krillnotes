@@ -2495,6 +2495,27 @@ impl Workspace {
         decrypt_attachment(&encrypted_bytes, self.attachment_key.as_ref(), &salt_bytes)
     }
 
+    /// Returns decrypted attachment bytes together with the stored MIME type.
+    pub fn get_attachment_bytes_and_mime(
+        &self,
+        attachment_id: &str,
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        let (salt_bytes, _, mime_type): (Vec<u8>, i64, Option<String>) =
+            self.storage.connection().query_row(
+                "SELECT salt, size_bytes, mime_type FROM attachments WHERE id = ?",
+                [attachment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(|_| KrillnotesError::NoteNotFound(attachment_id.to_string()))?;
+
+        let enc_path = self
+            .workspace_root
+            .join("attachments")
+            .join(format!("{attachment_id}.enc"));
+        let encrypted_bytes = std::fs::read(&enc_path)?;
+        let bytes = decrypt_attachment(&encrypted_bytes, self.attachment_key.as_ref(), &salt_bytes)?;
+        Ok((bytes, mime_type))
+    }
+
     /// Deletes an attachment: removes the `.enc` file and the DB row.
     pub fn delete_attachment(&mut self, attachment_id: &str) -> Result<()> {
         let enc_path = self

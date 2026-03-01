@@ -167,8 +167,9 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
         const attachmentId = img.getAttribute('data-kn-attach-id')!;
         const widthAttr = img.getAttribute('data-kn-width');
         try {
-          const b64 = await invoke<string>('get_attachment_data', { attachmentId });
-          img.src = `data:image/octet-stream;base64,${b64}`;
+          const result = await invoke<{ data: string; mime_type: string | null }>('get_attachment_data', { attachmentId });
+          const mime = result.mime_type ?? 'image/png';
+          img.src = `data:${mime};base64,${result.data}`;
           if (widthAttr && parseInt(widthAttr, 10) > 0) {
             img.style.maxWidth = `${widthAttr}px`;
             img.style.height = 'auto';

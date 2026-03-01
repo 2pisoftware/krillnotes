@@ -46,8 +46,8 @@ export function FileField({
         const found = list.find(a => a.id === attachmentId) ?? null;
         setMeta(found);
         if (found && isImageMime(found.mimeType)) {
-          invoke<string>('get_attachment_data', { attachmentId: found.id })
-            .then(b64 => setThumbSrc(`data:${found.mimeType};base64,${b64}`))
+          invoke<{ data: string; mime_type: string | null }>('get_attachment_data', { attachmentId: found.id })
+            .then(result => setThumbSrc(`data:${found.mimeType};base64,${result.data}`))
             .catch(() => setThumbSrc(null));
         } else {
           setThumbSrc(null);
