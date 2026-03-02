@@ -63,6 +63,7 @@ export default function AttachmentsSection({ noteId, allowedTypes }: Attachments
   useEffect(() => {
     loadAttachments();
     setThumbnails({});
+    setError('');
   }, [noteId]);
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragging(true); };
