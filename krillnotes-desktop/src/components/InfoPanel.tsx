@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { confirm } from '@tauri-apps/plugin-dialog';
@@ -601,4 +601,12 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   );
 }
 
-export default InfoPanel;
+// Prevent re-renders when WorkspaceView re-renders due to hover/drag/dialog state changes that
+// only produce new callback references. Without this guard, React re-processes the view HTML
+// prop on every re-render, which can reset the DOM and wipe the hydrated img.src values set
+// by the image hydration effect (which does not re-run because customViewHtml is unchanged).
+export default memo(InfoPanel, (prev, next) =>
+  prev.selectedNote === next.selectedNote &&
+  prev.requestEditMode === next.requestEditMode &&
+  prev.backNoteTitle === next.backNoteTitle,
+);
