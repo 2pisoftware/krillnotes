@@ -1451,6 +1451,13 @@ impl Workspace {
     /// Returns an error if the note or any workspace note cannot be fetched, if
     /// no action is registered under `label`, or if the callback throws.
     pub fn run_tree_action(&mut self, note_id: &str, label: &str) -> Result<()> {
+        self.begin_undo_group();
+        let result = self.run_tree_action_inner(note_id, label);
+        self.end_undo_group();
+        result
+    }
+
+    fn run_tree_action_inner(&mut self, note_id: &str, label: &str) -> Result<()> {
         let note = self.get_note(note_id)?;
         let all_notes = self.list_all_notes()?;
 
@@ -5419,5 +5426,23 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
 
         // Note must be back.
         assert!(ws.get_note(&child_id).is_ok());
+    }
+
+    #[test]
+    fn test_tree_action_collapses_to_one_undo_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+        let root_id = ws.create_note_root("TextNote").unwrap();
+        ws.undo_stack.clear();
+
+        // Simulate what run_tree_action does internally.
+        ws.begin_undo_group();
+        ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
+        ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
+        ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
+        ws.end_undo_group();
+
+        assert_eq!(ws.undo_stack.len(), 1, "three creates must collapse to one undo step");
     }
 }
