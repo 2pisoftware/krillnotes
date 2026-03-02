@@ -442,7 +442,7 @@ body {
 }
 
 .kn-media-card {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   padding: 12px 16px;
   border-radius: 8px;

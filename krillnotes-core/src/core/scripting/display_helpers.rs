@@ -1193,6 +1193,12 @@ mod tests {
     }
 
     #[test]
+    fn test_embed_youtu_be_with_timestamp_extracts_id() {
+        let html = make_media_embed_html("https://youtu.be/dQw4w9WgXcQ?t=42");
+        assert!(html.contains("data-kn-embed-id=\"dQw4w9WgXcQ\""), "got: {html}");
+    }
+
+    #[test]
     fn test_embed_youtube_watch_with_extra_params() {
         let html = make_media_embed_html("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&list=PL123");
         assert!(html.contains("data-kn-embed-id=\"dQw4w9WgXcQ\""), "got: {html}");
@@ -1256,6 +1262,13 @@ mod tests {
         let input = "https://youtu.be/dQw4w9WgXcQ";
         let output = preprocess_media_embeds(input);
         assert!(output.contains("data-kn-embed-id=\"dQw4w9WgXcQ\""), "got: {output}");
+    }
+
+    #[test]
+    fn test_preprocess_youtu_be_invalid_id_left_unchanged() {
+        let input = "https://youtu.be/tooshort";
+        let output = preprocess_media_embeds(input);
+        assert_eq!(input, output);
     }
 
     #[test]

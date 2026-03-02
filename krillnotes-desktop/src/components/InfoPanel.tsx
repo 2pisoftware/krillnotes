@@ -225,7 +225,11 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
         return; // unknown type — leave sentinel in place
       }
 
-      card.addEventListener('click', () => { openUrl(url); });
+      card.addEventListener('click', () => {
+        if (url.startsWith('https://') || url.startsWith('http://')) {
+          openUrl(url);
+        }
+      });
       el.replaceWith(card);
     });
   }, [customViewHtml]);
