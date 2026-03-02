@@ -217,6 +217,12 @@ impl Workspace {
         )?;
         tx.commit()?;
 
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            ["undo_limit", "50"],
+        )?;
+        let undo_limit: usize = 50;
+
         Ok(Self {
             storage,
             script_registry,
@@ -227,7 +233,7 @@ impl Workspace {
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            undo_limit: 50,
+            undo_limit,
             undo_group_buffer: None,
             inside_undo: false,
         })
@@ -296,6 +302,17 @@ impl Workspace {
             None
         };
 
+        let undo_limit: usize = storage
+            .connection()
+            .query_row(
+                "SELECT value FROM workspace_meta WHERE key = 'undo_limit'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50);
+
         let mut ws = Self {
             storage,
             script_registry,
@@ -306,7 +323,7 @@ impl Workspace {
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            undo_limit: 50,
+            undo_limit,
             undo_group_buffer: None,
             inside_undo: false,
         };
@@ -371,6 +388,29 @@ impl Workspace {
         !self.redo_stack.is_empty()
     }
 
+    /// Returns the current undo stack depth limit.
+    pub fn get_undo_limit(&self) -> usize {
+        self.undo_limit
+    }
+
+    /// Sets the undo stack depth limit, persisting it to `workspace_meta`.
+    ///
+    /// The value is clamped to `[1, 500]`. If the new limit is smaller than
+    /// the current stack depth, the oldest entries are dropped.
+    pub fn set_undo_limit(&mut self, limit: usize) -> Result<()> {
+        let limit = limit.max(1).min(500);
+        self.storage.connection().execute(
+            "INSERT OR REPLACE INTO workspace_meta (key, value) VALUES ('undo_limit', ?)",
+            [limit.to_string()],
+        )?;
+        self.undo_limit = limit;
+        if self.undo_stack.len() > limit {
+            let excess = self.undo_stack.len() - limit;
+            self.undo_stack.drain(0..excess);
+        }
+        Ok(())
+    }
+
     /// Pushes an entry onto the undo stack (or into the group buffer if a group
     /// is open). Clears the redo stack. Trims to `undo_limit`.
     ///
@@ -389,7 +429,7 @@ impl Workspace {
         self.redo_stack.clear();
         self.undo_stack.push(entry);
         if self.undo_stack.len() > self.undo_limit {
-            self.undo_stack.remove(0);
+            self.undo_stack.drain(0..1);
         }
     }
 
@@ -424,7 +464,7 @@ impl Workspace {
             propagate,
         });
         if self.undo_stack.len() > self.undo_limit {
-            self.undo_stack.remove(0);
+            self.undo_stack.drain(0..1);
         }
     }
 
@@ -5444,5 +5484,41 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         ws.end_undo_group();
 
         assert_eq!(ws.undo_stack.len(), 1, "three creates must collapse to one undo step");
+    }
+
+    #[test]
+    fn test_undo_limit_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+        ws.set_undo_limit(10).unwrap();
+        drop(ws);
+
+        let ws2 = Workspace::open(&path, "").unwrap();
+        assert_eq!(ws2.undo_limit, 10);
+    }
+
+    #[test]
+    fn test_undo_limit_clamp_and_trim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+
+        ws.set_undo_limit(0).unwrap();
+        assert_eq!(ws.get_undo_limit(), 1);
+
+        ws.set_undo_limit(9999).unwrap();
+        assert_eq!(ws.get_undo_limit(), 500);
+
+        // Grow the undo stack to 5 entries, then shrink
+        ws.set_undo_limit(500).unwrap();
+        let root_id = ws.create_note_root("TextNote").unwrap();
+        ws.undo_stack.clear();
+        for _ in 0..5 {
+            ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
+        }
+        assert_eq!(ws.undo_stack.len(), 5);
+        ws.set_undo_limit(3).unwrap();
+        assert_eq!(ws.undo_stack.len(), 3, "oldest entries should have been dropped");
     }
 }
