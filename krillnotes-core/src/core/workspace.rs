@@ -1745,6 +1745,18 @@ impl Workspace {
     /// than errors in that case). The transaction is rolled back automatically
     /// on any failure.
     pub fn delete_note_recursive(&mut self, note_id: &str) -> Result<DeleteResult> {
+        // Capture full subtree for undo before any deletion.
+        let subtree_notes = self.collect_subtree_notes(note_id)?;
+        let subtree_ids: Vec<&str> = subtree_notes.iter().map(|n| n.id.as_str()).collect();
+        let attachments = self.list_all_attachments()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| subtree_ids.contains(&a.note_id.as_str()))
+            .collect::<Vec<_>>();
+
+        // Generate a stable operation ID before the deletion transaction.
+        let op_id = Uuid::new_v4().to_string();
+
         // Collect all IDs in the subtree that will be deleted, then clear any
         // incoming NoteLink fields from other notes before the deletion transaction
         // opens (satisfies the note_links.target_id ON DELETE RESTRICT constraint).
@@ -1756,6 +1768,27 @@ impl Workspace {
         let tx = self.storage.connection_mut().transaction()?;
         let result = Self::delete_recursive_in_tx(&tx, note_id)?;
         tx.commit()?;
+
+        // Log a DeleteNote operation for the root of the deleted subtree.
+        let op = Operation::DeleteNote {
+            operation_id: op_id.clone(),
+            timestamp: chrono::Utc::now().timestamp(),
+            device_id: self.device_id.clone(),
+            note_id: note_id.to_string(),
+        };
+        {
+            let tx = self.storage.connection_mut().transaction()?;
+            Self::log_op(&self.operation_log, &tx, &op)?;
+            Self::purge_ops_if_needed(&self.operation_log, &tx)?;
+            tx.commit()?;
+        }
+
+        self.push_undo(UndoEntry {
+            retracted_ids: vec![op_id],
+            inverse: RetractInverse::SubtreeRestore { notes: subtree_notes, attachments },
+            propagate: true,
+        });
+
         Ok(result)
     }
 
@@ -5002,5 +5035,22 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
             }
             _ => panic!("expected NoteRestore"),
         }
+    }
+
+    #[test]
+    fn test_undo_delete_note_restores_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+        let root_id = ws.create_note_root("TextNote").unwrap();
+        let child_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
+        ws.undo_stack.clear();
+
+        ws.delete_note_recursive(&child_id).unwrap();
+        assert!(ws.can_undo());
+        assert!(ws.get_note(&child_id).is_err(), "note gone after delete");
+
+        // Undo entry must be SubtreeRestore.
+        assert!(matches!(ws.undo_stack[0].inverse, RetractInverse::SubtreeRestore { .. }));
     }
 }
