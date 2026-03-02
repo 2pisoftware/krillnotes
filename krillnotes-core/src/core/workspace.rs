@@ -8,8 +8,8 @@ use crate::core::user_script;
 #[allow(unused_imports)]
 use crate::{
     get_device_id, DeleteResult, DeleteStrategy, FieldValue, KrillnotesError, Note,
-    Operation, OperationLog, PurgeStrategy, QueryContext, Result, ScriptError, ScriptRegistry,
-    Storage, UserScript,
+    Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, ScriptError,
+    ScriptRegistry, Storage, UserScript,
 };
 use rhai::Dynamic;
 use rusqlite::Connection;
@@ -18,6 +18,14 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// An entry on the in-memory undo stack.
+pub(crate) struct UndoEntry {
+    /// Operation IDs in the log that this entry covers.
+    pub(crate) retracted_ids: Vec<String>,
+    pub(crate) inverse: RetractInverse,
+    pub(crate) propagate: bool,
+}
 
 /// A lightweight search result containing only the ID and title of a note.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +62,11 @@ pub struct Workspace {
     /// ChaCha20-Poly1305 attachment key derived from password + workspace_id.
     /// `None` for unencrypted workspaces (empty password).
     attachment_key: Option<[u8; 32]>,
+    pub(crate) undo_stack: Vec<UndoEntry>,
+    pub(crate) redo_stack: Vec<UndoEntry>,
+    pub(crate) undo_limit: usize,
+    /// When Some, mutations accumulate here instead of pushing to undo_stack.
+    undo_group_buffer: Option<Vec<UndoEntry>>,
 }
 
 impl Workspace {
@@ -208,6 +221,10 @@ impl Workspace {
             current_user_id: 0,
             workspace_root,
             attachment_key,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_limit: 50,
+            undo_group_buffer: None,
         })
     }
 
@@ -282,6 +299,10 @@ impl Workspace {
             current_user_id,
             workspace_root,
             attachment_key,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_limit: 50,
+            undo_group_buffer: None,
         };
 
         // Load enabled scripts from the workspace DB.
@@ -332,6 +353,30 @@ impl Workspace {
     /// Takes the log as an explicit parameter for the same borrow-checker reason.
     fn purge_ops_if_needed(log: &OperationLog, tx: &rusqlite::Transaction) -> Result<()> {
         log.purge_if_needed(tx)
+    }
+
+    /// Returns `true` if there is at least one action to undo.
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Returns `true` if there is at least one action to redo.
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Pushes an entry onto the undo stack (or into the group buffer if a group
+    /// is open). Clears the redo stack. Trims to `undo_limit`.
+    fn push_undo(&mut self, entry: UndoEntry) {
+        if let Some(buf) = &mut self.undo_group_buffer {
+            buf.push(entry);
+            return;
+        }
+        self.redo_stack.clear();
+        self.undo_stack.push(entry);
+        if self.undo_stack.len() > self.undo_limit {
+            self.undo_stack.remove(0);
+        }
     }
 
     /// Fetches a single note by ID.
@@ -4609,5 +4654,14 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
 
         let result = ws.get_attachment_bytes(&meta.id);
         assert!(result.is_err(), "attachment should have been deleted when field was cleared");
+    }
+
+    #[test]
+    fn test_can_undo_initially_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let ws = Workspace::create(&path, "").unwrap();
+        assert!(!ws.can_undo());
+        assert!(!ws.can_redo());
     }
 }
