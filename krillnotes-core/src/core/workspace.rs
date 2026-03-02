@@ -9,7 +9,7 @@ use crate::core::user_script;
 use crate::{
     get_device_id, DeleteResult, DeleteStrategy, FieldValue, KrillnotesError, Note,
     Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, ScriptError,
-    ScriptRegistry, Storage, UserScript,
+    ScriptRegistry, Storage, UndoResult, UserScript,
 };
 use rhai::Dynamic;
 use rusqlite::Connection;
@@ -414,6 +414,32 @@ impl Workspace {
         }
     }
 
+    /// Undoes the most recent operation on the undo stack.
+    ///
+    /// Returns an [`UndoResult`] indicating which note (if any) should be
+    /// re-selected in the UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the undo stack is empty or if applying the inverse
+    /// operation fails.
+    pub fn undo(&mut self) -> Result<UndoResult> {
+        todo!("implemented in Task 12")
+    }
+
+    /// Re-applies the most recently undone operation from the redo stack.
+    ///
+    /// Returns an [`UndoResult`] indicating which note (if any) should be
+    /// re-selected in the UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the redo stack is empty or if re-applying the
+    /// operation fails.
+    pub fn redo(&mut self) -> Result<UndoResult> {
+        todo!("implemented in Task 12")
+    }
+
     /// Fetches a single note by ID.
     ///
     /// # Errors
@@ -596,6 +622,15 @@ impl Workspace {
         sync_note_links(&tx, &note.id, &note.fields)?;
 
         tx.commit()?;
+
+        // Push undo entry — inverse of CreateNote is DeleteNote.
+        let op_id = op.operation_id().to_string();
+        let note_id = note.id.clone();
+        self.push_undo(UndoEntry {
+            retracted_ids: vec![op_id],
+            inverse: RetractInverse::DeleteNote { note_id },
+            propagate: true,
+        });
 
         Ok(note.id)
     }
@@ -826,6 +861,15 @@ impl Workspace {
         sync_note_links(&tx, &new_note.id, &new_note.fields)?;
 
         tx.commit()?;
+
+        // Push undo entry — inverse of CreateNote is DeleteNote.
+        let op_id = op.operation_id().to_string();
+        let note_id = new_note.id.clone();
+        self.push_undo(UndoEntry {
+            retracted_ids: vec![op_id],
+            inverse: RetractInverse::DeleteNote { note_id },
+            propagate: true,
+        });
 
         Ok(new_note.id)
     }
@@ -4894,5 +4938,21 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
             RetractInverse::Batch(items) => assert_eq!(items.len(), 2),
             _ => panic!("expected Batch"),
         }
+    }
+
+    #[test]
+    fn test_undo_create_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+        let root_id = ws.create_note_root("TextNote").unwrap();
+        ws.undo_stack.clear(); // ignore root creation
+
+        let child_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
+        assert!(ws.can_undo());
+
+        let result = ws.undo().unwrap();
+        assert_eq!(result.affected_note_id, None);
+        assert!(ws.get_note(&child_id).is_err(), "note must be gone after undo");
     }
 }
