@@ -457,11 +457,12 @@ fn format_field_value_html(
 ) -> String {
     match (value, field_type) {
         (FieldValue::Text(s), "textarea") => {
-            let preprocessed = if let Some((fields, attachments)) = image_context {
+            let after_images = if let Some((fields, attachments)) = image_context {
                 preprocess_image_blocks(s, fields, attachments)
             } else {
                 s.clone()
             };
+            let preprocessed = preprocess_media_embeds(&after_images);
             format!("<div class=\"kn-view-markdown\">{}</div>", render_markdown_to_html(&preprocessed))
         }
         (FieldValue::Text(s), _) => {
@@ -1299,5 +1300,39 @@ mod tests {
         let output = preprocess_media_embeds(input);
         assert!(output.contains("data-kn-embed-type=\"youtube\""), "got: {output}");
         assert!(output.contains("data-kn-embed-type=\"instagram\""), "got: {output}");
+    }
+
+    #[test]
+    fn test_render_default_view_textarea_bare_url_becomes_sentinel() {
+        use crate::{FieldValue, FieldDefinition, Note, Schema};
+        use std::collections::HashMap;
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "body".into(),
+            FieldValue::Text("Watch this:\n\nhttps://www.youtube.com/watch?v=dQw4w9WgXcQ\n\nDone.".into()),
+        );
+        let note = Note {
+            id: "id-embed".into(), title: "T".into(), node_type: "T".into(),
+            parent_id: None, position: 0, created_at: 0, modified_at: 0,
+            created_by: 0, modified_by: 0, fields, is_expanded: false, tags: vec![],
+        };
+        let schema = Schema {
+            name: "T".into(),
+            fields: vec![FieldDefinition {
+                name: "body".into(), field_type: "textarea".into(),
+                required: false, can_view: true, can_edit: true,
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+            }],
+            title_can_view: true, title_can_edit: true,
+            children_sort: "none".into(),
+            allowed_parent_types: vec![], allowed_children_types: vec![],
+            allow_attachments: false, attachment_types: vec![],
+        };
+
+        let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
+        assert!(html.contains("data-kn-embed-type=\"youtube\""), "sentinel must appear, got: {html}");
+        assert!(html.contains("data-kn-embed-id=\"dQw4w9WgXcQ\""), "got: {html}");
+        assert!(html.contains("Watch this:"), "surrounding text lost");
     }
 }

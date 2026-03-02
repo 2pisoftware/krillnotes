@@ -515,11 +515,12 @@ impl ScriptRegistry {
             let guard = ctx_for_markdown.lock().expect("run_context poisoned");
             let maybe_context = guard.as_ref().map(|ctx| (ctx.note.fields.clone(), ctx.attachments.clone()));
             drop(guard);  // release lock before any further work
-            let processed = if let Some((fields, attachments)) = maybe_context {
+            let after_images = if let Some((fields, attachments)) = maybe_context {
                 display_helpers::preprocess_image_blocks(&text, &fields, &attachments)
             } else {
                 text
             };
+            let processed = display_helpers::preprocess_media_embeds(&after_images);
             display_helpers::rhai_markdown_raw(processed)
         });
         engine.register_fn("render_tags",  display_helpers::rhai_render_tags);
