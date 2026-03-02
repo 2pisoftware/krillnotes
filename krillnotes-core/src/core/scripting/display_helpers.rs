@@ -596,6 +596,33 @@ pub fn make_media_embed_html(url: &str) -> String {
     )
 }
 
+static MEDIA_LINE_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+/// Pre-process bare media URLs that occupy their own line in markdown text.
+///
+/// Each matching line is replaced with a `<div data-kn-embed-*>` sentinel
+/// that the frontend hydrates into a click-to-play thumbnail card.
+///
+/// A URL is considered "bare" when it is the only non-whitespace content on
+/// its line. URLs embedded mid-sentence are left unchanged.
+pub fn preprocess_media_embeds(text: &str) -> String {
+    let re = MEDIA_LINE_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?m)^[ \t]*(https?://(?:(?:www\.)?youtube\.com/watch\?[^\s]*|youtu\.be/[^\s]*|(?:www\.)?instagram\.com/(?:p|reel)/[^\s]*))[ \t]*$"
+        ).expect("valid regex")
+    });
+
+    re.replace_all(text, |caps: &regex::Captures| {
+        let url = caps[1].trim();
+        let sentinel = make_media_embed_html(url);
+        if sentinel.is_empty() {
+            caps[0].to_string()  // unrecognised URL: leave unchanged
+        } else {
+            sentinel
+        }
+    }).into_owned()
+}
+
 /// Returns `true` if the field value is considered empty (and should be hidden).
 fn is_field_empty(value: &FieldValue) -> bool {
     match value {
@@ -1209,5 +1236,68 @@ mod tests {
         let html = make_media_embed_html("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42");
         assert!(!html.contains("watch?v=dQw4w9WgXcQ&t=42"), "raw & must be escaped");
         assert!(html.contains("&amp;"), "got: {html}");
+    }
+
+    // ── preprocess_media_embeds tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_preprocess_youtube_bare_line_replaced() {
+        let input = "Check this out:\n\nhttps://www.youtube.com/watch?v=dQw4w9WgXcQ\n\nMore text.";
+        let output = preprocess_media_embeds(input);
+        assert!(output.contains("data-kn-embed-type=\"youtube\""), "got: {output}");
+        assert!(output.contains("data-kn-embed-id=\"dQw4w9WgXcQ\""), "got: {output}");
+        assert!(output.contains("Check this out:"), "surrounding text lost");
+        assert!(output.contains("More text."), "surrounding text lost");
+    }
+
+    #[test]
+    fn test_preprocess_youtu_be_bare_line_replaced() {
+        let input = "https://youtu.be/dQw4w9WgXcQ";
+        let output = preprocess_media_embeds(input);
+        assert!(output.contains("data-kn-embed-id=\"dQw4w9WgXcQ\""), "got: {output}");
+    }
+
+    #[test]
+    fn test_preprocess_instagram_post_bare_line_replaced() {
+        let input = "https://www.instagram.com/p/ABC123/";
+        let output = preprocess_media_embeds(input);
+        assert!(output.contains("data-kn-embed-type=\"instagram\""), "got: {output}");
+    }
+
+    #[test]
+    fn test_preprocess_instagram_reel_bare_line_replaced() {
+        let input = "https://www.instagram.com/reel/XYZ789/";
+        let output = preprocess_media_embeds(input);
+        assert!(output.contains("data-kn-embed-type=\"instagram\""), "got: {output}");
+    }
+
+    #[test]
+    fn test_preprocess_url_inline_in_sentence_not_replaced() {
+        let input = "Watch https://www.youtube.com/watch?v=dQw4w9WgXcQ for fun.";
+        let output = preprocess_media_embeds(input);
+        assert!(!output.contains("kn-media-embed"), "inline URL must not embed");
+        assert!(output.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "URL must be preserved");
+    }
+
+    #[test]
+    fn test_preprocess_non_media_url_unchanged() {
+        let input = "https://example.com/video";
+        let output = preprocess_media_embeds(input);
+        assert_eq!(input, output);
+    }
+
+    #[test]
+    fn test_preprocess_url_with_leading_whitespace_replaced() {
+        let input = "  https://www.youtube.com/watch?v=dQw4w9WgXcQ  ";
+        let output = preprocess_media_embeds(input);
+        assert!(output.contains("kn-media-embed"), "got: {output}");
+    }
+
+    #[test]
+    fn test_preprocess_multiple_embeds_in_text() {
+        let input = "https://www.youtube.com/watch?v=dQw4w9WgXcQ\n\nhttps://www.instagram.com/p/ABC123/";
+        let output = preprocess_media_embeds(input);
+        assert!(output.contains("data-kn-embed-type=\"youtube\""), "got: {output}");
+        assert!(output.contains("data-kn-embed-type=\"instagram\""), "got: {output}");
     }
 }
