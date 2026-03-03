@@ -1415,6 +1415,52 @@ fn can_redo(
     workspaces.get(label).map(|ws| ws.can_redo()).unwrap_or(false)
 }
 
+/// Undoes the most recent script mutation (isolated from the note undo stack).
+#[tauri::command]
+fn script_undo(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> std::result::Result<UndoResult, String> {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
+    workspace.script_undo().map_err(|e| e.to_string())
+}
+
+/// Re-applies the most recently undone script mutation.
+#[tauri::command]
+fn script_redo(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> std::result::Result<UndoResult, String> {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
+    workspace.script_redo().map_err(|e| e.to_string())
+}
+
+/// Returns true if there is a script action to undo.
+#[tauri::command]
+fn can_script_undo(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> bool {
+    let label = window.label();
+    let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    workspaces.get(label).map(|ws| ws.can_script_undo()).unwrap_or(false)
+}
+
+/// Returns true if there is a script action to redo.
+#[tauri::command]
+fn can_script_redo(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> bool {
+    let label = window.label();
+    let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    workspaces.get(label).map(|ws| ws.can_script_redo()).unwrap_or(false)
+}
+
 /// Returns the workspace undo history limit.
 #[tauri::command]
 fn get_undo_limit(
@@ -1438,6 +1484,35 @@ fn set_undo_limit(
     let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let ws = workspaces.get_mut(label).ok_or("No workspace open")?;
     ws.set_undo_limit(limit).map_err(|e| e.to_string())
+}
+
+/// Opens an undo group. Subsequent mutations accumulate in a staging buffer
+/// until `end_undo_group` is called, collapsing them into a single undo step.
+/// Nested calls are ignored — the outermost begin/end pair wins.
+#[tauri::command]
+fn begin_undo_group(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    if let Some(ws) = workspaces.get_mut(label) {
+        ws.begin_undo_group();
+    }
+}
+
+/// Closes the open undo group and collapses buffered mutations into one entry.
+/// No-op if no group is open or the buffer is empty.
+#[tauri::command]
+fn end_undo_group(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    if let Some(ws) = workspaces.get_mut(label) {
+        ws.end_undo_group();
+    }
 }
 
 // ── Settings commands ─────────────────────────────────────────────
@@ -1950,6 +2025,12 @@ pub fn run() {
             can_redo,
             get_undo_limit,
             set_undo_limit,
+            begin_undo_group,
+            end_undo_group,
+            script_undo,
+            script_redo,
+            can_script_undo,
+            can_script_redo,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

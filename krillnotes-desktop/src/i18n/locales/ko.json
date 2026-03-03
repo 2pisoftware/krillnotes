@@ -20,7 +20,9 @@
     "next": "다음",
     "add": "+ 추가",
     "yes": "예",
-    "no": "아니요"
+    "no": "아니요",
+    "undo": "Undo",
+    "redo": "Redo"
   },
   "settings": {
     "title": "설정",
@@ -90,7 +92,9 @@
     "failedDelete": "삭제하지 못했습니다: {{error}}",
     "failedImport": "파일을 읽지 못했습니다: {{error}}",
     "failedReorder": "스크립트를 재정렬하지 못했습니다: {{error}}",
-    "reloadErrors": "스크립트 다시 로드 오류:\n{{errors}}"
+    "reloadErrors": "스크립트 다시 로드 오류:\n{{errors}}",
+    "undoLastSave": "Undo last script save",
+    "redoLastSave": "Redo last script save"
   },
   "workspace": {
     "openTitle": "작업 공간 열기",

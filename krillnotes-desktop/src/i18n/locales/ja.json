@@ -20,7 +20,9 @@
     "next": "次へ",
     "add": "+ 追加",
     "yes": "はい",
-    "no": "いいえ"
+    "no": "いいえ",
+    "undo": "Undo",
+    "redo": "Redo"
   },
   "settings": {
     "title": "設定",
@@ -90,7 +92,9 @@
     "failedDelete": "削除に失敗しました: {{error}}",
     "failedImport": "ファイルの読み込みに失敗しました: {{error}}",
     "failedReorder": "スクリプトの並び替えに失敗しました: {{error}}",
-    "reloadErrors": "スクリプト再読み込みエラー:\n{{errors}}"
+    "reloadErrors": "スクリプト再読み込みエラー:\n{{errors}}",
+    "undoLastSave": "Undo last script save",
+    "redoLastSave": "Redo last script save"
   },
   "workspace": {
     "openTitle": "ワークスペースを開く",

@@ -85,6 +85,9 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
   // Undo/redo state
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  // Tracks whether a note-creation undo group is currently open.
+  // Set to true just before create_note_with_type; cleared when edit mode ends.
+  const pendingUndoGroupRef = useRef(false);
 
   // Tag cloud
   const [workspaceTags, setWorkspaceTags] = useState<string[]>([]);
@@ -174,6 +177,16 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
       if (!msg.includes('Nothing to undo') && !msg.includes('Nothing to redo')) {
         console.error('[undo/redo]', e);
       }
+    }
+  }, [refreshUndoState]);
+
+  // Closes the pending note-creation undo group (if one is open) and refreshes state.
+  // Safe to call at any time — if no group is open, end_undo_group is a no-op.
+  const closePendingUndoGroup = useCallback(async () => {
+    if (pendingUndoGroupRef.current) {
+      pendingUndoGroupRef.current = false;
+      await invoke('end_undo_group');
+      await refreshUndoState();
     }
   }, [refreshUndoState]);
 
@@ -392,6 +405,8 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
   }, [draggedNoteId, handleHoverEnd]);
 
   const handleSelectNote = async (noteId: string) => {
+    // Close any pending note-creation undo group before switching notes.
+    await closePendingUndoGroup();
     setViewHistory([]);
     setSelectedNoteId(noteId);
     try {
@@ -538,6 +553,8 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
   const handleNoteCreated = async (noteId: string) => {
     const fetchedNotes = await loadNotes();
     if (!fetchedNotes.some(n => n.id === noteId)) return;
+    // Mark that a note-creation undo group is open so handleEditDone can close it.
+    pendingUndoGroupRef.current = true;
     await handleSelectNote(noteId);
     setRequestEditMode(prev => prev + 1);
     await refreshUndoState();
@@ -587,7 +604,8 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
     if (available.length === 1) {
       const parentId = position === 'root' ? null : referenceNoteId;
       const tauriPosition = position === 'root' ? 'child' : position;
-      invoke<Note>('create_note_with_type', { parentId, position: tauriPosition, nodeType: available[0] })
+      invoke('begin_undo_group')
+        .then(() => invoke<Note>('create_note_with_type', { parentId, position: tauriPosition, nodeType: available[0] }))
         .then(note => handleNoteCreated(note.id).then(() => refreshUndoState()))
         .catch(err => console.error('Failed to create note:', err));
       return;
@@ -675,6 +693,7 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
   };
 
   const handleEditDone = () => {
+    closePendingUndoGroup();
     requestAnimationFrame(() => {
       // targets the TreeView container div which carries tabIndex={0}
       treePanelRef.current?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();

@@ -65,6 +65,10 @@ pub struct Workspace {
     pub(crate) undo_stack: Vec<UndoEntry>,
     pub(crate) redo_stack: Vec<UndoEntry>,
     pub(crate) undo_limit: usize,
+    /// Separate undo/redo stacks for script-only mutations (create/update/delete script).
+    /// Isolated from the note undo stack so script saves don't interleave with note edits.
+    pub(crate) script_undo_stack: Vec<UndoEntry>,
+    pub(crate) script_redo_stack: Vec<UndoEntry>,
     /// When Some, mutations accumulate here instead of pushing to undo_stack.
     undo_group_buffer: Option<Vec<UndoEntry>>,
     /// When `true`, `push_undo` is a no-op. Set while `apply_retract_inverse_internal`
@@ -234,6 +238,8 @@ impl Workspace {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             undo_limit,
+            script_undo_stack: Vec::new(),
+            script_redo_stack: Vec::new(),
             undo_group_buffer: None,
             inside_undo: false,
         })
@@ -324,6 +330,8 @@ impl Workspace {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             undo_limit,
+            script_undo_stack: Vec::new(),
+            script_redo_stack: Vec::new(),
             undo_group_buffer: None,
             inside_undo: false,
         };
@@ -335,6 +343,10 @@ impl Workspace {
                 eprintln!("Failed to load script '{}': {}", script.name, e);
             }
         }
+
+        // Clean up any .enc.trash files left from a previous session.
+        // Undo stacks are in-session only, so prior-session trash is always safe to remove.
+        ws.purge_attachment_trash();
 
         Ok(ws)
     }
@@ -388,6 +400,63 @@ impl Workspace {
         !self.redo_stack.is_empty()
     }
 
+    /// Returns `true` if there is at least one script action to undo.
+    pub fn can_script_undo(&self) -> bool {
+        !self.script_undo_stack.is_empty()
+    }
+
+    /// Returns `true` if there is at least one script action to redo.
+    pub fn can_script_redo(&self) -> bool {
+        !self.script_redo_stack.is_empty()
+    }
+
+    /// Undoes the most recent script mutation (create/update/delete script).
+    ///
+    /// Script undo is separate from note undo to prevent script saves from
+    /// interleaving with note edits in the workspace undo stack.
+    pub fn script_undo(&mut self) -> Result<UndoResult> {
+        let entry = self.script_undo_stack.pop()
+            .ok_or_else(|| KrillnotesError::ValidationFailed("Nothing to undo".into()))?;
+
+        let redo_inverse = self.build_redo_inverse(&entry)?;
+
+        self.inside_undo = true;
+        let apply_result = self.apply_retract_inverse_internal(&entry.inverse);
+        self.inside_undo = false;
+        apply_result?;
+
+        self.script_redo_stack.push(UndoEntry {
+            retracted_ids: entry.retracted_ids,
+            inverse: redo_inverse,
+            propagate: entry.propagate,
+        });
+        Ok(UndoResult { affected_note_id: None })
+    }
+
+    /// Re-applies the most recently undone script mutation.
+    pub fn script_redo(&mut self) -> Result<UndoResult> {
+        let entry = self.script_redo_stack.pop()
+            .ok_or_else(|| KrillnotesError::ValidationFailed("Nothing to redo".into()))?;
+
+        let new_undo_inverse = self.build_redo_inverse(&entry)?;
+
+        self.inside_undo = true;
+        let apply_result = self.apply_retract_inverse_internal(&entry.inverse);
+        self.inside_undo = false;
+        apply_result?;
+
+        self.script_undo_stack.push(UndoEntry {
+            retracted_ids: entry.retracted_ids,
+            inverse: new_undo_inverse,
+            propagate: entry.propagate,
+        });
+        // Trim to undo_limit.
+        if self.script_undo_stack.len() > self.undo_limit {
+            self.script_undo_stack.drain(0..1);
+        }
+        Ok(UndoResult { affected_note_id: None })
+    }
+
     /// Returns the current undo stack depth limit.
     pub fn get_undo_limit(&self) -> usize {
         self.undo_limit
@@ -430,6 +499,19 @@ impl Workspace {
         self.undo_stack.push(entry);
         if self.undo_stack.len() > self.undo_limit {
             self.undo_stack.drain(0..1);
+        }
+    }
+
+    /// Pushes an entry onto the script undo stack. Clears the script redo stack.
+    /// No-op while `inside_undo` is `true`.
+    fn push_script_undo(&mut self, entry: UndoEntry) {
+        if self.inside_undo {
+            return;
+        }
+        self.script_redo_stack.clear();
+        self.script_undo_stack.push(entry);
+        if self.script_undo_stack.len() > self.undo_limit {
+            self.script_undo_stack.drain(0..1);
         }
     }
 
@@ -628,22 +710,61 @@ impl Workspace {
                 })
             }
             RetractInverse::DeleteScript { script_id } => {
-                // Script was deleted by undo (undoing CreateScript). Redo = re-delete.
-                // Script no longer exists; return a stub ScriptRestore as placeholder.
-                // apply_retract_inverse_internal(DeleteScript) just deletes — no data
-                // needed for the deletion itself, but the redo entry must invert to
-                // something that can be applied should the redo itself be undone.
-                Ok(RetractInverse::ScriptRestore {
-                    script_id: script_id.clone(),
-                    name: String::new(),
-                    description: String::new(),
-                    source_code: String::new(),
-                    load_order: 0,
-                    enabled: false,
-                })
+                // Undo of CreateScript: redo should re-delete. Capture the
+                // script's current state so that a subsequent undo-of-redo can
+                // restore it fully (rather than using an empty placeholder).
+                if let Ok(current) = self.get_user_script(script_id) {
+                    Ok(RetractInverse::ScriptRestore {
+                        script_id: script_id.clone(),
+                        name: current.name,
+                        description: current.description,
+                        source_code: current.source_code,
+                        load_order: current.load_order,
+                        enabled: current.enabled,
+                    })
+                } else {
+                    // Script already absent — redo entry is a no-op placeholder.
+                    Ok(RetractInverse::ScriptRestore {
+                        script_id: script_id.clone(),
+                        name: String::new(),
+                        description: String::new(),
+                        source_code: String::new(),
+                        load_order: 0,
+                        enabled: false,
+                    })
+                }
             }
             RetractInverse::ScriptRestore { script_id, .. } => {
-                Ok(RetractInverse::DeleteScript { script_id: script_id.clone() })
+                // If the script exists now (undo of UpdateUserScript), redo must
+                // restore it to its current (pre-undo) state, not delete it.
+                // If it doesn't exist (undo of DeleteUserScript — script absent),
+                // redo should delete it again.
+                if let Ok(current) = self.get_user_script(script_id) {
+                    Ok(RetractInverse::ScriptRestore {
+                        script_id: script_id.clone(),
+                        name: current.name,
+                        description: current.description,
+                        source_code: current.source_code,
+                        load_order: current.load_order,
+                        enabled: current.enabled,
+                    })
+                } else {
+                    Ok(RetractInverse::DeleteScript { script_id: script_id.clone() })
+                }
+            }
+            RetractInverse::AttachmentRestore { meta } => {
+                // Undo was AttachmentRestore (undoing a DeleteAttachment).
+                // build_redo_inverse is called BEFORE undo is applied, so the .enc.trash
+                // file exists and the DB row is absent. Redo should soft-delete again.
+                Ok(RetractInverse::AttachmentSoftDelete { attachment_id: meta.id.clone() })
+            }
+            RetractInverse::AttachmentSoftDelete { attachment_id } => {
+                // Undo was AttachmentSoftDelete (redoing a DeleteAttachment).
+                // build_redo_inverse is called BEFORE undo is applied, so the .enc file
+                // exists and the DB row is present. Redo should restore to prior state.
+                // Capture current meta from DB to populate the restore entry.
+                let meta = self.get_attachment_meta(attachment_id)?;
+                Ok(RetractInverse::AttachmentRestore { meta })
             }
             RetractInverse::Batch(items) => {
                 // Build redo inverses in reverse order (LIFO mirror).
@@ -2523,9 +2644,9 @@ impl Workspace {
 
         tx.commit()?;
 
-        // Push undo entry — inverse of CreateUserScript is DeleteScript.
+        // Push onto the script-specific undo stack (isolated from note undo).
         let op_id = op.operation_id().to_string();
-        self.push_undo(UndoEntry {
+        self.push_script_undo(UndoEntry {
             retracted_ids: vec![op_id],
             inverse: RetractInverse::DeleteScript { script_id: id.clone() },
             propagate: true,
@@ -2596,9 +2717,9 @@ impl Workspace {
 
         tx.commit()?;
 
-        // Push undo entry — inverse of UpdateUserScript is ScriptRestore to old state.
+        // Push onto the script-specific undo stack (isolated from note undo).
         let op_id = op.operation_id().to_string();
-        self.push_undo(UndoEntry {
+        self.push_script_undo(UndoEntry {
             retracted_ids: vec![op_id],
             inverse: RetractInverse::ScriptRestore {
                 script_id: script_id.to_string(),
@@ -2638,9 +2759,9 @@ impl Workspace {
 
         tx.commit()?;
 
-        // Push undo entry — inverse of DeleteUserScript is ScriptRestore.
+        // Push onto the script-specific undo stack (isolated from note undo).
         let op_id = op.operation_id().to_string();
-        self.push_undo(UndoEntry {
+        self.push_script_undo(UndoEntry {
             retracted_ids: vec![op_id],
             inverse: RetractInverse::ScriptRestore {
                 script_id: script_id.to_string(),
@@ -3082,19 +3203,76 @@ impl Workspace {
     }
 
     /// Deletes an attachment: removes the `.enc` file and the DB row.
+    /// Returns the metadata for a single attachment by ID.
+    fn get_attachment_meta(&self, attachment_id: &str) -> Result<AttachmentMeta> {
+        let row = self.storage.connection().query_row(
+            "SELECT id, note_id, filename, mime_type, size_bytes, hash_sha256, salt, created_at
+             FROM attachments WHERE id = ?",
+            [attachment_id],
+            |row| {
+                let salt_bytes: Vec<u8> = row.get(6)?;
+                Ok(AttachmentMeta {
+                    id: row.get(0)?,
+                    note_id: row.get(1)?,
+                    filename: row.get(2)?,
+                    mime_type: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    hash_sha256: row.get(5)?,
+                    salt: hex::encode(&salt_bytes),
+                    created_at: row.get(7)?,
+                })
+            },
+        )?;
+        Ok(row)
+    }
+
+    /// Soft-deletes an attachment: renames `{id}.enc` → `{id}.enc.trash` and removes the
+    /// DB row. Pushes an `AttachmentRestore` entry onto the undo stack so the deletion
+    /// can be reversed. The `.enc.trash` file is cleaned up when the undo entry is
+    /// discarded (workspace close or stack overflow past the limit).
     pub fn delete_attachment(&mut self, attachment_id: &str) -> Result<()> {
+        // Capture metadata before deletion for the undo entry.
+        let meta = self.get_attachment_meta(attachment_id)?;
+
         let enc_path = self
             .workspace_root
             .join("attachments")
             .join(format!("{attachment_id}.enc"));
+        let trash_path = self
+            .workspace_root
+            .join("attachments")
+            .join(format!("{attachment_id}.enc.trash"));
+
         if enc_path.exists() {
-            std::fs::remove_file(&enc_path)?;
+            std::fs::rename(&enc_path, &trash_path)?;
         }
         self.storage.connection().execute(
             "DELETE FROM attachments WHERE id = ?",
             [attachment_id],
         )?;
+
+        self.push_undo(UndoEntry {
+            retracted_ids: vec![],
+            inverse: RetractInverse::AttachmentRestore { meta },
+            propagate: false,
+        });
         Ok(())
+    }
+
+    /// Purges any `.enc.trash` files left over from a previous session.
+    ///
+    /// Should be called once on workspace open. Since undo stacks are in-session
+    /// only, all `.enc.trash` files from prior sessions are safe to remove.
+    fn purge_attachment_trash(&self) {
+        let trash_dir = self.workspace_root.join("attachments");
+        if let Ok(entries) = std::fs::read_dir(&trash_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("trash") {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
     }
 
     /// Returns the workspace-level max attachment size in bytes, or `None` if unlimited.
@@ -3274,6 +3452,46 @@ impl Workspace {
                     ],
                 )?;
                 self.reload_scripts()?;
+                Ok(None)
+            }
+
+            RetractInverse::AttachmentRestore { meta } => {
+                // Undo of DeleteAttachment: rename .enc.trash back to .enc, re-insert DB row.
+                let trash_path = self.workspace_root.join("attachments")
+                    .join(format!("{}.enc.trash", meta.id));
+                let enc_path = self.workspace_root.join("attachments")
+                    .join(format!("{}.enc", meta.id));
+                if trash_path.exists() {
+                    std::fs::rename(&trash_path, &enc_path)?;
+                }
+                let salt_bytes = hex::decode(&meta.salt)
+                    .unwrap_or_else(|_| meta.salt.as_bytes().to_vec());
+                self.storage.connection().execute(
+                    "INSERT OR IGNORE INTO attachments
+                     (id, note_id, filename, mime_type, size_bytes, hash_sha256, salt, created_at)
+                     VALUES (?,?,?,?,?,?,?,?)",
+                    rusqlite::params![
+                        meta.id, meta.note_id, meta.filename, meta.mime_type,
+                        meta.size_bytes as i64, meta.hash_sha256,
+                        salt_bytes.as_slice(), meta.created_at,
+                    ],
+                )?;
+                Ok(None)
+            }
+
+            RetractInverse::AttachmentSoftDelete { attachment_id } => {
+                // Redo of DeleteAttachment: rename .enc → .enc.trash, delete DB row.
+                let enc_path = self.workspace_root.join("attachments")
+                    .join(format!("{attachment_id}.enc"));
+                let trash_path = self.workspace_root.join("attachments")
+                    .join(format!("{attachment_id}.enc.trash"));
+                if enc_path.exists() {
+                    std::fs::rename(&enc_path, &trash_path)?;
+                }
+                self.storage.connection().execute(
+                    "DELETE FROM attachments WHERE id = ?",
+                    [attachment_id],
+                )?;
                 Ok(None)
             }
 
@@ -5199,7 +5417,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     }
 
     #[test]
-    fn test_delete_attachment_removes_file_and_row() {
+    fn test_delete_attachment_soft_deletes_and_is_undoable() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
         let mut ws = Workspace::create(&db_path, "testpass").unwrap();
@@ -5207,11 +5425,27 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
 
         let meta = ws.attach_file(&root_id, "bye.txt", None, b"temp").unwrap();
         let enc_path = dir.path().join("attachments").join(format!("{}.enc", meta.id));
+        let trash_path = dir.path().join("attachments").join(format!("{}.enc.trash", meta.id));
         assert!(enc_path.exists());
 
+        // Soft-delete: file moves to .enc.trash, DB row removed, undo entry pushed.
         ws.delete_attachment(&meta.id).unwrap();
-        assert!(!enc_path.exists(), "File must be deleted from disk");
-        assert!(ws.get_attachments(&root_id).unwrap().is_empty());
+        assert!(!enc_path.exists(), ".enc must be gone after soft-delete");
+        assert!(trash_path.exists(), ".enc.trash must exist after soft-delete");
+        assert!(ws.get_attachments(&root_id).unwrap().is_empty(), "DB row must be gone");
+        assert!(ws.can_undo(), "undo entry must be present");
+
+        // Undo: file restored, DB row re-inserted.
+        ws.undo().unwrap();
+        assert!(enc_path.exists(), ".enc must be restored after undo");
+        assert!(!trash_path.exists(), ".enc.trash must be gone after undo");
+        assert_eq!(ws.get_attachments(&root_id).unwrap().len(), 1, "DB row must be back");
+
+        // Redo: soft-delete again.
+        ws.redo().unwrap();
+        assert!(!enc_path.exists(), ".enc must be gone after redo");
+        assert!(trash_path.exists(), ".enc.trash must exist after redo");
+        assert!(ws.get_attachments(&root_id).unwrap().is_empty(), "DB row must be gone after redo");
     }
 
     #[test]
@@ -5426,11 +5660,13 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
 
         let src = "// @name: TestScript\n// @description: desc\n";
         let (script, _) = ws.create_user_script(src).unwrap();
-        ws.undo_stack.clear();
+        ws.script_undo_stack.clear();
 
         ws.delete_user_script(&script.id).unwrap();
-        assert!(ws.can_undo());
-        assert!(matches!(ws.undo_stack[0].inverse, RetractInverse::ScriptRestore { .. }));
+        // Script operations now land on the separate script_undo_stack.
+        assert!(ws.can_script_undo());
+        assert!(!ws.can_undo(), "note undo stack must be unaffected by script ops");
+        assert!(matches!(ws.script_undo_stack[0].inverse, RetractInverse::ScriptRestore { .. }));
     }
 
     #[test]
@@ -5526,5 +5762,66 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         assert_eq!(ws.undo_stack.len(), 5);
         ws.set_undo_limit(3).unwrap();
         assert_eq!(ws.undo_stack.len(), 3, "oldest entries should have been dropped");
+    }
+
+    #[test]
+    fn test_undo_redo_update_script_full_cycle() {
+        // Regression: build_redo_inverse(ScriptRestore) used to always return
+        // DeleteScript, causing redo to delete the script instead of re-applying
+        // the update.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+
+        let src_v1 = "// @name: CycleScript\n// @description: v1\nlet x = 1;";
+        let (script, _) = ws.create_user_script(src_v1).unwrap();
+        ws.script_undo_stack.clear();
+
+        let src_v2 = "// @name: CycleScript\n// @description: v2\nlet x = 2;";
+        ws.update_user_script(&script.id, src_v2).unwrap();
+
+        // Script undo: should restore v1.
+        ws.script_undo().unwrap();
+        let after_undo = ws.get_user_script(&script.id).unwrap();
+        assert_eq!(after_undo.source_code, src_v1, "script_undo should restore v1");
+        assert!(ws.can_script_redo());
+
+        // Script redo: should restore v2 (not delete the script!).
+        ws.script_redo().unwrap();
+        let after_redo = ws.get_user_script(&script.id).unwrap();
+        assert_eq!(after_redo.source_code, src_v2, "script_redo should re-apply v2");
+
+        // Script undo again: back to v1.
+        ws.script_undo().unwrap();
+        let final_state = ws.get_user_script(&script.id).unwrap();
+        assert_eq!(final_state.source_code, src_v1, "second script_undo should restore v1 again");
+    }
+
+    #[test]
+    fn test_undo_redo_create_script_full_cycle() {
+        // Undo of CreateScript (DeleteScript inverse) should be able to re-create
+        // the script with its real content on redo, not an empty placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.krillnotes");
+        let mut ws = Workspace::create(&path, "").unwrap();
+
+        let src = "// @name: RedoScript\n// @description: test\nlet y = 42;";
+        let (script, _) = ws.create_user_script(src).unwrap();
+        ws.script_undo_stack.clear();
+        // Re-push just the create entry we care about onto the script stack.
+        ws.push_script_undo(UndoEntry {
+            retracted_ids: vec!["test-op".into()],
+            inverse: RetractInverse::DeleteScript { script_id: script.id.clone() },
+            propagate: true,
+        });
+
+        // Script undo: script deleted.
+        ws.script_undo().unwrap();
+        assert!(ws.get_user_script(&script.id).is_err(), "script deleted by script_undo");
+
+        // Script redo: script recreated with real content.
+        ws.script_redo().unwrap();
+        let after_redo = ws.get_user_script(&script.id).unwrap();
+        assert_eq!(after_redo.source_code, src, "script_redo must restore real source, not empty");
     }
 }

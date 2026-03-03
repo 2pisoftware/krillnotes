@@ -20,7 +20,9 @@
     "next": "Suivant",
     "add": "+ Ajouter",
     "yes": "Oui",
-    "no": "Non"
+    "no": "Non",
+    "undo": "Undo",
+    "redo": "Redo"
   },
   "settings": {
     "title": "Paramètres",
@@ -90,7 +92,9 @@
     "failedDelete": "Échec de la suppression : {{error}}",
     "failedImport": "Échec de la lecture du fichier : {{error}}",
     "failedReorder": "Échec du réordonnancement des scripts : {{error}}",
-    "reloadErrors": "Erreurs lors du rechargement des scripts :\n{{errors}}"
+    "reloadErrors": "Erreurs lors du rechargement des scripts :\n{{errors}}",
+    "undoLastSave": "Undo last script save",
+    "redoLastSave": "Redo last script save"
   },
   "workspace": {
     "openTitle": "Ouvrir un espace de travail",

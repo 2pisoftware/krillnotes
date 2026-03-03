@@ -55,6 +55,20 @@ pub enum RetractInverse {
         enabled: bool,
     },
 
+    /// Inverse of `DeleteAttachment` — restores a soft-deleted attachment.
+    ///
+    /// The `.enc.trash` file is renamed back to `.enc` and the DB row is re-inserted.
+    AttachmentRestore {
+        meta: AttachmentMeta,
+    },
+
+    /// Inverse of `AttachmentRestore` (i.e. redo of an undone DeleteAttachment).
+    ///
+    /// Re-soft-deletes the attachment: renames `.enc` → `.enc.trash` and removes the DB row.
+    AttachmentSoftDelete {
+        attachment_id: String,
+    },
+
     /// Inverse of a compound action (tree hook, batch import).
     /// Items are applied in **reverse** order (LIFO — children before parent).
     Batch(Vec<RetractInverse>),

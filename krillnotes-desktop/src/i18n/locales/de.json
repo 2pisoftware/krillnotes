@@ -20,7 +20,9 @@
     "next": "Weiter",
     "add": "+ Hinzufügen",
     "yes": "Ja",
-    "no": "Nein"
+    "no": "Nein",
+    "undo": "Undo",
+    "redo": "Redo"
   },
   "settings": {
     "title": "Einstellungen",
@@ -90,7 +92,9 @@
     "failedDelete": "Löschen fehlgeschlagen: {{error}}",
     "failedImport": "Datei konnte nicht gelesen werden: {{error}}",
     "failedReorder": "Skripte konnten nicht neu angeordnet werden: {{error}}",
-    "reloadErrors": "Fehler beim Neuladen der Skripte:\n{{errors}}"
+    "reloadErrors": "Fehler beim Neuladen der Skripte:\n{{errors}}",
+    "undoLastSave": "Undo last script save",
+    "redoLastSave": "Redo last script save"
   },
   "workspace": {
     "openTitle": "Arbeitsbereich öffnen",
