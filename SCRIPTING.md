@@ -206,7 +206,7 @@ empty. Use `display_image()` or `display_download_link()` in `on_view` to render
 ```rhai
 let cover_uuid = note.fields["cover"];
 if cover_uuid != () {
-    display_image("field:cover", 400, "Cover image")
+    display_image(cover_uuid, 400, "Cover image")
 }
 ```
 
@@ -857,33 +857,32 @@ stars(note.fields["rating"] ?? 0)          // e.g. "★★★☆☆" for 3 out o
 stars(note.fields["score"] ?? 0, 10)       // out of 10
 ```
 
-### `display_image(source, width, alt)`
+### `display_image(uuid, width, alt)`
 
 Embeds an attached image inline in `on_view` or `on_hover` output. The image is
 base64-encoded server-side and rendered synchronously — no asynchronous loading.
 
-`source` is one of:
-- `"field:fieldName"` — reads the attachment UUID from a `file` field
-- `"attach:filename"` — finds an attachment by its original filename
+`uuid` is the attachment UUID — pass `note.fields["fieldName"]` directly to get it
+from a `file` field.
 
 `width` and `alt` are optional (pass `0` or `""` to omit them).
 
 ```rhai
-display_image("field:cover", 400, "Cover image")
-display_image("attach:diagram.png", 0, "")
+display_image(note.fields["cover"], 400, "Cover image")
+display_image(note.fields["photo"], 200, note.title)
 ```
 
-### `display_download_link(source, label)`
+### `display_download_link(uuid, label)`
 
 Renders a clickable download link for an attachment in `on_view` output. Clicking the
 link decrypts and downloads the file on demand.
 
-`source` follows the same `"field:fieldName"` / `"attach:filename"` convention as
-`display_image`. `label` is the link text shown to the user.
+`uuid` is the attachment UUID — use `note.fields["fieldName"]` to obtain it from a
+`file` field. `label` is the link text shown to the user.
 
 ```rhai
-display_download_link("field:document", "Download PDF")
-display_download_link("attach:report.xlsx", "Download Report")
+display_download_link(note.fields["document"], "Download PDF")
+display_download_link(note.fields["report"], "Download Report")
 ```
 
 ### `divider()`
