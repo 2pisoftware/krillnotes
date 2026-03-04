@@ -1883,6 +1883,10 @@ pub fn run() {
                 // Remove workspace state when a window is destroyed so the same
                 // file can be reopened after its window has been closed.
                 tauri::WindowEvent::Destroyed => {
+                    // Persist cached metadata before dropping the workspace.
+                    if let Some(ws) = state.workspaces.lock().expect("Mutex poisoned").get(&label) {
+                        let _ = ws.write_info_json();
+                    }
                     state.workspaces.lock().expect("Mutex poisoned").remove(&label);
                     state.workspace_paths.lock().expect("Mutex poisoned").remove(&label);
 
