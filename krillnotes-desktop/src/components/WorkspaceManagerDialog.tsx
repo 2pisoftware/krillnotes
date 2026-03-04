@@ -172,7 +172,7 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
   // --- Duplicate flow ---
   const handleDuplicateBegin = () => {
     if (!selected) return;
-    setDupNewName(`Copy of ${selected.name}`);
+    setDupNewName(t('workspaceManager.duplicateCopyPrefix', { name: selected.name }));
     setDupSourcePassword('');
     setDupNewPassword('');
     setDupNewPasswordConfirm('');
@@ -184,11 +184,11 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
     if (!selected) return;
 
     if (!dupNewName.trim()) {
-      setDupError('Please enter a name for the duplicate workspace.');
+      setDupError(t('workspaceManager.duplicateNameRequired'));
       return;
     }
     if (dupNewPassword.length > 0 && dupNewPassword !== dupNewPasswordConfirm) {
-      setDupError('New passwords do not match.');
+      setDupError(t('workspaceManager.duplicatePasswordMismatch'));
       return;
     }
 
@@ -229,23 +229,23 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
       <div className="bg-background border border-secondary rounded-lg w-[560px] max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="px-6 pt-6 pb-3 flex items-center justify-between">
-          <h2 className="text-xl font-bold">Manage Workspaces</h2>
+          <h2 className="text-xl font-bold">{t('workspaceManager.title')}</h2>
 
           {/* Sort toggle — only in list view */}
           {activeView === 'list' && (
             <div className="flex items-center gap-1 text-sm">
-              <span className="text-muted-foreground mr-1">Sort:</span>
+              <span className="text-muted-foreground mr-1">{t('workspaceManager.sortLabel')}</span>
               <button
                 onClick={() => setSortKey('name')}
                 className={`px-2 py-1 rounded ${sortKey === 'name' ? 'bg-secondary font-medium' : 'hover:bg-secondary/50'}`}
               >
-                Name
+                {t('workspaceManager.sortName')}
               </button>
               <button
                 onClick={() => setSortKey('modified')}
                 className={`px-2 py-1 rounded ${sortKey === 'modified' ? 'bg-secondary font-medium' : 'hover:bg-secondary/50'}`}
               >
-                Modified
+                {t('workspaceManager.sortModified')}
               </button>
             </div>
           )}
@@ -290,29 +290,29 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
           <div className="mx-6 mt-2 p-3 bg-secondary/30 border border-secondary rounded text-sm">
             <div className="grid grid-cols-5 gap-2 text-center">
               <div>
-                <div className="text-muted-foreground text-xs mb-0.5">Created</div>
+                <div className="text-muted-foreground text-xs mb-0.5">{t('workspaceManager.infoCreated')}</div>
                 <div className="font-medium">
                   {selected.createdAt !== null ? formatDate(selected.createdAt) : '—'}
                 </div>
               </div>
               <div>
-                <div className="text-muted-foreground text-xs mb-0.5">Modified</div>
+                <div className="text-muted-foreground text-xs mb-0.5">{t('workspaceManager.infoModified')}</div>
                 <div className="font-medium">{formatDate(selected.lastModified)}</div>
               </div>
               <div>
-                <div className="text-muted-foreground text-xs mb-0.5">Notes</div>
+                <div className="text-muted-foreground text-xs mb-0.5">{t('workspaceManager.infoNotes')}</div>
                 <div className="font-medium">
                   {selected.noteCount !== null ? selected.noteCount : '—'}
                 </div>
               </div>
               <div>
-                <div className="text-muted-foreground text-xs mb-0.5">Attachments</div>
+                <div className="text-muted-foreground text-xs mb-0.5">{t('workspaceManager.infoAttachments')}</div>
                 <div className="font-medium">
                   {selected.attachmentCount !== null ? selected.attachmentCount : '—'}
                 </div>
               </div>
               <div>
-                <div className="text-muted-foreground text-xs mb-0.5">Size</div>
+                <div className="text-muted-foreground text-xs mb-0.5">{t('workspaceManager.infoSize')}</div>
                 <div className="font-medium">{formatSize(selected.sizeBytes)}</div>
               </div>
             </div>
@@ -322,9 +322,9 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
         {/* Delete confirmation banner */}
         {activeView === 'delete-confirm' && selected && (
           <div className="mx-6 mt-2 p-4 bg-red-500/10 border border-red-500/30 rounded text-sm">
-            <p className="text-red-500 font-medium mb-1">This cannot be undone.</p>
+            <p className="text-red-500 font-medium mb-1">{t('workspaceManager.deleteConfirmTitle')}</p>
             <p className="text-muted-foreground mb-3">
-              Permanently delete <strong>"{selected.name}"</strong> and all its data?
+              {t('workspaceManager.deleteConfirmBody', { name: selected.name })}
             </p>
             <div className="flex gap-2 justify-end">
               <button
@@ -332,14 +332,14 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
                 disabled={deleting}
                 className="px-3 py-1.5 border border-secondary rounded hover:bg-secondary text-sm"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 onClick={handleDeleteConfirm}
                 disabled={deleting}
                 className="px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-sm"
               >
-                {deleting ? 'Deleting…' : 'Delete forever'}
+                {deleting ? t('workspaceManager.deleting') : t('workspaceManager.deleteForever')}
               </button>
             </div>
           </div>
@@ -348,10 +348,10 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
         {/* Duplicate form */}
         {activeView === 'duplicate-form' && selected && (
           <div className="mx-6 mt-2 p-4 border border-secondary rounded text-sm space-y-3">
-            <p className="font-medium">Duplicate "{selected.name}"</p>
+            <p className="font-medium">{t('workspaceManager.duplicateFormTitle', { name: selected.name })}</p>
 
             <div>
-              <label className="block text-xs text-muted-foreground mb-1">New name</label>
+              <label className="block text-xs text-muted-foreground mb-1">{t('workspaceManager.duplicateNewName')}</label>
               <input
                 type="text"
                 value={dupNewName}
@@ -364,7 +364,7 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
 
             <div>
               <label className="block text-xs text-muted-foreground mb-1">
-                Source password
+                {t('workspaceManager.duplicateSourcePassword')}
               </label>
               <input
                 type="password"
@@ -375,13 +375,14 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
                 autoCapitalize="off"
                 spellCheck={false}
                 className="w-full bg-secondary border border-secondary rounded px-3 py-1.5 text-sm"
-                placeholder="Password for source workspace"
+                placeholder={t('workspaceManager.duplicateSourcePassword')}
               />
             </div>
 
             <div>
               <label className="block text-xs text-muted-foreground mb-1">
-                New password <span className="text-muted-foreground/70">(optional)</span>
+                {t('workspaceManager.duplicateNewPassword')}{' '}
+                <span className="text-muted-foreground/70">{t('workspaceManager.duplicateNewPasswordOptional')}</span>
               </label>
               <input
                 type="password"
@@ -392,13 +393,13 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
                 autoCapitalize="off"
                 spellCheck={false}
                 className="w-full bg-secondary border border-secondary rounded px-3 py-1.5 text-sm"
-                placeholder="Leave blank to use same password"
+                placeholder={t('workspaceManager.duplicateNewPassword')}
               />
             </div>
 
             <div>
               <label className="block text-xs text-muted-foreground mb-1">
-                Confirm new password
+                {t('workspaceManager.duplicateNewPasswordConfirm')}
               </label>
               <input
                 type="password"
@@ -409,7 +410,7 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
                 autoCapitalize="off"
                 spellCheck={false}
                 className="w-full bg-secondary border border-secondary rounded px-3 py-1.5 text-sm"
-                placeholder="Confirm new password"
+                placeholder={t('workspaceManager.duplicateNewPasswordConfirm')}
               />
             </div>
 
@@ -425,14 +426,14 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
                 disabled={duplicating}
                 className="px-3 py-1.5 border border-secondary rounded hover:bg-secondary text-sm"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 onClick={handleDuplicateConfirm}
                 disabled={duplicating || !dupNewName.trim()}
                 className="px-3 py-1.5 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 text-sm"
               >
-                {duplicating ? 'Duplicating…' : 'Duplicate'}
+                {duplicating ? t('workspaceManager.duplicating') : t('workspaceManager.duplicate')}
               </button>
             </div>
           </div>
@@ -455,21 +456,21 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
               disabled={!selected || selected.isOpen || opening}
               className="px-3 py-1.5 bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 text-sm"
             >
-              {opening ? 'Opening…' : 'Open'}
+              {opening ? t('workspaceManager.openingWorkspace') : t('workspaceManager.open')}
             </button>
             <button
               onClick={handleDuplicateBegin}
               disabled={!selected}
               className="px-3 py-1.5 border border-secondary rounded hover:bg-secondary disabled:opacity-50 text-sm"
             >
-              Duplicate
+              {t('workspaceManager.duplicate')}
             </button>
             <button
               onClick={handleDeleteBegin}
               disabled={!selected || selected.isOpen}
               className="px-3 py-1.5 border border-red-500/40 text-red-500 rounded hover:bg-red-500/10 disabled:opacity-50 text-sm"
             >
-              Delete
+              {t('workspaceManager.delete')}
             </button>
           </div>
         )}
@@ -483,7 +484,7 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
             }}
             className="px-4 py-2 border border-secondary rounded hover:bg-secondary text-sm"
           >
-            New
+            {t('workspaceManager.newWorkspace')}
           </button>
           <button
             onClick={onClose}
