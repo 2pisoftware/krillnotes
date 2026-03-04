@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Workspace Manager** — Replaces the minimal Open Workspace dialog with a full manager. The list shows each workspace's name, last-modified date, and size on disk, sortable by name or modified date. Selecting a workspace reveals an info panel with created date, note count, attachment count, and size — all read from an unencrypted `info.json` sidecar so no password is required just to view metadata. Per-workspace actions: **Open** (tries cached password first; falls back to password dialog; also triggered by double-clicking a row), **Duplicate** (uses the export→import pipeline; prompts for new name and optional new password), **Delete** (irreversible red confirmation banner; blocked if the workspace is currently open), and **New** (passes through to the existing New Workspace dialog).
+- **Session password caching on by default** — `cache_workspace_passwords` now defaults to `true`. The in-memory session cache means you are not re-prompted when reopening a workspace you already opened in the same session. Users who prefer to be prompted every time can disable this in Settings.
+
 ---
 
 ## [0.2.6] — 2026-03-04
