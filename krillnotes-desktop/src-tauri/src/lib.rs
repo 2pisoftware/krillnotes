@@ -385,7 +385,7 @@ async fn create_workspace(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-    password: String,
+    identity_uuid: String,
 ) -> std::result::Result<WorkspaceInfo, String> {
     let folder = PathBuf::from(&path);
 
@@ -399,12 +399,44 @@ async fn create_workspace(
             Err("focused_existing".to_string())
         }
         None => {
+            let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+
+            // Generate random DB password (32 bytes, base64-encoded)
+            let password: String = {
+                use base64::Engine;
+                use rand::RngCore;
+                let mut bytes = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut bytes);
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            };
+
             let label = generate_unique_label(&state, &folder);
             std::fs::create_dir_all(&folder)
                 .map_err(|e| format!("Failed to create workspace directory: {e}"))?;
             let db_path = folder.join("notes.db");
             let workspace = Workspace::create(&db_path, &password)
                 .map_err(|e| format!("Failed to create: {e}"))?;
+
+            // Read the workspace_id from the newly created workspace
+            let workspace_uuid = workspace.workspace_id().to_string();
+
+            // Bind workspace to identity (encrypt DB password with identity seed)
+            {
+                let identities = state.unlocked_identities.lock().expect("Mutex poisoned");
+                let unlocked = identities.get(&uuid)
+                    .ok_or_else(|| "Identity is not unlocked".to_string())?;
+                let seed = unlocked.signing_key.to_bytes();
+                let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+                mgr.bind_workspace(
+                    &uuid,
+                    &workspace_uuid,
+                    &db_path.display().to_string(),
+                    &password,
+                    &seed,
+                ).map_err(|e| format!("Failed to bind workspace to identity: {e}"))?;
+            }
+            // Wipe plaintext password from memory
+            drop(password);
 
             let new_window = create_workspace_window(&app, &label, &window)?;
             store_workspace(&state, label.clone(), workspace, folder.clone());
@@ -431,7 +463,6 @@ async fn open_workspace(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-    password: String,
 ) -> std::result::Result<WorkspaceInfo, String> {
     let folder = PathBuf::from(&path);
 
@@ -447,7 +478,32 @@ async fn open_workspace(
         None => {
             let label = generate_unique_label(&state, &folder);
             let db_path = folder.join("notes.db");
-            let workspace = Workspace::open(&db_path, &password)
+
+            // Read workspace_id from info.json
+            let (ws_uuid_opt, _, _, _) = read_info_json_full(&folder);
+            let workspace_uuid = ws_uuid_opt
+                .ok_or_else(|| "IDENTITY_REQUIRED".to_string())?;
+
+            // Look up which identity this workspace is bound to and decrypt the DB password
+            let db_password = {
+                let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+                let binding = mgr.get_workspace_binding(&workspace_uuid)
+                    .map_err(|e: KrillnotesError| e.to_string())?
+                    .ok_or_else(|| "IDENTITY_REQUIRED".to_string())?;
+                let identity_uuid = binding.identity_uuid;
+
+                // Check if identity is unlocked
+                let identities = state.unlocked_identities.lock().expect("Mutex poisoned");
+                let unlocked = identities.get(&identity_uuid)
+                    .ok_or_else(|| format!("IDENTITY_LOCKED:{}", identity_uuid))?;
+                let seed = unlocked.signing_key.to_bytes();
+                drop(identities);
+
+                mgr.decrypt_db_password(&workspace_uuid, &seed)
+                    .map_err(|e| format!("Failed to decrypt DB password: {e}"))?
+            };
+
+            let workspace = Workspace::open(&db_path, &db_password)
                 .map_err(|e| match e {
                     KrillnotesError::WrongPassword => "WRONG_PASSWORD".to_string(),
                     KrillnotesError::UnencryptedWorkspace => "UNENCRYPTED_WORKSPACE".to_string(),

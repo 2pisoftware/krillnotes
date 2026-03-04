@@ -485,6 +485,12 @@ impl IdentityManager {
         Ok(result)
     }
 
+    /// Return the [`WorkspaceBinding`] for a given `workspace_uuid`, if one exists.
+    pub fn get_workspace_binding(&self, workspace_uuid: &str) -> Result<Option<WorkspaceBinding>> {
+        let settings = self.load_settings()?;
+        Ok(settings.workspaces.get(workspace_uuid).cloned())
+    }
+
     // --- private helpers ---
 
     fn derive_db_password_key(&self, seed: &[u8; 32], workspace_uuid: &str) -> Result<[u8; 32]> {
