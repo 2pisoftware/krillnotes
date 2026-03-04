@@ -5863,7 +5863,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_write_info_json_creates_file() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "").unwrap();
+        let ws = Workspace::create(&db_path, "").unwrap();
         ws.write_info_json().unwrap();
 
         let info_path = dir.path().join("info.json");
