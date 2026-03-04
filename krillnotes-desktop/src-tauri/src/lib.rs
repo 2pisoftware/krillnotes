@@ -1632,13 +1632,15 @@ fn list_workspace_files(
             .map_err(|e| format!("Failed to create workspace directory: {e}"))?;
     }
 
-    // Collect currently open workspace paths for the is_open check
-    let open_paths: Vec<PathBuf> = state
+    // Build path → label map for open workspaces.
+    // Collected as an owned HashMap so the lock is released before we
+    // later lock state.workspaces to refresh info.json.
+    let open_labels: HashMap<PathBuf, String> = state
         .workspace_paths
         .lock()
         .expect("Mutex poisoned")
-        .values()
-        .cloned()
+        .iter()
+        .map(|(label, path)| (path.clone(), label.clone()))
         .collect();
 
     let mut entries = Vec::new();
@@ -1651,7 +1653,15 @@ fn list_workspace_files(
         let db_file = folder.join("notes.db");
         if !db_file.exists() { continue; }
         if let Some(name) = folder.file_name().and_then(|s| s.to_str()) {
-            let is_open = open_paths.iter().any(|p| *p == folder);
+            let is_open = open_labels.contains_key(&folder);
+
+            // For open workspaces, refresh info.json from the live workspace
+            // object so that notes created since open() are counted correctly.
+            if let Some(label) = open_labels.get(&folder) {
+                if let Some(ws) = state.workspaces.lock().expect("Mutex poisoned").get(label) {
+                    let _ = ws.write_info_json();
+                }
+            }
             let last_modified = std::fs::metadata(&folder)
                 .and_then(|m| m.modified())
                 .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
