@@ -1793,6 +1793,12 @@ struct WorkspaceEntry {
     note_count: Option<usize>,
     /// From info.json: number of attachments. None if info.json is missing.
     attachment_count: Option<usize>,
+    /// From info.json: stable UUID assigned to this workspace. None if info.json is missing.
+    workspace_uuid: Option<String>,
+    /// UUID of the identity this workspace is bound to, if any.
+    identity_uuid: Option<String>,
+    /// Display name of the bound identity, if any and if its file is readable.
+    identity_name: Option<String>,
 }
 
 /// Returns the total size in bytes of all files under `dir` (recursive).
@@ -1890,7 +1896,24 @@ fn list_workspace_files(
                 .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
                 .unwrap_or(0);
             let size_bytes = dir_size_bytes(&folder);
-            let (created_at, note_count, attachment_count) = read_info_json(&folder);
+            let (workspace_id, created_at, note_count, attachment_count) = read_info_json_full(&folder);
+
+            // Look up identity binding for this workspace
+            let (identity_uuid, identity_name) = if let Some(ref ws_id) = workspace_id {
+                let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+                if let Ok(Some(binding)) = mgr.get_workspace_binding(ws_id) {
+                    let identities = mgr.list_identities().unwrap_or_default();
+                    let identity = identities.iter().find(|i| i.uuid == binding.identity_uuid);
+                    (
+                        Some(binding.identity_uuid.to_string()),
+                        identity.map(|i| i.display_name.clone()),
+                    )
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
 
             entries.push(WorkspaceEntry {
                 name: name.to_string(),
@@ -1901,6 +1924,9 @@ fn list_workspace_files(
                 created_at,
                 note_count,
                 attachment_count,
+                workspace_uuid: workspace_id,
+                identity_uuid,
+                identity_name,
             });
         }
     }
