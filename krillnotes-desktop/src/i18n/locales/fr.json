@@ -299,6 +299,7 @@
     "help": "Aide",
     "newWorkspace": "Nouvel espace de travail",
     "openWorkspace": "Ouvrir un espace de travail…",
+    "manageIdentities": "Gérer les identités…",
     "exportWorkspace": "Exporter l'espace de travail…",
     "importWorkspace": "Importer un espace de travail…",
     "addNote": "Ajouter une note",

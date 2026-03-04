@@ -297,6 +297,7 @@
     "help": "도움말",
     "newWorkspace": "새 작업 공간",
     "openWorkspace": "작업 공간 열기…",
+    "manageIdentities": "ID 관리…",
     "exportWorkspace": "작업 공간 내보내기…",
     "importWorkspace": "작업 공간 가져오기…",
     "addNote": "노트 추가",

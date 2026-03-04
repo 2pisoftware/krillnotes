@@ -299,6 +299,7 @@
     "help": "Help",
     "newWorkspace": "New Workspace",
     "openWorkspace": "Open Workspace…",
+    "manageIdentities": "Manage Identities…",
     "exportWorkspace": "Export Workspace…",
     "importWorkspace": "Import Workspace…",
     "addNote": "Add Note",

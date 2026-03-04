@@ -297,6 +297,7 @@
     "help": "帮助",
     "newWorkspace": "新建工作区",
     "openWorkspace": "打开工作区…",
+    "manageIdentities": "管理身份…",
     "exportWorkspace": "导出工作区…",
     "importWorkspace": "导入工作区…",
     "addNote": "添加笔记",

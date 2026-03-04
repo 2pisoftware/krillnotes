@@ -299,6 +299,7 @@
     "help": "Hilfe",
     "newWorkspace": "Neuer Arbeitsbereich",
     "openWorkspace": "Arbeitsbereich öffnen…",
+    "manageIdentities": "Identitäten verwalten…",
     "exportWorkspace": "Arbeitsbereich exportieren…",
     "importWorkspace": "Arbeitsbereich importieren…",
     "addNote": "Notiz hinzufügen",

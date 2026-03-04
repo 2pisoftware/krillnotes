@@ -297,6 +297,7 @@
     "help": "ヘルプ",
     "newWorkspace": "新しいワークスペース",
     "openWorkspace": "ワークスペースを開く…",
+    "manageIdentities": "IDを管理…",
     "exportWorkspace": "ワークスペースを書き出す…",
     "importWorkspace": "ワークスペースを読み込む…",
     "addNote": "ノートを追加",

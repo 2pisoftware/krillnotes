@@ -2262,6 +2262,7 @@ const MENU_MESSAGES: &[(&str, &str)] = &[
     ("edit_paste_as_child",   "Edit > Paste as Child clicked"),
     ("edit_paste_as_sibling", "Edit > Paste as Sibling clicked"),
     ("workspace_properties",  "Edit > Workspace Properties clicked"),
+    ("file_identities",       "File > Manage Identities clicked"),
 ];
 
 /// Translates a native [`tauri::menu::MenuEvent`] into a `"menu-action"` event
