@@ -74,6 +74,14 @@ pub struct WorkspaceInfo {
     pub selected_note_id: Option<String>,
 }
 
+/// Information about a workspace bound to an identity, returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceBindingInfo {
+    pub workspace_uuid: String,
+    pub db_path: String,
+}
+
 /// Derives a unique window label from the `path` filename stem.
 ///
 /// Appends a numeric suffix (`-2`, `-3`, …) until the label is absent
@@ -1290,6 +1298,188 @@ fn consume_pending_file_open(state: State<'_, AppState>) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+// ── Identity commands ─────────────────────────────────────────────
+
+/// Lists all registered identities.
+#[tauri::command]
+fn list_identities(
+    state: State<'_, AppState>,
+) -> std::result::Result<Vec<IdentityRef>, String> {
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.list_identities().map_err(|e| e.to_string())
+}
+
+/// Creates a new identity and auto-unlocks it in memory.
+#[tauri::command]
+fn create_identity(
+    state: State<'_, AppState>,
+    display_name: String,
+    passphrase: String,
+) -> std::result::Result<IdentityRef, String> {
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let file = mgr.create_identity(&display_name, &passphrase)
+        .map_err(|e| e.to_string())?;
+    let uuid = file.identity_uuid;
+
+    // Auto-unlock after creation
+    let unlocked = mgr.unlock_identity(&uuid, &passphrase)
+        .map_err(|e| e.to_string())?;
+    drop(mgr); // Release the lock before acquiring unlocked_identities
+    state.unlocked_identities.lock().expect("Mutex poisoned")
+        .insert(uuid, unlocked);
+
+    // Return the IdentityRef
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let identities = mgr.list_identities().map_err(|e| e.to_string())?;
+    identities.into_iter().find(|i| i.uuid == uuid)
+        .ok_or_else(|| "Identity created but not found in registry".to_string())
+}
+
+/// Unlocks an identity and stores the unlocked state in memory.
+#[tauri::command]
+fn unlock_identity(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    passphrase: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let unlocked = mgr.unlock_identity(&uuid, &passphrase)
+        .map_err(|e| match e {
+            KrillnotesError::IdentityWrongPassphrase => "WRONG_PASSPHRASE".to_string(),
+            other => other.to_string(),
+        })?;
+    drop(mgr);
+    state.unlocked_identities.lock().expect("Mutex poisoned")
+        .insert(uuid, unlocked);
+    Ok(())
+}
+
+/// Locks an identity: closes all its workspace windows and wipes it from memory.
+#[tauri::command]
+fn lock_identity(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    identity_uuid: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+
+    // Find and close all workspace windows belonging to this identity
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let bound_workspaces = mgr.get_workspaces_for_identity(&uuid)
+        .map_err(|e| e.to_string())?;
+    let bound_workspace_ids: std::collections::HashSet<String> = bound_workspaces.into_iter()
+        .map(|(ws_uuid, _)| ws_uuid)
+        .collect();
+    drop(mgr);
+
+    // Match workspace_ids against open workspaces via info.json workspace_id
+    let paths = state.workspace_paths.lock().expect("Mutex poisoned");
+    let labels_to_close: Vec<String> = paths.iter()
+        .filter(|(_, path)| {
+            let (ws_id, _, _, _) = read_info_json_full(path);
+            ws_id.map(|id| bound_workspace_ids.contains(&id)).unwrap_or(false)
+        })
+        .map(|(label, _)| label.clone())
+        .collect();
+    drop(paths);
+
+    for label in &labels_to_close {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.close();
+        }
+    }
+
+    // Wipe identity from memory
+    state.unlocked_identities.lock().expect("Mutex poisoned").remove(&uuid);
+    Ok(())
+}
+
+/// Deletes an identity. The identity must be locked first.
+#[tauri::command]
+fn delete_identity(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+
+    // Must be locked first
+    let is_unlocked = state.unlocked_identities.lock().expect("Mutex poisoned").contains_key(&uuid);
+    if is_unlocked {
+        return Err("Lock the identity before deleting it".to_string());
+    }
+
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.delete_identity(&uuid).map_err(|e| e.to_string())
+}
+
+/// Renames an identity.
+#[tauri::command]
+fn rename_identity(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    new_name: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.rename_identity(&uuid, &new_name).map_err(|e| e.to_string())
+}
+
+/// Changes an identity's passphrase.
+#[tauri::command]
+fn change_identity_passphrase(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    old_passphrase: String,
+    new_passphrase: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.change_passphrase(&uuid, &old_passphrase, &new_passphrase)
+        .map_err(|e| match e {
+            KrillnotesError::IdentityWrongPassphrase => "WRONG_PASSPHRASE".to_string(),
+            other => other.to_string(),
+        })
+}
+
+/// Returns the UUIDs of all currently unlocked identities.
+#[tauri::command]
+fn get_unlocked_identities(
+    state: State<'_, AppState>,
+) -> Vec<String> {
+    state.unlocked_identities.lock().expect("Mutex poisoned")
+        .keys()
+        .map(|uuid| uuid.to_string())
+        .collect()
+}
+
+/// Returns true if the given identity is currently unlocked.
+#[tauri::command]
+fn is_identity_unlocked(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+) -> bool {
+    Uuid::parse_str(&identity_uuid)
+        .map(|uuid| state.unlocked_identities.lock().expect("Mutex poisoned").contains_key(&uuid))
+        .unwrap_or(false)
+}
+
+/// Returns the workspaces bound to the given identity.
+#[tauri::command]
+fn get_workspaces_for_identity(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+) -> std::result::Result<Vec<WorkspaceBindingInfo>, String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let bindings = mgr.get_workspaces_for_identity(&uuid)
+        .map_err(|e| e.to_string())?;
+    Ok(bindings.into_iter().map(|(ws_uuid, binding)| WorkspaceBindingInfo {
+        workspace_uuid: ws_uuid,
+        db_path: binding.db_path,
+    }).collect())
+}
+
 // ── Theme commands ────────────────────────────────────────────────
 
 /// Lists all user theme files in the themes directory.
@@ -1565,21 +1755,29 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Reads `info.json` from `workspace_dir` and returns `(created_at, note_count, attachment_count)`.
-/// Returns `(None, None, None)` if the file is missing or malformed.
-fn read_info_json(workspace_dir: &Path) -> (Option<i64>, Option<usize>, Option<usize>) {
+/// Reads `info.json` from `workspace_dir` and returns all stored fields.
+/// Returns `(None, None, None, None)` if the file is missing or malformed.
+fn read_info_json_full(workspace_dir: &Path) -> (Option<String>, Option<i64>, Option<usize>, Option<usize>) {
     let path = workspace_dir.join("info.json");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, None, None),
+        Err(_) => return (None, None, None, None),
     };
     let v: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return (None, None, None),
+        Err(_) => return (None, None, None, None),
     };
+    let workspace_id = v["workspace_id"].as_str().map(|s| s.to_string());
     let created_at = v["created_at"].as_i64();
     let note_count = v["note_count"].as_u64().map(|n| n as usize);
     let attachment_count = v["attachment_count"].as_u64().map(|n| n as usize);
+    (workspace_id, created_at, note_count, attachment_count)
+}
+
+/// Reads `info.json` from `workspace_dir` and returns `(created_at, note_count, attachment_count)`.
+/// Returns `(None, None, None)` if the file is missing or malformed.
+fn read_info_json(workspace_dir: &Path) -> (Option<i64>, Option<usize>, Option<usize>) {
+    let (_, created_at, note_count, attachment_count) = read_info_json_full(workspace_dir);
     (created_at, note_count, attachment_count)
 }
 
@@ -2145,6 +2343,16 @@ pub fn run() {
             list_workspace_files,
             delete_workspace,
             duplicate_workspace,
+            list_identities,
+            create_identity,
+            unlock_identity,
+            lock_identity,
+            delete_identity,
+            rename_identity,
+            change_identity_passphrase,
+            get_unlocked_identities,
+            is_identity_unlocked,
+            get_workspaces_for_identity,
             attach_file,
             attach_file_bytes,
             get_attachments,
