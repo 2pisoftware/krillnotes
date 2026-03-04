@@ -227,7 +227,7 @@ impl Workspace {
         )?;
         let undo_limit: usize = 50;
 
-        Ok(Self {
+        let workspace = Self {
             storage,
             script_registry,
             operation_log,
@@ -242,7 +242,9 @@ impl Workspace {
             script_redo_stack: Vec::new(),
             undo_group_buffer: None,
             inside_undo: false,
-        })
+        };
+        let _ = workspace.write_info_json(); // best-effort; non-fatal
+        Ok(workspace)
     }
 
     /// Opens an existing workspace database at `path` and reads stored metadata.
@@ -348,6 +350,7 @@ impl Workspace {
         // Undo stacks are in-session only, so prior-session trash is always safe to remove.
         ws.purge_attachment_trash();
 
+        let _ = ws.write_info_json(); // best-effort; non-fatal
         Ok(ws)
     }
 
@@ -5890,5 +5893,23 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         let content = std::fs::read_to_string(dir.path().join("info.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(v["note_count"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_info_json_written_on_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("notes.db");
+        Workspace::create(&db_path, "").unwrap();
+        assert!(dir.path().join("info.json").exists(), "info.json must exist after create");
+    }
+
+    #[test]
+    fn test_info_json_written_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("notes.db");
+        Workspace::create(&db_path, "").unwrap();
+        std::fs::remove_file(dir.path().join("info.json")).unwrap(); // remove it
+        Workspace::open(&db_path, "").unwrap();
+        assert!(dir.path().join("info.json").exists(), "info.json must be rewritten on open");
     }
 }
