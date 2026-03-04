@@ -70,8 +70,22 @@ pub struct WorkspaceInfo {
     pub selected_note_id: Option<String>,
 }
 
+/// Sanitises a string so it can be used as a Tauri window label.
+///
+/// Tauri requires labels to contain only alphanumeric characters plus `-`, `_`, `/`, and `:`.
+/// This replaces any other character (e.g. spaces) with `-` and strips leading/trailing `-`.
+fn sanitize_label(s: &str) -> String {
+    let sanitized: String = s
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() { "untitled".to_string() } else { trimmed.to_string() }
+}
+
 /// Derives a unique window label from the `path` filename stem.
 ///
+/// The stem is sanitised to contain only characters valid in Tauri window labels.
 /// Appends a numeric suffix (`-2`, `-3`, …) until the label is absent
 /// from the currently open workspace labels in `state`.
 fn generate_unique_label(state: &AppState, path: &Path) -> String {
@@ -79,14 +93,16 @@ fn generate_unique_label(state: &AppState, path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("untitled");
 
+    let base = sanitize_label(filename);
+
     let workspaces = state.workspaces.lock()
         .expect("Mutex poisoned");
 
-    let mut label = filename.to_string();
+    let mut label = base.clone();
     let mut counter = 2;
 
     while workspaces.contains_key(&label) {
-        label = format!("{filename}-{counter}");
+        label = format!("{base}-{counter}");
         counter += 1;
     }
 
