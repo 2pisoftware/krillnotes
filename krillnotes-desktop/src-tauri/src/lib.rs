@@ -1700,6 +1700,55 @@ fn delete_workspace(
         .map_err(|e| format!("Failed to delete workspace: {e}"))
 }
 
+/// Duplicates a workspace by exporting it to a temp file and importing it
+/// under a new name in the same workspace directory.
+/// Does NOT open the duplicated workspace in a window — just creates it on disk.
+#[tauri::command]
+fn duplicate_workspace(
+    source_path: String,
+    source_password: String,
+    new_name: String,
+    new_password: String,
+) -> std::result::Result<(), String> {
+    let app_settings = settings::load_settings();
+    let workspace_dir = PathBuf::from(&app_settings.workspace_directory);
+    let dest_folder = workspace_dir.join(&new_name);
+
+    if dest_folder.exists() {
+        return Err(format!("A workspace named '{new_name}' already exists."));
+    }
+
+    // Open the source workspace to validate password and export.
+    let source_db = PathBuf::from(&source_path).join("notes.db");
+    let workspace = Workspace::open(&source_db, &source_password)
+        .map_err(|e| e.to_string())?;
+
+    // Export to a temp file.
+    let mut tmp_file = tempfile::tempfile()
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    export_workspace(&workspace, &mut tmp_file, Some(&source_password))
+        .map_err(|e| e.to_string())?;
+
+    // Import from temp file into dest folder.
+    std::fs::create_dir_all(&dest_folder)
+        .map_err(|e| format!("Failed to create destination: {e}"))?;
+    let dest_db = dest_folder.join("notes.db");
+
+    use std::io::Seek;
+    tmp_file
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| format!("Seek failed: {e}"))?;
+    import_workspace(tmp_file, &dest_db, Some(&source_password), &new_password)
+        .map_err(|e| e.to_string())?;
+
+    // Write info.json for the new workspace (best-effort).
+    if let Ok(new_ws) = Workspace::open(&dest_db, &new_password) {
+        let _ = new_ws.write_info_json();
+    }
+
+    Ok(())
+}
+
 /// Attaches a file to a note. Reads the file from disk, encrypts it, and stores it.
 #[tauri::command]
 fn attach_file(
@@ -2113,6 +2162,7 @@ pub fn run() {
             read_file_content,
             list_workspace_files,
             delete_workspace,
+            duplicate_workspace,
             get_cached_password,
             attach_file,
             attach_file_bytes,
