@@ -322,6 +322,178 @@ impl IdentityManager {
 
         Ok(())
     }
+
+    /// Change the passphrase for an identity.
+    ///
+    /// Decrypts the seed with the old passphrase, generates a new Argon2id salt,
+    /// and re-encrypts with the new passphrase. The keypair is unchanged.
+    pub fn change_passphrase(
+        &self,
+        identity_uuid: &Uuid,
+        old_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<()> {
+        // Unlock with old passphrase to get the seed
+        let unlocked = self.unlock_identity(identity_uuid, old_passphrase)?;
+        let seed = unlocked.signing_key.to_bytes();
+
+        // Generate new Argon2id salt and derive new key
+        let mut new_salt = [0u8; 16];
+        OsRng.fill_bytes(&mut new_salt);
+
+        let mut new_derived_key = [0u8; 32];
+        let argon2 = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
+                .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("Argon2 params: {e}")))?,
+        );
+        argon2
+            .hash_password_into(new_passphrase.as_bytes(), &new_salt, &mut new_derived_key)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("Argon2 hash: {e}")))?;
+
+        // Re-encrypt seed with new key
+        let cipher = Aes256Gcm::new_from_slice(&new_derived_key)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES key: {e}")))?;
+        new_derived_key.fill(0);
+
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, seed.as_ref())
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES encrypt: {e}")))?;
+
+        // Load and update identity file
+        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
+        let data = std::fs::read_to_string(&file_path)?;
+        let mut identity_file: IdentityFile = serde_json::from_str(&data)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("JSON parse: {e}")))?;
+
+        identity_file.private_key_enc = EncryptedKey {
+            ciphertext: BASE64.encode(&ciphertext),
+            nonce: BASE64.encode(nonce_bytes),
+            kdf: "argon2id".to_string(),
+            kdf_params: KdfParams {
+                salt: BASE64.encode(new_salt),
+                m_cost: ARGON2_M_COST,
+                t_cost: ARGON2_T_COST,
+                p_cost: ARGON2_P_COST,
+            },
+        };
+
+        let json = serde_json::to_string_pretty(&identity_file)?;
+        std::fs::write(&file_path, json)?;
+
+        Ok(())
+    }
+
+    /// Bind a workspace to an identity, encrypting the DB password with a key
+    /// derived from the Ed25519 seed.
+    pub fn bind_workspace(
+        &self,
+        identity_uuid: &Uuid,
+        workspace_uuid: &str,
+        db_path: &str,
+        db_password: &str,
+        seed: &[u8; 32],
+    ) -> Result<()> {
+        let encrypted = self.encrypt_db_password(seed, workspace_uuid, db_password)?;
+
+        let mut settings = self.load_settings()?;
+        settings.workspaces.insert(
+            workspace_uuid.to_string(),
+            WorkspaceBinding {
+                db_path: db_path.to_string(),
+                identity_uuid: *identity_uuid,
+                db_password_enc: encrypted,
+            },
+        );
+        self.save_settings(&settings)?;
+        Ok(())
+    }
+
+    /// Remove a workspace binding from the identity settings.
+    pub fn unbind_workspace(&self, workspace_uuid: &str) -> Result<()> {
+        let mut settings = self.load_settings()?;
+        if settings.workspaces.remove(workspace_uuid).is_none() {
+            return Err(crate::KrillnotesError::WorkspaceNotBound(workspace_uuid.to_string()));
+        }
+        self.save_settings(&settings)?;
+        Ok(())
+    }
+
+    /// Decrypt a workspace's DB password using the Ed25519 seed.
+    pub fn decrypt_db_password(
+        &self,
+        workspace_uuid: &str,
+        seed: &[u8; 32],
+    ) -> Result<String> {
+        let settings = self.load_settings()?;
+        let binding = settings.workspaces.get(workspace_uuid)
+            .ok_or_else(|| crate::KrillnotesError::WorkspaceNotBound(workspace_uuid.to_string()))?;
+
+        let blob = BASE64.decode(&binding.db_password_enc)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("db_password_enc decode: {e}")))?;
+
+        let key = self.derive_db_password_key(seed, workspace_uuid)?;
+
+        // AES-256-GCM decrypt: first 12 bytes are nonce, rest is ciphertext+tag
+        if blob.len() < 13 {
+            return Err(crate::KrillnotesError::IdentityCorrupt("db password blob too short".to_string()));
+        }
+        let (nonce_bytes, ciphertext) = blob.split_at(12);
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES key: {e}")))?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| crate::KrillnotesError::IdentityWrongPassphrase)?;
+
+        String::from_utf8(plaintext)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("db password not UTF-8: {e}")))
+    }
+
+    /// Get all workspace bindings for a given identity.
+    pub fn get_workspaces_for_identity(&self, identity_uuid: &Uuid) -> Result<Vec<(String, WorkspaceBinding)>> {
+        let settings = self.load_settings()?;
+        let result = settings.workspaces.into_iter()
+            .filter(|(_, b)| b.identity_uuid == *identity_uuid)
+            .collect();
+        Ok(result)
+    }
+
+    // --- private helpers ---
+
+    fn derive_db_password_key(&self, seed: &[u8; 32], workspace_uuid: &str) -> Result<[u8; 32]> {
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+
+        let hk = Hkdf::<Sha256>::new(Some(workspace_uuid.as_bytes()), seed);
+        let mut key = [0u8; 32];
+        hk.expand(b"krillnotes-db-password-v1", &mut key)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("HKDF expand: {e}")))?;
+        Ok(key)
+    }
+
+    fn encrypt_db_password(&self, seed: &[u8; 32], workspace_uuid: &str, db_password: &str) -> Result<String> {
+        let key = self.derive_db_password_key(seed, workspace_uuid)?;
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES key: {e}")))?;
+
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, db_password.as_bytes())
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES encrypt: {e}")))?;
+
+        // Store as nonce || ciphertext+tag
+        let mut blob = Vec::with_capacity(12 + ciphertext.len());
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend_from_slice(&ciphertext);
+        Ok(BASE64.encode(&blob))
+    }
 }
 
 #[cfg(test)]
@@ -499,5 +671,157 @@ mod tests {
         assert!(!file_path.exists());
         let list = mgr.list_identities().unwrap();
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_change_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Eve", "old-pass").unwrap();
+
+        // Unlock with old passphrase — get the public key for comparison
+        let unlocked_before = mgr.unlock_identity(&identity.identity_uuid, "old-pass").unwrap();
+        let pk_before = *unlocked_before.verifying_key.as_bytes();
+
+        // Change passphrase
+        mgr.change_passphrase(&identity.identity_uuid, "old-pass", "new-pass").unwrap();
+
+        // Old passphrase no longer works
+        let result = mgr.unlock_identity(&identity.identity_uuid, "old-pass");
+        assert!(matches!(result.unwrap_err(), crate::KrillnotesError::IdentityWrongPassphrase));
+
+        // New passphrase works and produces the same keypair
+        let unlocked_after = mgr.unlock_identity(&identity.identity_uuid, "new-pass").unwrap();
+        assert_eq!(*unlocked_after.verifying_key.as_bytes(), pk_before);
+    }
+
+    #[test]
+    fn test_bind_workspace_and_decrypt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Frank", "pass").unwrap();
+        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+
+        let db_password = "random-db-password-abc123";
+        mgr.bind_workspace(
+            &identity.identity_uuid,
+            "workspace-uuid-1",
+            "/path/to/ws.db",
+            db_password,
+            unlocked.signing_key.as_bytes(),
+        ).unwrap();
+
+        // Settings should have the binding
+        let settings = mgr.load_settings().unwrap();
+        assert!(settings.workspaces.contains_key("workspace-uuid-1"));
+        assert_eq!(settings.workspaces["workspace-uuid-1"].identity_uuid, identity.identity_uuid);
+
+        // Decrypt should return original password
+        let decrypted = mgr.decrypt_db_password(
+            "workspace-uuid-1",
+            unlocked.signing_key.as_bytes(),
+        ).unwrap();
+        assert_eq!(decrypted, db_password);
+    }
+
+    #[test]
+    fn test_db_password_roundtrip_multiple_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Grace", "pass").unwrap();
+        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+
+        let seed = unlocked.signing_key.as_bytes();
+        mgr.bind_workspace(&identity.identity_uuid, "ws-1", "/a.db", "pw-alpha", seed).unwrap();
+        mgr.bind_workspace(&identity.identity_uuid, "ws-2", "/b.db", "pw-beta", seed).unwrap();
+
+        assert_eq!(mgr.decrypt_db_password("ws-1", seed).unwrap(), "pw-alpha");
+        assert_eq!(mgr.decrypt_db_password("ws-2", seed).unwrap(), "pw-beta");
+    }
+
+    #[test]
+    fn test_unbind_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Heidi", "pass").unwrap();
+        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+
+        mgr.bind_workspace(
+            &identity.identity_uuid,
+            "ws-unbind",
+            "/db.db",
+            "pw",
+            unlocked.signing_key.as_bytes(),
+        ).unwrap();
+
+        mgr.unbind_workspace("ws-unbind").unwrap();
+
+        let result = mgr.decrypt_db_password("ws-unbind", unlocked.signing_key.as_bytes());
+        assert!(matches!(result.unwrap_err(), crate::KrillnotesError::WorkspaceNotBound(_)));
+    }
+
+    #[test]
+    fn test_multiple_identities_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+
+        let id_a = mgr.create_identity("IdentA", "passA").unwrap();
+        let id_b = mgr.create_identity("IdentB", "passB").unwrap();
+        let unlocked_a = mgr.unlock_identity(&id_a.identity_uuid, "passA").unwrap();
+        let unlocked_b = mgr.unlock_identity(&id_b.identity_uuid, "passB").unwrap();
+
+        mgr.bind_workspace(&id_a.identity_uuid, "ws-a", "/a.db", "pw-a", unlocked_a.signing_key.as_bytes()).unwrap();
+        mgr.bind_workspace(&id_b.identity_uuid, "ws-b", "/b.db", "pw-b", unlocked_b.signing_key.as_bytes()).unwrap();
+
+        // A can decrypt A's workspace
+        assert_eq!(mgr.decrypt_db_password("ws-a", unlocked_a.signing_key.as_bytes()).unwrap(), "pw-a");
+
+        // B can decrypt B's workspace
+        assert_eq!(mgr.decrypt_db_password("ws-b", unlocked_b.signing_key.as_bytes()).unwrap(), "pw-b");
+
+        // A cannot decrypt B's workspace (wrong key, AES-GCM will fail)
+        let result = mgr.decrypt_db_password("ws-b", unlocked_a.signing_key.as_bytes());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_identity_with_bound_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Bound", "pass").unwrap();
+        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+
+        // Bind a workspace
+        mgr.bind_workspace(
+            &identity.identity_uuid,
+            "ws-uuid-123",
+            "/path/to/db",
+            "db-password",
+            unlocked.signing_key.as_bytes(),
+        ).unwrap();
+
+        // Delete should fail
+        let result = mgr.delete_identity(&identity.identity_uuid);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::KrillnotesError::IdentityHasBoundWorkspaces(_)
+        ));
+    }
+
+    #[test]
+    fn test_get_workspaces_for_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+
+        let id_a = mgr.create_identity("Multi", "pass").unwrap();
+        let unlocked = mgr.unlock_identity(&id_a.identity_uuid, "pass").unwrap();
+        let seed = unlocked.signing_key.as_bytes();
+
+        mgr.bind_workspace(&id_a.identity_uuid, "ws-1", "/a.db", "pw1", seed).unwrap();
+        mgr.bind_workspace(&id_a.identity_uuid, "ws-2", "/b.db", "pw2", seed).unwrap();
+
+        let workspaces = mgr.get_workspaces_for_identity(&id_a.identity_uuid).unwrap();
+        assert_eq!(workspaces.len(), 2);
     }
 }
