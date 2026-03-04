@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import type { WorkspaceEntry } from '../types';
 import EnterPasswordDialog from './EnterPasswordDialog';
+import { slugify } from '../utils/slugify';
 
 interface WorkspaceManagerDialogProps {
   isOpen: boolean;
@@ -198,7 +199,7 @@ function WorkspaceManagerDialog({ isOpen, onClose, onNewWorkspace }: WorkspaceMa
       await invoke('duplicate_workspace', {
         sourcePath: selected.path,
         sourcePassword: dupSourcePassword,
-        newName: dupNewName.trim(),
+        newName: slugify(dupNewName.trim()),
         newPassword: dupNewPassword,
       });
       setActiveView('list');
