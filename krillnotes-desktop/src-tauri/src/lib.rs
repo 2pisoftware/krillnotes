@@ -435,7 +435,7 @@ async fn create_workspace(
                     &seed,
                 ).map_err(|e| format!("Failed to bind workspace to identity: {e}"))?;
             }
-            // Wipe plaintext password from memory
+            // Drop the plaintext password — no longer needed (encrypted in identity store)
             drop(password);
 
             let new_window = create_workspace_window(&app, &label, &window)?;
