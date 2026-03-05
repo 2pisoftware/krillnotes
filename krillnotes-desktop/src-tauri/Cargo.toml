@@ -1,9 +1,12 @@
 [package]
 name = "krillnotes-desktop"
 version = "0.2.5"
-description = "A Tauri App"
-authors = ["you"]
+description = "Krill Notes desktop application (Tauri)"
+authors = ["TripleACS Pty Ltd t/a 2pi Software <info@2pisoftware.com>"]
 edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/2pisoftware/krillnotes"
+homepage = "https://krillnotes.org"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
