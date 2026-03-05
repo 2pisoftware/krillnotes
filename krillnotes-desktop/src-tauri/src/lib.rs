@@ -33,14 +33,6 @@ pub struct AppState {
     pub workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
     /// Map from window label to the filesystem path of the open database.
     pub workspace_paths: Arc<Mutex<HashMap<String, PathBuf>>>,
-    /// Session-only cache of plaintext DB passwords, keyed by window label.
-    ///
-    /// Populated when a workspace is opened or created (the password is
-    /// decrypted from the identity store). Wiped when the window is destroyed.
-    /// Only used internally by commands that need the raw password (e.g.
-    /// re-keying on identity change). Export commands read from the live
-    /// [`Workspace`] object and do not need this map.
-    pub workspace_passwords: Arc<Mutex<HashMap<String, String>>>,
     /// Label of the window that most recently gained focus. Used to route
     /// native menu events to the correct window without relying on async
     /// focus checks in the frontend (which are unreliable on Windows).
@@ -333,7 +325,6 @@ fn store_workspace(
     label: String,
     workspace: Workspace,
     path: PathBuf,
-    password: Option<String>,
 ) {
     let mut workspaces = state.workspaces.lock()
         .expect("Mutex poisoned");
@@ -341,13 +332,7 @@ fn store_workspace(
         .expect("Mutex poisoned");
 
     workspaces.insert(label.clone(), workspace);
-    paths.insert(label.clone(), path);
-
-    if let Some(pwd) = password {
-        state.workspace_passwords.lock()
-            .expect("Mutex poisoned")
-            .insert(label, pwd);
-    }
+    paths.insert(label, path);
 }
 
 /// Assembles a [`WorkspaceInfo`] for the workspace registered under `label`.
@@ -452,9 +437,7 @@ async fn create_workspace(
             }
 
             let new_window = create_workspace_window(&app, &label, &window)?;
-            // Store password in session cache so it is available for future operations
-            // (e.g. re-keying). The identity store also holds an encrypted copy.
-            store_workspace(&state, label.clone(), workspace, folder.clone(), Some(password));
+            store_workspace(&state, label.clone(), workspace, folder.clone());
 
             new_window.set_title(&format!("Krillnotes - {label}"))
                 .map_err(|e| e.to_string())?;
@@ -499,21 +482,33 @@ async fn open_workspace(
             let workspace_uuid = ws_uuid_opt
                 .ok_or_else(|| "IDENTITY_REQUIRED".to_string())?;
 
-            // Look up which identity this workspace is bound to and decrypt the DB password
-            let db_password = {
+            // Look up which identity this workspace is bound to and decrypt the DB password.
+            // Lock ordering: always acquire identity_manager before unlocked_identities,
+            // and drop identity_manager before re-acquiring it — avoids deadlock with
+            // create_workspace / execute_import which use the same ordering.
+
+            // Step 1: Get identity_uuid from identity_manager (drop lock after)
+            let identity_uuid = {
                 let mgr = state.identity_manager.lock().expect("Mutex poisoned");
                 let binding = mgr.get_workspace_binding(&workspace_uuid)
                     .map_err(|e: KrillnotesError| e.to_string())?
                     .ok_or_else(|| "IDENTITY_REQUIRED".to_string())?;
-                let identity_uuid = binding.identity_uuid;
+                binding.identity_uuid
+                // mgr drops here
+            };
 
-                // Check if identity is unlocked
+            // Step 2: Get signing key from unlocked_identities (drop lock after)
+            let seed = {
                 let identities = state.unlocked_identities.lock().expect("Mutex poisoned");
                 let unlocked = identities.get(&identity_uuid)
                     .ok_or_else(|| format!("IDENTITY_LOCKED:{}", identity_uuid))?;
-                let seed = unlocked.signing_key.to_bytes();
-                drop(identities);
+                unlocked.signing_key.to_bytes()
+                // identities drops here
+            };
 
+            // Step 3: Decrypt DB password (no other locks held)
+            let db_password = {
+                let mgr = state.identity_manager.lock().expect("Mutex poisoned");
                 mgr.decrypt_db_password(&workspace_uuid, &seed)
                     .map_err(|e| format!("Failed to decrypt DB password: {e}"))?
             };
@@ -526,7 +521,7 @@ async fn open_workspace(
                 })?;
 
             let new_window = create_workspace_window(&app, &label, &window)?;
-            store_workspace(&state, label.clone(), workspace, folder.clone(), Some(db_password));
+            store_workspace(&state, label.clone(), workspace, folder.clone());
 
             new_window.set_title(&format!("Krillnotes - {label}"))
                 .map_err(|e| e.to_string())?;
@@ -1367,8 +1362,7 @@ async fn execute_import(
     let label = generate_unique_label(&state, &folder);
 
     let new_window = create_workspace_window(&app, &label, &window)?;
-    // Store password in session cache for future operations (e.g. re-keying).
-    store_workspace(&state, label.clone(), workspace, folder, Some(workspace_password));
+    store_workspace(&state, label.clone(), workspace, folder);
 
     new_window.set_title(&format!("Krillnotes - {label}"))
         .map_err(|e| e.to_string())?;
@@ -1478,16 +1472,14 @@ fn lock_identity(
         .collect();
     drop(mgr);
 
-    // Match workspace_ids against open workspaces via info.json workspace_id
-    let paths = state.workspace_paths.lock().expect("Mutex poisoned");
-    let labels_to_close: Vec<String> = paths.iter()
-        .filter(|(_, path)| {
-            let (ws_id, _, _, _) = read_info_json_full(path);
-            ws_id.map(|id| bound_workspace_ids.contains(&id)).unwrap_or(false)
-        })
+    // Match workspace_ids against open workspaces using in-memory Workspace objects
+    // (avoids disk reads via info.json for each open workspace).
+    let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+    let labels_to_close: Vec<String> = workspaces.iter()
+        .filter(|(_, ws)| bound_workspace_ids.contains(ws.workspace_id()))
         .map(|(label, _)| label.clone())
         .collect();
-    drop(paths);
+    drop(workspaces);
 
     for label in &labels_to_close {
         if let Some(win) = app.get_webview_window(label) {
@@ -2031,25 +2023,36 @@ fn duplicate_workspace(
     let source_folder = PathBuf::from(&source_path);
     let source_db = source_folder.join("notes.db");
 
-    // Decrypt the source DB password via identity
+    // Decrypt the source DB password via identity.
+    // Lock ordering: identity_manager then unlocked_identities, never both held simultaneously.
     let source_password = {
         let (ws_uuid_opt, _, _, _) = read_info_json_full(&source_folder);
         let ws_uuid = ws_uuid_opt
             .ok_or_else(|| "Source workspace has no UUID in info.json".to_string())?;
 
+        // Step 1: Get identity_uuid from identity_manager (drop lock after)
+        let identity_uuid = {
+            let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+            let binding = mgr
+                .get_workspace_binding(&ws_uuid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Source workspace is not bound to any identity".to_string())?;
+            binding.identity_uuid
+            // mgr drops here
+        };
+
+        // Step 2: Get signing key from unlocked_identities (drop lock after)
+        let seed = {
+            let identities = state.unlocked_identities.lock().expect("Mutex poisoned");
+            let unlocked = identities
+                .get(&identity_uuid)
+                .ok_or_else(|| format!("IDENTITY_LOCKED:{}", identity_uuid))?;
+            unlocked.signing_key.to_bytes()
+            // identities drops here
+        };
+
+        // Step 3: Decrypt DB password (no other locks held)
         let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-        let binding = mgr
-            .get_workspace_binding(&ws_uuid)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Source workspace is not bound to any identity".to_string())?;
-
-        let identities = state.unlocked_identities.lock().expect("Mutex poisoned");
-        let unlocked = identities
-            .get(&binding.identity_uuid)
-            .ok_or_else(|| format!("IDENTITY_LOCKED:{}", binding.identity_uuid))?;
-        let seed = unlocked.signing_key.to_bytes();
-        drop(identities);
-
         mgr.decrypt_db_password(&ws_uuid, &seed)
             .map_err(|e| format!("Failed to decrypt source password: {e}"))?
     };
@@ -2364,7 +2367,6 @@ pub fn run() {
         .manage(AppState {
             workspaces: Arc::new(Mutex::new(HashMap::new())),
             workspace_paths: Arc::new(Mutex::new(HashMap::new())),
-            workspace_passwords: Arc::new(Mutex::new(HashMap::new())),
             focused_window: Arc::new(Mutex::new(None)),
             identity_manager: Arc::new(Mutex::new(
                 IdentityManager::new(settings::config_dir()).expect("Failed to init IdentityManager")
@@ -2387,8 +2389,6 @@ pub fn run() {
                     }
                     state.workspaces.lock().expect("Mutex poisoned").remove(&label);
                     state.workspace_paths.lock().expect("Mutex poisoned").remove(&label);
-                    // Wipe the cached plaintext DB password for this window.
-                    state.workspace_passwords.lock().expect("Mutex poisoned").remove(&label);
 
                     // On macOS the menu bar is global. If this was the last
                     // workspace window, disable workspace-specific items so

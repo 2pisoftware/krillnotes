@@ -339,6 +339,9 @@
     "noIdentities": "No identities yet",
     "filterByIdentity": "Filter by identity",
     "allIdentities": "All identities",
-    "passphraseChanged": "Passphrase changed successfully."
+    "passphraseChanged": "Passphrase changed successfully.",
+    "selectIdentity": "Identity",
+    "noUnlockedIdentities": "No unlocked identities. Unlock an identity first.",
+    "workspaceNotBound": "This workspace is not bound to any identity."
   }
 }
