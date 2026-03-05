@@ -467,6 +467,10 @@ impl IdentityManager {
     }
 
     /// Import a `.swarmid` file, overwriting any existing identity with the same UUID.
+    ///
+    /// Workspace bindings for the overwritten UUID are intentionally preserved — the
+    /// imported `.swarmid` is assumed to carry the same Ed25519 key material, so the
+    /// bound DB passwords remain decryptable after import.
     pub fn import_swarmid_overwrite(&self, file: SwarmIdFile) -> Result<IdentityRef> {
         self.validate_swarmid_file(&file)?;
         let uuid = file.identity.identity_uuid;
