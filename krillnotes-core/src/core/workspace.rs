@@ -1950,7 +1950,7 @@ impl Workspace {
         // ── reorder path (unchanged) ───────────────────────────────────────────
         if let Some(ids) = result.reorder {
             for (position, id) in ids.iter().enumerate() {
-                self.move_note(id, Some(note_id), position as i32)?;
+                self.move_note(id, Some(note_id), position as f64)?;
             }
         }
 
@@ -2091,7 +2091,7 @@ impl Workspace {
         &mut self,
         note_id: &str,
         new_parent_id: Option<&str>,
-        new_position: i32,
+        new_position: f64,
     ) -> Result<()> {
         // 1. Self-move check
         if new_parent_id == Some(note_id) {
@@ -2232,7 +2232,7 @@ impl Workspace {
             device_id: self.device_id.clone(),
             note_id: note_id.to_string(),
             new_parent_id: new_parent_id.map(|s| s.to_string()),
-            new_position: new_position as f64,
+            new_position,
             moved_by: String::new(),
             signature: String::new(),
         };
@@ -3696,7 +3696,7 @@ impl Workspace {
             }
 
             RetractInverse::PositionRestore { note_id, old_parent_id, old_position } => {
-                self.move_note(note_id, old_parent_id.as_deref(), *old_position as i32)?;
+                self.move_note(note_id, old_parent_id.as_deref(), *old_position)?;
                 Ok(Some(note_id.clone()))
             }
 
@@ -4686,7 +4686,7 @@ mod tests {
     #[test]
     fn test_move_note_reorder_siblings() {
         let (mut ws, root_id, children, _temp) = setup_with_children(3);
-        ws.move_note(&children[2], Some(&root_id), 0).unwrap();
+        ws.move_note(&children[2], Some(&root_id), 0.0).unwrap();
         let kids = ws.get_children(&root_id).unwrap();
         assert_eq!(kids[0].id, children[2]);
         assert_eq!(kids[1].id, children[0]);
@@ -4699,7 +4699,7 @@ mod tests {
     #[test]
     fn test_move_note_to_different_parent() {
         let (mut ws, root_id, children, _temp) = setup_with_children(2);
-        ws.move_note(&children[1], Some(&children[0]), 0).unwrap();
+        ws.move_note(&children[1], Some(&children[0]), 0.0).unwrap();
         let root_kids = ws.get_children(&root_id).unwrap();
         assert_eq!(root_kids.len(), 1);
         assert_eq!(root_kids[0].id, children[0]);
@@ -4713,7 +4713,7 @@ mod tests {
     #[test]
     fn test_move_note_to_root() {
         let (mut ws, root_id, children, _temp) = setup_with_children(2);
-        ws.move_note(&children[0], None, 1).unwrap();
+        ws.move_note(&children[0], None, 1.0).unwrap();
         let root_kids = ws.get_children(&root_id).unwrap();
         assert_eq!(root_kids.len(), 1);
         assert_eq!(root_kids[0].id, children[1]);
@@ -4729,7 +4729,7 @@ mod tests {
         let grandchild_id = ws
             .create_note(&children[0], AddPosition::AsChild, "TextNote")
             .unwrap();
-        let result = ws.move_note(&children[0], Some(&grandchild_id), 0);
+        let result = ws.move_note(&children[0], Some(&grandchild_id), 0.0);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("cycle"), "Expected cycle error, got: {err}");
@@ -4738,7 +4738,7 @@ mod tests {
     #[test]
     fn test_move_note_prevents_self_move() {
         let (mut ws, _root_id, children, _temp) = setup_with_children(1);
-        let result = ws.move_note(&children[0], Some(&children[0]), 0);
+        let result = ws.move_note(&children[0], Some(&children[0]), 0.0);
         assert!(result.is_err());
     }
 
@@ -4746,7 +4746,7 @@ mod tests {
     fn test_move_note_logs_operation() {
         // The operation log is always active — MoveNote must be recorded.
         let (mut ws, root_id, children, _temp) = setup_with_children(2);
-        ws.move_note(&children[1], Some(&root_id), 0).unwrap();
+        ws.move_note(&children[1], Some(&root_id), 0.0).unwrap();
         let ops = ws.list_operations(None, None, None).unwrap();
         let move_ops: Vec<_> = ops.iter().filter(|o| o.operation_type == "MoveNote").collect();
         assert_eq!(move_ops.len(), 1, "Expected one MoveNote operation in always-on log");
@@ -4755,7 +4755,7 @@ mod tests {
     #[test]
     fn test_move_note_positions_gapless_after_cross_parent_move() {
         let (mut ws, root_id, children, _temp) = setup_with_children(4);
-        ws.move_note(&children[1], Some(&children[0]), 0).unwrap();
+        ws.move_note(&children[1], Some(&children[0]), 0.0).unwrap();
         let root_kids = ws.get_children(&root_id).unwrap();
         assert_eq!(root_kids.len(), 3);
         for (i, kid) in root_kids.iter().enumerate() {
@@ -5046,7 +5046,7 @@ schema("Memo", #{
         let item_id   = ws.create_note(&root.id, AddPosition::AsChild, "Item").unwrap();
 
         // Move Item under Folder — hook should fire
-        ws.move_note(&item_id, Some(&folder_id), 0).unwrap();
+        ws.move_note(&item_id, Some(&folder_id), 0.0).unwrap();
 
         let folder = ws.get_note(&folder_id).unwrap();
         assert_eq!(folder.title, "Folder (1)");
@@ -5894,7 +5894,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         ws.undo_stack.clear();
 
         let old_note = ws.get_note(&sibling_id).unwrap();
-        ws.move_note(&sibling_id, Some(&child_id), 0).unwrap();
+        ws.move_note(&sibling_id, Some(&child_id), 0.0).unwrap();
 
         assert!(ws.can_undo());
         match &ws.undo_stack[0].inverse {

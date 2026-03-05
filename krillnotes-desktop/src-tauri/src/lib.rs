@@ -1034,7 +1034,7 @@ fn move_note(
     state: State<'_, AppState>,
     note_id: String,
     new_parent_id: Option<String>,
-    new_position: i32,
+    new_position: f64,
 ) -> std::result::Result<(), String> {
     let label = window.label();
     let mut workspaces = state.workspaces.lock()
