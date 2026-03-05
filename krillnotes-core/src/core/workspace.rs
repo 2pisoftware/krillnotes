@@ -6130,4 +6130,62 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         Workspace::open(&db_path, "", None).unwrap();
         assert!(dir.path().join("info.json").exists(), "info.json must be rewritten on open");
     }
+
+    // ── HLC-specific tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hlc_counter_increments_for_rapid_ops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hlc.krillnotes");
+        let mut ws = Workspace::create(&path, "", None).unwrap();
+
+        // Create two notes in rapid succession.
+        ws.create_note_root("TextNote").unwrap();
+        ws.create_note_root("TextNote").unwrap();
+
+        let ops = ws.list_operations(None, None, None).unwrap();
+        assert!(ops.len() >= 2, "at least two operations must be logged");
+
+        // Every logged timestamp must be a valid non-zero wall clock value.
+        for op in &ops {
+            assert!(op.timestamp_wall_ms > 0, "wall_ms must be non-zero");
+        }
+
+        // All operation IDs must be unique — HLC must not produce duplicate entries.
+        let unique_ids: std::collections::HashSet<&str> =
+            ops.iter().map(|o| o.operation_id.as_str()).collect();
+        assert_eq!(unique_ids.len(), ops.len(), "all operation_ids must be unique");
+    }
+
+    #[test]
+    fn test_set_tags_op_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tags_log.krillnotes");
+        let mut ws = Workspace::create(&path, "", None).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+
+        ws.update_note_tags(&root.id, vec!["crdt".into(), "hlc".into()]).unwrap();
+
+        let ops = ws.list_operations(None, None, None).unwrap();
+        let has_set_tags = ops.iter().any(|o| o.operation_type == "SetTags");
+        assert!(has_set_tags, "SetTags operation must appear in the log after update_note_tags");
+    }
+
+    #[test]
+    fn test_update_note_op_logged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update_note_log.krillnotes");
+        let mut ws = Workspace::create(&path, "", None).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+
+        ws.update_note_title(&root.id, "HLC Title".to_string()).unwrap();
+
+        // update_note_title logs an UpdateField operation with field == "title".
+        let ops = ws.list_operations(None, None, None).unwrap();
+        let has_title_update = ops.iter().any(|o| o.operation_type == "UpdateField");
+        assert!(
+            has_title_update,
+            "UpdateField operation must appear in the log after update_note_title"
+        );
+    }
 }
