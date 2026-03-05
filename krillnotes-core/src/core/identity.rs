@@ -114,6 +114,25 @@ pub struct UnlockedIdentity {
     pub verifying_key: ed25519_dalek::VerifyingKey,
 }
 
+// ---------------------------------------------------------------------------
+// .swarmid portable identity file
+// ---------------------------------------------------------------------------
+
+/// Portable identity export file (`<name>.swarmid`).
+/// The `identity` field is the same on-disk `IdentityFile` — private key
+/// is already encrypted with Argon2id + AES-256-GCM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmIdFile {
+    pub format: String,   // always "swarmid"
+    pub version: u32,     // always 1
+    pub identity: IdentityFile,
+}
+
+impl SwarmIdFile {
+    pub const FORMAT: &'static str = "swarmid";
+    pub const VERSION: u32 = 1;
+}
+
 impl IdentityManager {
     /// Create a new `IdentityManager`.
     ///
@@ -411,6 +430,98 @@ impl IdentityManager {
         self.save_settings(&settings)?;
 
         Ok(())
+    }
+
+    /// Verifies the passphrase, then returns a `SwarmIdFile` ready to be serialised
+    /// and written to disk by the caller. Does NOT write any file itself.
+    pub fn export_swarmid(&self, identity_uuid: &Uuid, passphrase: &str) -> Result<SwarmIdFile> {
+        // Verify passphrase by attempting an unlock (propagates IdentityWrongPassphrase on mismatch)
+        self.unlock_identity(identity_uuid, passphrase)?;
+
+        // Read the raw IdentityFile from disk
+        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
+        let data = std::fs::read_to_string(&file_path)
+            .map_err(|_| crate::KrillnotesError::IdentityNotFound(identity_uuid.to_string()))?;
+        let identity: IdentityFile = serde_json::from_str(&data)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("JSON parse: {e}")))?;
+
+        Ok(SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: SwarmIdFile::VERSION,
+            identity,
+        })
+    }
+
+    /// Import a `.swarmid` file into this identity store (identity added in locked state).
+    ///
+    /// Returns `IdentityAlreadyExists` if the same UUID is already registered.
+    /// Call `import_swarmid_overwrite` if the user confirms they want to replace it.
+    pub fn import_swarmid(&self, file: SwarmIdFile) -> Result<IdentityRef> {
+        self.validate_swarmid_file(&file)?;
+        let uuid = file.identity.identity_uuid;
+        let settings = self.load_settings()?;
+        if settings.identities.iter().any(|i| i.uuid == uuid) {
+            return Err(crate::KrillnotesError::IdentityAlreadyExists(uuid.to_string()));
+        }
+        self.write_swarmid_to_store(file)
+    }
+
+    /// Import a `.swarmid` file, overwriting any existing identity with the same UUID.
+    ///
+    /// Workspace bindings for the overwritten UUID are intentionally preserved — the
+    /// imported `.swarmid` is assumed to carry the same Ed25519 key material, so the
+    /// bound DB passwords remain decryptable after import.
+    pub fn import_swarmid_overwrite(&self, file: SwarmIdFile) -> Result<IdentityRef> {
+        self.validate_swarmid_file(&file)?;
+        let uuid = file.identity.identity_uuid;
+        // Remove existing entry if present
+        let mut settings = self.load_settings()?;
+        settings.identities.retain(|i| i.uuid != uuid);
+        self.save_settings(&settings)?;
+        let file_path = self.identities_dir().join(format!("{uuid}.json"));
+        if file_path.exists() {
+            std::fs::remove_file(&file_path)?;
+        }
+        self.write_swarmid_to_store(file)
+    }
+
+    fn validate_swarmid_file(&self, file: &SwarmIdFile) -> Result<()> {
+        if file.format != SwarmIdFile::FORMAT {
+            return Err(crate::KrillnotesError::SwarmIdInvalidFormat(format!(
+                "expected \"swarmid\", got \"{}\"",
+                file.format
+            )));
+        }
+        if file.version != SwarmIdFile::VERSION {
+            return Err(crate::KrillnotesError::SwarmIdVersionUnsupported(
+                file.version,
+            ));
+        }
+        Ok(())
+    }
+
+    fn write_swarmid_to_store(&self, file: SwarmIdFile) -> Result<IdentityRef> {
+        let identity = file.identity;
+        let uuid = identity.identity_uuid;
+        let display_name = identity.display_name.clone();
+
+        // Write identity file to disk
+        let file_path = self.identities_dir().join(format!("{uuid}.json"));
+        let json = serde_json::to_string_pretty(&identity)?;
+        std::fs::write(&file_path, json)?;
+
+        // Register in settings registry
+        let mut settings = self.load_settings()?;
+        let identity_ref = IdentityRef {
+            uuid,
+            display_name: display_name.clone(),
+            file: format!("identities/{uuid}.json"),
+            last_used: Utc::now(),
+        };
+        settings.identities.push(identity_ref.clone());
+        self.save_settings(&settings)?;
+
+        Ok(identity_ref)
     }
 
     /// Bind a workspace to an identity, encrypting the DB password with a key
@@ -902,5 +1013,139 @@ mod tests {
         assert!(params.get("m_cost").unwrap().is_u64());
         assert!(params.get("t_cost").unwrap().is_u64());
         assert!(params.get("p_cost").unwrap().is_u64());
+    }
+
+    #[test]
+    fn swarmid_file_roundtrip() {
+        let inner = IdentityFile {
+            identity_uuid: Uuid::new_v4(),
+            display_name: "Test".to_string(),
+            public_key: "abc".to_string(),
+            private_key_enc: EncryptedKey {
+                ciphertext: "ct".to_string(),
+                nonce: "nn".to_string(),
+                kdf: "argon2id".to_string(),
+                kdf_params: KdfParams {
+                    salt: "sl".to_string(),
+                    m_cost: 1,
+                    t_cost: 1,
+                    p_cost: 1,
+                },
+            },
+        };
+        let swarmid = SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: SwarmIdFile::VERSION,
+            identity: inner.clone(),
+        };
+        let json = serde_json::to_string(&swarmid).unwrap();
+        assert!(json.contains("\"format\":\"swarmid\""));
+        assert!(json.contains("\"version\":1"));
+        let parsed: SwarmIdFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.identity.display_name, "Test");
+    }
+
+    #[test]
+    fn export_swarmid_wrong_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Alice", "correct-passphrase").unwrap();
+        let result = mgr.export_swarmid(&identity.identity_uuid, "wrong-passphrase");
+        assert!(matches!(result, Err(crate::KrillnotesError::IdentityWrongPassphrase)));
+    }
+
+    #[test]
+    fn export_swarmid_correct_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Bob", "my-passphrase").unwrap();
+        let swarmid = mgr.export_swarmid(&identity.identity_uuid, "my-passphrase").unwrap();
+        assert_eq!(swarmid.format, "swarmid");
+        assert_eq!(swarmid.version, 1);
+        assert_eq!(swarmid.identity.display_name, "Bob");
+        assert_eq!(swarmid.identity.identity_uuid, identity.identity_uuid);
+        assert_eq!(swarmid.identity.public_key, identity.public_key);
+    }
+
+    #[test]
+    fn import_swarmid_adds_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Create identity, export it, then delete to simulate a fresh device
+        let original = mgr.create_identity("Charlie", "passphrase").unwrap();
+        let swarmid = SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: SwarmIdFile::VERSION,
+            identity: original.clone(),
+        };
+        mgr.delete_identity(&original.identity_uuid).unwrap();
+        assert!(mgr.list_identities().unwrap().is_empty());
+
+        let identity_ref = mgr.import_swarmid(swarmid).unwrap();
+        assert_eq!(identity_ref.display_name, "Charlie");
+        assert_eq!(identity_ref.uuid, original.identity_uuid);
+
+        let identities = mgr.list_identities().unwrap();
+        assert_eq!(identities.len(), 1);
+    }
+
+    #[test]
+    fn import_swarmid_collision_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let original = mgr.create_identity("Dave", "passphrase").unwrap();
+        let swarmid = SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: SwarmIdFile::VERSION,
+            identity: original.clone(),
+        };
+        // Import again — same UUID should fail with IdentityAlreadyExists
+        let result = mgr.import_swarmid(swarmid);
+        assert!(matches!(result, Err(crate::KrillnotesError::IdentityAlreadyExists(_))));
+    }
+
+    #[test]
+    fn import_swarmid_overwrite_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let original = mgr.create_identity("Eve", "passphrase").unwrap();
+        let mut swarmid = SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: SwarmIdFile::VERSION,
+            identity: original.clone(),
+        };
+        swarmid.identity.display_name = "Eve Updated".to_string();
+        let identity_ref = mgr.import_swarmid_overwrite(swarmid).unwrap();
+        assert_eq!(identity_ref.display_name, "Eve Updated");
+        // Only one identity in list
+        assert_eq!(mgr.list_identities().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_swarmid_invalid_format_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr.create_identity("Test", "pass").unwrap();
+
+        let bad_format = SwarmIdFile {
+            format: "notswarmid".to_string(),
+            version: 1,
+            identity: identity.clone(),
+        };
+        assert!(matches!(
+            mgr.import_swarmid(bad_format),
+            Err(crate::KrillnotesError::SwarmIdInvalidFormat(_))
+        ));
+
+        let bad_version = SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: 99,
+            identity,
+        };
+        assert!(matches!(
+            mgr.import_swarmid(bad_version),
+            Err(crate::KrillnotesError::SwarmIdVersionUnsupported(99))
+        ));
     }
 }

@@ -1577,6 +1577,63 @@ fn get_workspaces_for_identity(
     }).collect())
 }
 
+/// Export an identity to a `.swarmid` file at the given path.
+/// Verifies the passphrase before writing.
+/// Returns `"WRONG_PASSPHRASE"` on passphrase mismatch.
+#[tauri::command]
+fn export_swarmid_cmd(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    passphrase: String,
+    path: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let swarmid = mgr.export_swarmid(&uuid, &passphrase).map_err(|e| {
+        match e {
+            KrillnotesError::IdentityWrongPassphrase => "WRONG_PASSPHRASE".to_string(),
+            other => other.to_string(),
+        }
+    })?;
+    let json = serde_json::to_string_pretty(&swarmid).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Import a `.swarmid` file from the given path.
+/// Returns the `IdentityRef` on success.
+/// Returns `"IDENTITY_EXISTS:<uuid>"` if the same UUID is already registered —
+/// frontend should confirm overwrite then call `import_swarmid_overwrite_cmd`.
+#[tauri::command]
+fn import_swarmid_cmd(
+    state: State<'_, AppState>,
+    path: String,
+) -> std::result::Result<IdentityRef, String> {
+    let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let file: SwarmIdFile = serde_json::from_str(&data)
+        .map_err(|e| format!("Invalid .swarmid file: {e}"))?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.import_swarmid(file).map_err(|e| {
+        match e {
+            KrillnotesError::IdentityAlreadyExists(uuid) => format!("IDENTITY_EXISTS:{uuid}"),
+            other => other.to_string(),
+        }
+    })
+}
+
+/// Import a `.swarmid` file, overwriting any existing identity with the same UUID.
+#[tauri::command]
+fn import_swarmid_overwrite_cmd(
+    state: State<'_, AppState>,
+    path: String,
+) -> std::result::Result<IdentityRef, String> {
+    let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let file: SwarmIdFile = serde_json::from_str(&data)
+        .map_err(|e| format!("Invalid .swarmid file: {e}"))?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.import_swarmid_overwrite(file).map_err(|e| e.to_string())
+}
+
 // ── Theme commands ────────────────────────────────────────────────
 
 /// Lists all user theme files in the themes directory.
@@ -2544,6 +2601,9 @@ pub fn run() {
             get_unlocked_identities,
             is_identity_unlocked,
             get_workspaces_for_identity,
+            export_swarmid_cmd,
+            import_swarmid_cmd,
+            import_swarmid_overwrite_cmd,
             attach_file,
             attach_file_bytes,
             get_attachments,
