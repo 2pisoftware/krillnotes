@@ -169,7 +169,7 @@ function OperationsLogDialog({ isOpen, onClose }: OperationsLogDialogProps) {
                     </td>
                     <td className="px-4 py-2 whitespace-nowrap">
                       <span className="text-xs font-mono text-muted-foreground">
-                        {op.authorKey ? op.authorKey.slice(0, 8) : '—'}
+                        {op.authorKey || '—'}
                       </span>
                     </td>
                     <td className="px-4 py-2 text-right">

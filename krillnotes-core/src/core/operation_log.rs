@@ -249,7 +249,7 @@ impl OperationLog {
         for field in &["created_by", "modified_by", "deleted_by", "moved_by"] {
             if let Some(key) = value.get(field).and_then(|v| v.as_str()) {
                 if !key.is_empty() {
-                    return key.chars().take(8).collect();
+                    return key.to_string();
                 }
             }
         }

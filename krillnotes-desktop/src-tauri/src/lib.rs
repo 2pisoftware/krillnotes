@@ -1255,12 +1255,27 @@ fn list_operations(
     until: Option<i64>,
 ) -> std::result::Result<Vec<krillnotes_core::OperationSummary>, String> {
     let label = window.label();
-    state.workspaces.lock()
+    let mut summaries = state.workspaces.lock()
         .expect("Mutex poisoned")
         .get(label)
         .ok_or("No workspace open")?
         .list_operations(type_filter.as_deref(), since, until)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Resolve raw base64 public keys to identity display names where possible.
+    let identity_manager = state.identity_manager.lock().expect("Mutex poisoned");
+    for summary in &mut summaries {
+        if !summary.author_key.is_empty() {
+            if let Some(name) = identity_manager.lookup_display_name(&summary.author_key) {
+                summary.author_key = name;
+            } else {
+                // Unknown key: show first 8 chars of base64 as a compact fingerprint.
+                summary.author_key = summary.author_key.chars().take(8).collect();
+            }
+        }
+    }
+
+    Ok(summaries)
 }
 
 /// Deletes all operations from the log.
