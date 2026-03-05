@@ -107,6 +107,7 @@ User action → React component → invoke("tauri_command", {...})
 - `include_dir!` embeds system scripts at compile time
 - Tests use `#[cfg(test)]` modules with temp in-memory workspaces
 - UUIDs for all IDs (`uuid::Uuid`), `chrono::DateTime<Utc>` for timestamps
+- **Any struct returned from a Tauri command to the frontend MUST have `#[serde(rename_all = "camelCase")]`** — without it, Rust's snake_case fields (`display_name`, `last_used`) arrive as `undefined` in TypeScript which expects camelCase (`displayName`, `lastUsed`). Structs defined in `krillnotes-core` that are re-exported via Tauri commands are especially prone to this — the core crate has no knowledge of the frontend convention. When adding `rename_all = "camelCase"` to an existing struct that is also persisted to disk (e.g. stored in JSON settings files), add `#[serde(alias = "snake_case_name")]` to each renamed field so old files can still be read.
 
 ### TypeScript / React
 - React 19 with functional components + hooks
