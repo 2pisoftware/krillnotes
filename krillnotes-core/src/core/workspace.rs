@@ -821,7 +821,7 @@ impl Workspace {
                 Ok(RetractInverse::PositionRestore {
                     note_id: note_id.clone(),
                     old_parent_id: current.parent_id,
-                    old_position: current.position,
+                    old_position: current.position as f64,
                 })
             }
             RetractInverse::DeleteScript { script_id } => {
@@ -2172,7 +2172,7 @@ impl Workspace {
         // 4. Get the note's current parent_id and position
         let note = self.get_note(note_id)?;
         let old_parent_id = note.parent_id.clone();
-        let old_position = note.position;
+        let old_position = note.position as f64;
 
         let now = chrono::Utc::now().timestamp();
         let ts = self.advance_hlc();
@@ -2521,7 +2521,7 @@ impl Workspace {
             batch_items.push(RetractInverse::PositionRestore {
                 note_id: child.id.clone(),
                 old_parent_id: Some(deleted_note.id.clone()),
-                old_position: child.position,
+                old_position: child.position as f64,
             });
         }
         batch_items.push(RetractInverse::SubtreeRestore {
@@ -3696,7 +3696,7 @@ impl Workspace {
             }
 
             RetractInverse::PositionRestore { note_id, old_parent_id, old_position } => {
-                self.move_note(note_id, old_parent_id.as_deref(), *old_position)?;
+                self.move_note(note_id, old_parent_id.as_deref(), *old_position as i32)?;
                 Ok(Some(note_id.clone()))
             }
 
@@ -5901,7 +5901,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
             RetractInverse::PositionRestore { note_id, old_parent_id, old_position } => {
                 assert_eq!(note_id, &sibling_id);
                 assert_eq!(old_parent_id, &old_note.parent_id);
-                assert_eq!(*old_position, old_note.position);
+                assert_eq!(*old_position, old_note.position as f64);
             }
             _ => panic!("expected PositionRestore"),
         }

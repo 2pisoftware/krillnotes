@@ -45,7 +45,7 @@ pub enum RetractInverse {
     PositionRestore {
         note_id: String,
         old_parent_id: Option<String>,
-        old_position: i32,
+        old_position: f64,
     },
 
     /// Inverse of `CreateUserScript` — delete the created script.
