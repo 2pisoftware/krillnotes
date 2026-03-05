@@ -936,7 +936,7 @@ mod tests {
         use crate::Note;
         let note = Note {
             id: "n1".to_string(), node_type: "Folder".to_string(),
-            title: "F".to_string(), parent_id: None, position: 0,
+            title: "F".to_string(), parent_id: None, position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             fields: std::collections::BTreeMap::new(), is_expanded: false, tags: vec![],
         };
@@ -1828,7 +1828,7 @@ mod tests {
         fields.insert("body".into(), FieldValue::Text("**important**".into()));
         let note = Note {
             id: "n1".into(), title: "Test".into(), node_type: "Memo".into(),
-            parent_id: None, position: 0, created_at: 0, modified_at: 0,
+            parent_id: None, position: 0.0, created_at: 0, modified_at: 0,
             created_by: 0, modified_by: 0, fields, is_expanded: false, tags: vec![],
         };
 
@@ -1869,7 +1869,7 @@ mod tests {
             node_type: "LinkTest".to_string(),
             title: "Test".to_string(),
             parent_id: None,
-            position: 0,
+            position: 0.0,
             created_at: 0,
             modified_at: 0,
             created_by: 0,
@@ -2131,7 +2131,7 @@ mod tests {
         use crate::Note;
         let note = Note {
             id: "n1".to_string(), node_type: "BoomView".to_string(),
-            title: "T".to_string(), parent_id: None, position: 0,
+            title: "T".to_string(), parent_id: None, position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             fields: BTreeMap::new(), is_expanded: false, tags: vec![],
         };
@@ -2189,7 +2189,7 @@ mod tests {
         let note = crate::Note {
             id: "n1".into(), title: "Hello".into(),
             node_type: "TextNote".into(), parent_id: None,
-            fields: std::collections::BTreeMap::new(), position: 0,
+            fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             is_expanded: false, tags: vec![],
         };
@@ -2215,7 +2215,7 @@ mod tests {
         let note = crate::Note {
             id: "p1".into(), title: "Parent".into(),
             node_type: "TextNote".into(), parent_id: None,
-            fields: std::collections::BTreeMap::new(), position: 0,
+            fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             is_expanded: false, tags: vec![],
         };
@@ -2237,7 +2237,7 @@ mod tests {
         let note = crate::Note {
             id: "n1".into(), title: "T".into(),
             node_type: "TextNote".into(), parent_id: None,
-            fields: std::collections::BTreeMap::new(), position: 0,
+            fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             is_expanded: false, tags: vec![],
         };
@@ -2263,7 +2263,7 @@ mod tests {
         let note = crate::Note {
             id: "n1".into(), title: "T".into(),
             node_type: "TextNote".into(), parent_id: None,
-            fields: std::collections::BTreeMap::new(), position: 0,
+            fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             is_expanded: false, tags: vec![],
         };
@@ -2285,7 +2285,7 @@ mod tests {
         crate::Note {
             id: id.into(), title: "Test".into(),
             node_type: node_type.into(), parent_id: None,
-            fields: Default::default(), position: 0,
+            fields: Default::default(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             is_expanded: false, tags: vec![],
         }
@@ -2432,7 +2432,7 @@ mod tests {
 
         let note = Note {
             id: "n1".to_string(), node_type: "Tagged".to_string(),
-            title: "T".to_string(), parent_id: None, position: 0,
+            title: "T".to_string(), parent_id: None, position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             fields: std::collections::BTreeMap::new(), is_expanded: false,
             tags: vec!["rust".to_string(), "notes".to_string()],
@@ -2623,7 +2623,7 @@ mod tests {
         "#, "HoverRun").unwrap();
         let note = crate::Note {
             id: "id1".into(), title: "Test Note".into(), node_type: "HoverRun".into(),
-            parent_id: None, position: 0, created_at: 0, modified_at: 0,
+            parent_id: None, position: 0.0, created_at: 0, modified_at: 0,
             created_by: 0, modified_by: 0,
             fields: std::collections::BTreeMap::new(), is_expanded: false, tags: vec![],
         };
@@ -2714,7 +2714,7 @@ mod tests {
         let note = Note {
             id: "n1".to_string(), node_type: "PhotoNote".to_string(),
             title: "T".to_string(), parent_id: None, fields, tags: vec![],
-            created_at: 0, modified_at: 0, position: 0,
+            created_at: 0, modified_at: 0, position: 0.0,
             created_by: 0, modified_by: 0, is_expanded: false,
         };
 
@@ -2742,7 +2742,7 @@ mod tests {
         let note = Note {
             id: "n2".to_string(), node_type: "PhotoNote".to_string(),
             title: "T".to_string(), parent_id: None, fields, tags: vec![],
-            created_at: 0, modified_at: 0, position: 0,
+            created_at: 0, modified_at: 0, position: 0.0,
             created_by: 0, modified_by: 0, is_expanded: false,
         };
 

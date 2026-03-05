@@ -207,7 +207,7 @@ impl Workspace {
             title,
             node_type: "TextNote".to_string(),
             parent_id: None,
-            position: 0,
+            position: 0.0,
             created_at: now,
             modified_at: now,
             created_by: 0,
@@ -821,7 +821,7 @@ impl Workspace {
                 Ok(RetractInverse::PositionRestore {
                     note_id: note_id.clone(),
                     old_parent_id: current.parent_id,
-                    old_position: current.position as f64,
+                    old_position: current.position,
                 })
             }
             RetractInverse::DeleteScript { script_id } => {
@@ -941,8 +941,8 @@ impl Workspace {
 
         // Determine final parent and position
         let (final_parent, final_position) = match position {
-            AddPosition::AsChild => (Some(selected.id.clone()), 0),
-            AddPosition::AsSibling => (selected.parent_id.clone(), selected.position + 1),
+            AddPosition::AsChild => (Some(selected.id.clone()), 0.0_f64),
+            AddPosition::AsSibling => (selected.parent_id.clone(), selected.position + 1.0),
         };
 
         // Validate allowed_parent_types
@@ -1071,7 +1071,7 @@ impl Workspace {
             device_id: self.device_id.clone(),
             note_id: note.id.clone(),
             parent_id: note.parent_id.clone(),
-            position: note.position as f64,
+            position: note.position,
             node_type: note.node_type.clone(),
             title: note.title.clone(),
             fields: note.fields.clone(),
@@ -1143,8 +1143,8 @@ impl Workspace {
         let target_note = self.get_note(target_id)?;
 
         let (new_parent_id, new_position) = match position {
-            AddPosition::AsChild => (Some(target_note.id.clone()), 0i32),
-            AddPosition::AsSibling => (target_note.parent_id.clone(), target_note.position + 1),
+            AddPosition::AsChild => (Some(target_note.id.clone()), 0.0_f64),
+            AddPosition::AsSibling => (target_note.parent_id.clone(), target_note.position + 1.0),
         };
 
         // Validate allowed_parent_types for the root copy
@@ -1291,7 +1291,7 @@ impl Workspace {
             title: "Untitled".to_string(),
             node_type: node_type.to_string(),
             parent_id: None,
-            position: 0,
+            position: 0.0,
             created_at: now,
             modified_at: now,
             created_by: self.current_user_id,
@@ -1331,7 +1331,7 @@ impl Workspace {
             device_id: self.device_id.clone(),
             note_id: new_note.id.clone(),
             parent_id: new_note.parent_id.clone(),
-            position: new_note.position as f64,
+            position: new_note.position,
             node_type: new_note.node_type.clone(),
             title: new_note.title.clone(),
             fields: new_note.fields.clone(),
@@ -2172,7 +2172,7 @@ impl Workspace {
         // 4. Get the note's current parent_id and position
         let note = self.get_note(note_id)?;
         let old_parent_id = note.parent_id.clone();
-        let old_position = note.position as f64;
+        let old_position = note.position;
 
         let now = chrono::Utc::now().timestamp();
         let ts = self.advance_hlc();
@@ -2521,7 +2521,7 @@ impl Workspace {
             batch_items.push(RetractInverse::PositionRestore {
                 note_id: child.id.clone(),
                 old_parent_id: Some(deleted_note.id.clone()),
-                old_position: child.position as f64,
+                old_position: child.position,
             });
         }
         batch_items.push(RetractInverse::SubtreeRestore {
@@ -3839,7 +3839,7 @@ fn note_from_row_tuple(
         title,
         node_type,
         parent_id,
-        position: position as i32,
+        position,
         created_at,
         modified_at,
         created_by,
@@ -4132,7 +4132,7 @@ mod tests {
         assert_eq!(new_root.title, "Untitled");
         assert_eq!(new_root.node_type, "TextNote");
         assert_eq!(new_root.parent_id, None, "Root note should have no parent");
-        assert_eq!(new_root.position, 0, "Root note should be at position 0");
+        assert_eq!(new_root.position, 0.0, "Root note should be at position 0");
         assert!(new_root.is_expanded, "Root note should be expanded");
     }
 
@@ -4227,9 +4227,9 @@ mod tests {
         let child3 = ws.get_note(&child3_id).unwrap();
 
         // Expected order: child1 (0), child3 (1), child2 (2)
-        assert_eq!(child1.position, 0, "child1 should remain at position 0");
-        assert_eq!(child3.position, 1, "child3 (inserted after child1) should be at position 1");
-        assert_eq!(child2.position, 2, "child2 should be bumped to position 2");
+        assert_eq!(child1.position, 0.0, "child1 should remain at position 0");
+        assert_eq!(child3.position, 1.0, "child3 (inserted after child1) should be at position 1");
+        assert_eq!(child2.position, 2.0, "child2 should be bumped to position 2");
     }
 
     #[test]
@@ -4442,8 +4442,8 @@ mod tests {
 
         // Gather positions of the surviving root-level notes
         let root_level: Vec<_> = notes.iter().filter(|n| n.parent_id == Some(root.id.clone())).collect();
-        let mut positions: Vec<i32> = root_level.iter().map(|n| n.position).collect();
-        positions.sort();
+        let mut positions: Vec<f64> = root_level.iter().map(|n| n.position).collect();
+        positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         // All positions must be unique
         let unique_count = {
@@ -4692,7 +4692,7 @@ mod tests {
         assert_eq!(kids[1].id, children[0]);
         assert_eq!(kids[2].id, children[1]);
         for (i, kid) in kids.iter().enumerate() {
-            assert_eq!(kid.position, i as i32, "Position mismatch at index {i}");
+            assert_eq!(kid.position, i as f64, "Position mismatch at index {i}");
         }
     }
 
@@ -4703,11 +4703,11 @@ mod tests {
         let root_kids = ws.get_children(&root_id).unwrap();
         assert_eq!(root_kids.len(), 1);
         assert_eq!(root_kids[0].id, children[0]);
-        assert_eq!(root_kids[0].position, 0);
+        assert_eq!(root_kids[0].position, 0.0);
         let grandkids = ws.get_children(&children[0]).unwrap();
         assert_eq!(grandkids.len(), 1);
         assert_eq!(grandkids[0].id, children[1]);
-        assert_eq!(grandkids[0].position, 0);
+        assert_eq!(grandkids[0].position, 0.0);
     }
 
     #[test]
@@ -4717,10 +4717,10 @@ mod tests {
         let root_kids = ws.get_children(&root_id).unwrap();
         assert_eq!(root_kids.len(), 1);
         assert_eq!(root_kids[0].id, children[1]);
-        assert_eq!(root_kids[0].position, 0);
+        assert_eq!(root_kids[0].position, 0.0);
         let moved = ws.get_note(&children[0]).unwrap();
         assert_eq!(moved.parent_id, None);
-        assert_eq!(moved.position, 1);
+        assert_eq!(moved.position, 1.0);
     }
 
     #[test]
@@ -4759,7 +4759,7 @@ mod tests {
         let root_kids = ws.get_children(&root_id).unwrap();
         assert_eq!(root_kids.len(), 3);
         for (i, kid) in root_kids.iter().enumerate() {
-            assert_eq!(kid.position, i as i32, "Gap at index {i}");
+            assert_eq!(kid.position, i as f64, "Gap at index {i}");
         }
     }
 
@@ -5901,7 +5901,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
             RetractInverse::PositionRestore { note_id, old_parent_id, old_position } => {
                 assert_eq!(note_id, &sibling_id);
                 assert_eq!(old_parent_id, &old_note.parent_id);
-                assert_eq!(*old_position, old_note.position as f64);
+                assert_eq!(*old_position, old_note.position);
             }
             _ => panic!("expected PositionRestore"),
         }
