@@ -10,7 +10,7 @@ use crate::core::attachment::{
     decrypt_attachment, encrypt_attachment, AttachmentMeta,
 };
 use crate::core::export::WorkspaceMetadata;
-use crate::core::hlc::HlcTimestamp;
+use crate::core::hlc::{HlcClock, HlcTimestamp};
 use crate::core::user_script;
 #[allow(unused_imports)]
 use crate::{
@@ -86,6 +86,11 @@ pub struct Workspace {
     /// is executing so that mutations called from within an undo/redo do not push
     /// spurious entries onto the undo stack.
     inside_undo: bool,
+    /// Hybrid Logical Clock for monotonically-ordered operation timestamps.
+    hlc: HlcClock,
+    /// Optional Ed25519 signing key bound to the active identity.
+    /// When `Some`, every logged operation is signed before being written.
+    signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl Workspace {
@@ -96,7 +101,7 @@ impl Workspace {
     ///
     /// Returns [`crate::KrillnotesError::Database`] for any SQLite failure, or
     /// [`crate::KrillnotesError::InvalidWorkspace`] if the device ID cannot be obtained.
-    pub fn create<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
+    pub fn create<P: AsRef<Path>>(path: P, password: &str, signing_key: Option<ed25519_dalek::SigningKey>) -> Result<Self> {
         let mut storage = Storage::create(&path, password)?;
         let mut script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
@@ -238,6 +243,12 @@ impl Workspace {
         )?;
         let undo_limit: usize = 50;
 
+        // Initialise HLC for this workspace.
+        let node_id = crate::core::hlc::node_id_from_device(
+            &uuid::Uuid::parse_str(&device_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        );
+        let hlc = HlcClock::new(node_id);
+
         let workspace = Self {
             storage,
             script_registry,
@@ -254,6 +265,8 @@ impl Workspace {
             script_redo_stack: Vec::new(),
             undo_group_buffer: None,
             inside_undo: false,
+            hlc,
+            signing_key,
         };
         let _ = workspace.write_info_json(); // best-effort; non-fatal
         Ok(workspace)
@@ -267,7 +280,7 @@ impl Workspace {
     /// incorrect, [`crate::KrillnotesError::UnencryptedWorkspace`] if the file
     /// is a plain unencrypted SQLite database, or
     /// [`crate::KrillnotesError::Database`] for any SQLite failure.
-    pub fn open<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: P, password: &str, signing_key: Option<ed25519_dalek::SigningKey>) -> Result<Self> {
         let storage = Storage::open(&path, password)?;
         let script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
@@ -333,6 +346,13 @@ impl Workspace {
             .and_then(|s| s.parse().ok())
             .unwrap_or(50);
 
+        // Load HLC state from DB (uses stored node_id if present, else derives from device_id).
+        let node_id = crate::core::hlc::node_id_from_device(
+            &uuid::Uuid::parse_str(&device_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        );
+        let hlc = HlcClock::load_from_db(storage.connection(), node_id)
+            .map_err(KrillnotesError::Database)?;
+
         let mut ws = Self {
             storage,
             script_registry,
@@ -349,6 +369,8 @@ impl Workspace {
             script_redo_stack: Vec::new(),
             undo_group_buffer: None,
             inside_undo: false,
+            hlc,
+            signing_key,
         };
 
         // Load enabled scripts from the workspace DB.
@@ -447,6 +469,36 @@ impl Workspace {
     /// Takes the log as an explicit parameter for the same borrow-checker reason.
     fn purge_ops_if_needed(log: &OperationLog, tx: &rusqlite::Transaction) -> Result<()> {
         log.purge_if_needed(tx)
+    }
+
+    /// Advances the HLC and returns the next timestamp.
+    ///
+    /// Call this before opening a transaction (it only updates in-memory HLC state).
+    /// Pair with [`Self::save_hlc`] inside the transaction to persist the new state.
+    fn advance_hlc(&mut self) -> HlcTimestamp {
+        self.hlc.now()
+    }
+
+    /// Persists the current HLC state to the `hlc_state` table within a transaction.
+    ///
+    /// Takes the HLC fields as a standalone parameter to avoid a borrow conflict
+    /// with the transaction (which is borrowed from `self.storage`).
+    fn save_hlc(ts: &HlcTimestamp, tx: &rusqlite::Transaction) -> Result<()> {
+        tx.execute(
+            "INSERT OR REPLACE INTO hlc_state (id, wall_ms, counter, node_id) VALUES (1, ?, ?, ?)",
+            rusqlite::params![ts.wall_ms as i64, ts.counter as i64, ts.node_id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Signs `op` in place if a signing key is present. No-op otherwise.
+    ///
+    /// Takes the signing key as an explicit parameter to avoid a borrow conflict
+    /// with the transaction (which is borrowed from `self.storage`).
+    fn sign_op_with(signing_key: &Option<ed25519_dalek::SigningKey>, op: &mut Operation) {
+        if let Some(key) = signing_key {
+            op.sign(key);
+        }
     }
 
     /// Returns `true` if there is at least one action to undo.
@@ -637,10 +689,11 @@ impl Workspace {
         let affected_note_id = apply_result?;
 
         // Write RetractOperation to the log.
+        let retract_ts = self.advance_hlc();
         let retract_op_id = uuid::Uuid::new_v4().to_string();
         let retract_op = Operation::RetractOperation {
             operation_id: retract_op_id,
-            timestamp: HlcTimestamp::from_unix_secs(chrono::Utc::now().timestamp()),
+            timestamp: retract_ts,
             device_id: self.device_id.clone(),
             retracted_ids: entry.retracted_ids.clone(),
             inverse: entry.inverse.clone(),
@@ -648,6 +701,7 @@ impl Workspace {
         };
         {
             let tx = self.storage.connection_mut().transaction()?;
+            Self::save_hlc(&retract_ts, &tx)?;
             Self::log_op(&self.operation_log, &tx, &retract_op)?;
             Self::purge_ops_if_needed(&self.operation_log, &tx)?;
             tx.commit()?;
@@ -693,10 +747,11 @@ impl Workspace {
         let affected_note_id = apply_result?;
 
         // Log redo as a new RetractOperation.
+        let redo_ts = self.advance_hlc();
         let new_op_id = uuid::Uuid::new_v4().to_string();
         let redo_op = Operation::RetractOperation {
             operation_id: new_op_id,
-            timestamp: HlcTimestamp::from_unix_secs(chrono::Utc::now().timestamp()),
+            timestamp: redo_ts,
             device_id: self.device_id.clone(),
             retracted_ids: entry.retracted_ids.clone(),
             inverse: entry.inverse.clone(),
@@ -704,6 +759,7 @@ impl Workspace {
         };
         {
             let tx = self.storage.connection_mut().transaction()?;
+            Self::save_hlc(&redo_ts, &tx)?;
             Self::log_op(&self.operation_log, &tx, &redo_op)?;
             Self::purge_ops_if_needed(&self.operation_log, &tx)?;
             tx.commit()?;
@@ -928,20 +984,25 @@ impl Workspace {
             None
         };
 
+        let now = chrono::Utc::now().timestamp();
         let mut note = Note {
             id: Uuid::new_v4().to_string(),
             title: "Untitled".to_string(),
             node_type: note_type.to_string(),
             parent_id: final_parent,
             position: final_position,
-            created_at: chrono::Utc::now().timestamp(),
-            modified_at: chrono::Utc::now().timestamp(),
+            created_at: now,
+            modified_at: now,
             created_by: self.current_user_id,
             modified_by: self.current_user_id,
             fields: schema.default_fields(),
             is_expanded: true,
             tags: vec![],
         };
+
+        // Advance HLC and capture signing key before the transaction borrows self.storage.
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
 
         let tx = self.storage.connection_mut().transaction()?;
 
@@ -1003,9 +1064,10 @@ impl Workspace {
         }
 
         // Log operation
-        let op = Operation::CreateNote {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::CreateNote {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(note.created_at),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             note_id: note.id.clone(),
             parent_id: note.parent_id.clone(),
@@ -1016,6 +1078,7 @@ impl Workspace {
             created_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -1124,6 +1187,13 @@ impl Workspace {
 
         let now = chrono::Utc::now().timestamp();
 
+        // Pre-advance HLC once per note in the subtree, and capture signing key,
+        // before the transaction borrows self.storage mutably.
+        let subtree_timestamps: Vec<HlcTimestamp> = subtree.iter()
+            .map(|_| self.advance_hlc())
+            .collect();
+        let signing_key = self.signing_key.clone();
+
         // 4. Insert all cloned notes in a single transaction.
         let tx = self.storage.connection_mut().transaction()?;
 
@@ -1137,7 +1207,7 @@ impl Workspace {
 
         let root_new_id = id_map[source_id].clone();
 
-        for note in &subtree {
+        for (note, ts) in subtree.iter().zip(subtree_timestamps.iter()) {
             let new_id = id_map[&note.id].clone();
             let new_parent = if note.id == source_id {
                 // Root of the copy gets the paste target as parent
@@ -1167,9 +1237,10 @@ impl Workspace {
             )?;
 
             // Log a CreateNote operation for each inserted note.
-            let op = Operation::CreateNote {
+            Self::save_hlc(ts, &tx)?;
+            let mut op = Operation::CreateNote {
                 operation_id: Uuid::new_v4().to_string(),
-                timestamp: HlcTimestamp::from_unix_secs(now),
+                timestamp: *ts,
                 device_id: self.device_id.clone(),
                 note_id: new_id.clone(),
                 parent_id: new_parent,
@@ -1180,6 +1251,7 @@ impl Workspace {
                 created_by: String::new(),
                 signature: String::new(),
             };
+            Self::sign_op_with(&signing_key, &mut op);
             Self::log_op(&self.operation_log, &tx, &op)?;
         }
 
@@ -1229,6 +1301,8 @@ impl Workspace {
             tags: vec![],
         };
 
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute(
@@ -1250,9 +1324,10 @@ impl Workspace {
         )?;
 
         // Log operation
-        let op = Operation::CreateNote {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::CreateNote {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(new_note.created_at),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             note_id: new_note.id.clone(),
             parent_id: new_note.parent_id.clone(),
@@ -1263,6 +1338,7 @@ impl Workspace {
             created_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -1292,6 +1368,8 @@ impl Workspace {
     /// the UPDATE fails.
     pub fn update_note_title(&mut self, note_id: &str, new_title: String) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute(
@@ -1300,9 +1378,10 @@ impl Workspace {
         )?;
 
         // Log operation
-        let op = Operation::UpdateField {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::UpdateField {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             note_id: note_id.to_string(),
             field: "title".to_string(),
@@ -1310,6 +1389,7 @@ impl Workspace {
             modified_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -1330,6 +1410,9 @@ impl Workspace {
         normalised.sort();
         normalised.dedup();
 
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
+
         let tx = self.storage.connection_mut().transaction()?;
         tx.execute("DELETE FROM note_tags WHERE note_id = ?", [note_id])?;
         for tag in &normalised {
@@ -1338,6 +1421,22 @@ impl Workspace {
                 rusqlite::params![note_id, tag],
             )?;
         }
+
+        // Log a SetTags operation so peers can replicate tag changes.
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::SetTags {
+            operation_id: Uuid::new_v4().to_string(),
+            timestamp: ts,
+            device_id: self.device_id.clone(),
+            note_id: note_id.to_string(),
+            tags: normalised,
+            modified_by: String::new(),
+            signature: String::new(),
+        };
+        Self::sign_op_with(&signing_key, &mut op);
+        Self::log_op(&self.operation_log, &tx, &op)?;
+        Self::purge_ops_if_needed(&self.operation_log, &tx)?;
+
         tx.commit()?;
         Ok(())
     }
@@ -1725,10 +1824,28 @@ impl Workspace {
         // Apply creates and updates atomically if any were queued.
         if !result.creates.is_empty() || !result.updates.is_empty() {
             let now = chrono::Utc::now().timestamp();
+
+            // Pre-advance HLC once per create, plus once per update (title) and once
+            // per field within each update, before the transaction borrows self.storage.
+            let create_timestamps: Vec<HlcTimestamp> = result.creates.iter()
+                .map(|_| self.advance_hlc())
+                .collect();
+            // For updates: title + each field
+            let update_timestamps: Vec<(HlcTimestamp, Vec<HlcTimestamp>)> = result.updates.iter()
+                .map(|update| {
+                    let title_ts = self.advance_hlc();
+                    let field_tss: Vec<HlcTimestamp> = update.fields.keys()
+                        .map(|_| self.advance_hlc())
+                        .collect();
+                    (title_ts, field_tss)
+                })
+                .collect();
+            let signing_key = self.signing_key.clone();
+
             let tx = self.storage.connection_mut().transaction()?;
 
             // ── creates ────────────────────────────────────────────────────────
-            for create in &result.creates {
+            for (create, ts) in result.creates.iter().zip(create_timestamps.iter()) {
                 // Compute the next available position under the parent.
                 let position: i32 = tx.query_row(
                     "SELECT COALESCE(MAX(position), -1) + 1 FROM notes WHERE parent_id = ?1",
@@ -1758,9 +1875,10 @@ impl Workspace {
                     ],
                 )?;
 
-                let op = Operation::CreateNote {
+                Self::save_hlc(ts, &tx)?;
+                let mut op = Operation::CreateNote {
                     operation_id: Uuid::new_v4().to_string(),
-                    timestamp: HlcTimestamp::from_unix_secs(now),
+                    timestamp: *ts,
                     device_id: self.device_id.clone(),
                     note_id: create.id.clone(),
                     parent_id: Some(create.parent_id.clone()),
@@ -1771,11 +1889,12 @@ impl Workspace {
                     created_by: String::new(),
                     signature: String::new(),
                 };
+                Self::sign_op_with(&signing_key, &mut op);
                 Self::log_op(&self.operation_log, &tx, &op)?;
             }
 
             // ── updates ────────────────────────────────────────────────────────
-            for update in &result.updates {
+            for (update, (title_ts, field_tss)) in result.updates.iter().zip(update_timestamps.iter()) {
                 let fields_json = serde_json::to_string(&update.fields)?;
 
                 tx.execute(
@@ -1792,9 +1911,10 @@ impl Workspace {
                 )?;
 
                 // Log title update
-                let title_op = Operation::UpdateField {
+                Self::save_hlc(title_ts, &tx)?;
+                let mut title_op = Operation::UpdateField {
                     operation_id: Uuid::new_v4().to_string(),
-                    timestamp: HlcTimestamp::from_unix_secs(now),
+                    timestamp: *title_ts,
                     device_id: self.device_id.clone(),
                     note_id: update.note_id.clone(),
                     field: "title".to_string(),
@@ -1802,13 +1922,15 @@ impl Workspace {
                     modified_by: String::new(),
                     signature: String::new(),
                 };
+                Self::sign_op_with(&signing_key, &mut title_op);
                 Self::log_op(&self.operation_log, &tx, &title_op)?;
 
                 // Log one UpdateField per field value
-                for (field_key, field_value) in &update.fields {
-                    let field_op = Operation::UpdateField {
+                for ((field_key, field_value), field_ts) in update.fields.iter().zip(field_tss.iter()) {
+                    Self::save_hlc(field_ts, &tx)?;
+                    let mut field_op = Operation::UpdateField {
                         operation_id: Uuid::new_v4().to_string(),
-                        timestamp: HlcTimestamp::from_unix_secs(now),
+                        timestamp: *field_ts,
                         device_id: self.device_id.clone(),
                         note_id: update.note_id.clone(),
                         field: field_key.clone(),
@@ -1816,6 +1938,7 @@ impl Workspace {
                         modified_by: String::new(),
                         signature: String::new(),
                     };
+                    Self::sign_op_with(&signing_key, &mut field_op);
                     Self::log_op(&self.operation_log, &tx, &field_op)?;
                 }
             }
@@ -2052,6 +2175,8 @@ impl Workspace {
         let old_position = note.position;
 
         let now = chrono::Utc::now().timestamp();
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         // 5. Close the gap in the old sibling group
@@ -2100,9 +2225,10 @@ impl Workspace {
         }
 
         // 8. Log a MoveNote operation
-        let op = Operation::MoveNote {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::MoveNote {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             note_id: note_id.to_string(),
             new_parent_id: new_parent_id.map(|s| s.to_string()),
@@ -2110,6 +2236,7 @@ impl Workspace {
             moved_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -2205,16 +2332,22 @@ impl Workspace {
         tx.commit()?;
 
         // Log a DeleteNote operation for the root of the deleted subtree.
-        let op = Operation::DeleteNote {
-            operation_id: op_id.clone(),
-            timestamp: HlcTimestamp::from_unix_secs(chrono::Utc::now().timestamp()),
-            device_id: self.device_id.clone(),
-            note_id: note_id.to_string(),
-            deleted_by: String::new(),
-            signature: String::new(),
-        };
+        // Uses a separate transaction since the deletion tx was already committed.
+        // Advance HLC and capture signing key before the second transaction borrows self.storage.
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         {
             let tx = self.storage.connection_mut().transaction()?;
+            Self::save_hlc(&ts, &tx)?;
+            let mut op = Operation::DeleteNote {
+                operation_id: op_id.clone(),
+                timestamp: ts,
+                device_id: self.device_id.clone(),
+                note_id: note_id.to_string(),
+                deleted_by: String::new(),
+                signature: String::new(),
+            };
+            Self::sign_op_with(&signing_key, &mut op);
             Self::log_op(&self.operation_log, &tx, &op)?;
             Self::purge_ops_if_needed(&self.operation_log, &tx)?;
             tx.commit()?;
@@ -2312,6 +2445,10 @@ impl Workspace {
         // deletion transaction (satisfies note_links.target_id ON DELETE RESTRICT).
         self.clear_links_to(note_id)?;
 
+        // Advance HLC and capture signing key before the transaction borrows self.storage.
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
+
         let tx = self.storage.connection_mut().transaction()?;
 
         // Fetch the note's parent — surfaces NoteNotFound for missing IDs.
@@ -2352,14 +2489,16 @@ impl Workspace {
         )?;
 
         // Log a DeleteNote operation for the promoted note.
-        let op = Operation::DeleteNote {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::DeleteNote {
             operation_id: op_id.clone(),
-            timestamp: HlcTimestamp::from_unix_secs(chrono::Utc::now().timestamp()),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             note_id: note_id.to_string(),
             deleted_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -2543,6 +2682,14 @@ impl Workspace {
         // used to populate the undo entry's retracted_ids.
         let mut emitted_op_ids: Vec<String> = Vec::new();
 
+        // Pre-advance HLC for title op + one per field, and capture signing key,
+        // before the transaction borrows self.storage mutably.
+        let title_ts = self.advance_hlc();
+        let field_timestamps: Vec<HlcTimestamp> = fields.keys()
+            .map(|_| self.advance_hlc())
+            .collect();
+        let signing_key = self.signing_key.clone();
+
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute(
@@ -2559,11 +2706,12 @@ impl Workspace {
 
         // Log an UpdateField operation for the title, consistent with
         // update_note_title.
+        Self::save_hlc(&title_ts, &tx)?;
         let title_op_id = Uuid::new_v4().to_string();
         emitted_op_ids.push(title_op_id.clone());
-        let title_op = Operation::UpdateField {
+        let mut title_op = Operation::UpdateField {
             operation_id: title_op_id,
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: title_ts,
             device_id: self.device_id.clone(),
             note_id: note_id.to_string(),
             field: "title".to_string(),
@@ -2571,15 +2719,17 @@ impl Workspace {
             modified_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut title_op);
         Self::log_op(&self.operation_log, &tx, &title_op)?;
 
         // Log one UpdateField operation per field value that was written.
-        for (field_key, field_value) in &fields {
+        for ((field_key, field_value), field_ts) in fields.iter().zip(field_timestamps.iter()) {
+            Self::save_hlc(field_ts, &tx)?;
             let field_op_id = Uuid::new_v4().to_string();
             emitted_op_ids.push(field_op_id.clone());
-            let field_op = Operation::UpdateField {
+            let mut field_op = Operation::UpdateField {
                 operation_id: field_op_id,
-                timestamp: HlcTimestamp::from_unix_secs(now),
+                timestamp: *field_ts,
                 device_id: self.device_id.clone(),
                 note_id: note_id.to_string(),
                 field: field_key.clone(),
@@ -2587,6 +2737,7 @@ impl Workspace {
                 modified_by: String::new(),
                 signature: String::new(),
             };
+            Self::sign_op_with(&signing_key, &mut field_op);
             Self::log_op(&self.operation_log, &tx, &field_op)?;
         }
 
@@ -2687,6 +2838,10 @@ impl Workspace {
             return Err(e);
         }
 
+        // Advance HLC and capture signing key before the transaction borrows self.storage.
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
+
         let tx = self.storage.connection_mut().transaction()?;
 
         // Determine next load_order
@@ -2702,9 +2857,10 @@ impl Workspace {
         )?;
 
         // Log operation
-        let op = Operation::CreateUserScript {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::CreateUserScript {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             script_id: id.clone(),
             name: fm.name.clone(),
@@ -2715,6 +2871,7 @@ impl Workspace {
             created_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -2758,6 +2915,9 @@ impl Workspace {
         let old_script = self.get_user_script(script_id)?;
 
         let now = chrono::Utc::now().timestamp();
+        // Advance HLC and capture signing key before the transaction borrows self.storage.
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         let changes = tx.execute(
@@ -2777,9 +2937,10 @@ impl Workspace {
         )?;
 
         // Log operation
-        let op = Operation::UpdateUserScript {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::UpdateUserScript {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             script_id: script_id.to_string(),
             name: fm.name.clone(),
@@ -2790,6 +2951,7 @@ impl Workspace {
             modified_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -2820,20 +2982,23 @@ impl Workspace {
         // Capture old script state BEFORE deletion for undo.
         let old_script = self.get_user_script(script_id)?;
 
-        let now = chrono::Utc::now().timestamp();
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute("DELETE FROM user_scripts WHERE id = ?", [script_id])?;
 
         // Log operation
-        let op = Operation::DeleteUserScript {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::DeleteUserScript {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             script_id: script_id.to_string(),
             deleted_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -2859,7 +3024,8 @@ impl Workspace {
 
     /// Toggles the enabled state of a user script and reloads.
     pub fn toggle_user_script(&mut self, script_id: &str, enabled: bool) -> Result<Vec<ScriptError>> {
-        let now = chrono::Utc::now().timestamp();
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute(
@@ -2875,9 +3041,10 @@ impl Workspace {
         )?;
 
         // Log operation
-        let op = Operation::UpdateUserScript {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::UpdateUserScript {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             script_id: script_id.to_string(),
             name,
@@ -2888,6 +3055,7 @@ impl Workspace {
             modified_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -2898,7 +3066,8 @@ impl Workspace {
 
     /// Changes the load order of a user script and reloads.
     pub fn reorder_user_script(&mut self, script_id: &str, new_load_order: i32) -> Result<Vec<ScriptError>> {
-        let now = chrono::Utc::now().timestamp();
+        let ts = self.advance_hlc();
+        let signing_key = self.signing_key.clone();
         let tx = self.storage.connection_mut().transaction()?;
 
         tx.execute(
@@ -2914,9 +3083,10 @@ impl Workspace {
         )?;
 
         // Log operation
-        let op = Operation::UpdateUserScript {
+        Self::save_hlc(&ts, &tx)?;
+        let mut op = Operation::UpdateUserScript {
             operation_id: Uuid::new_v4().to_string(),
-            timestamp: HlcTimestamp::from_unix_secs(now),
+            timestamp: ts,
             device_id: self.device_id.clone(),
             script_id: script_id.to_string(),
             name,
@@ -2927,6 +3097,7 @@ impl Workspace {
             modified_by: String::new(),
             signature: String::new(),
         };
+        Self::sign_op_with(&signing_key, &mut op);
         Self::log_op(&self.operation_log, &tx, &op)?;
         Self::purge_ops_if_needed(&self.operation_log, &tx)?;
 
@@ -3727,7 +3898,7 @@ mod tests {
     #[test]
     fn test_create_workspace() {
         let temp = NamedTempFile::new().unwrap();
-        let ws = Workspace::create(temp.path(), "").unwrap();
+        let ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Verify root note exists
         let count: i64 = ws
@@ -3748,7 +3919,7 @@ mod tests {
     #[test]
     fn test_create_and_get_note() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         let child_id = ws
@@ -3763,7 +3934,7 @@ mod tests {
     #[test]
     fn test_update_note_title() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         ws.update_note_title(&root.id, "New Title".to_string())
@@ -3779,13 +3950,13 @@ mod tests {
 
         // Create workspace first
         {
-            let ws = Workspace::create(temp.path(), "").unwrap();
+            let ws = Workspace::create(temp.path(), "", None).unwrap();
             let root = ws.list_all_notes().unwrap()[0].clone();
             assert_eq!(root.node_type, "TextNote");
         }
 
         // Open it
-        let ws = Workspace::open(temp.path(), "").unwrap();
+        let ws = Workspace::open(temp.path(), "", None).unwrap();
 
         // Verify we can read notes
         let notes = ws.list_all_notes().unwrap();
@@ -3796,7 +3967,7 @@ mod tests {
     #[test]
     fn test_is_expanded_defaults_to_true() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Check root note is expanded by default
         let root = ws.list_all_notes().unwrap()[0].clone();
@@ -3817,14 +3988,14 @@ mod tests {
 
         // Create workspace with notes
         {
-            let mut ws = Workspace::create(temp.path(), "").unwrap();
+            let mut ws = Workspace::create(temp.path(), "", None).unwrap();
             let root = ws.list_all_notes().unwrap()[0].clone();
             ws.create_note(&root.id, AddPosition::AsChild, "TextNote")
                 .unwrap();
         }
 
         // Open and verify is_expanded is true
-        let ws = Workspace::open(temp.path(), "").unwrap();
+        let ws = Workspace::open(temp.path(), "", None).unwrap();
         let notes = ws.list_all_notes().unwrap();
         assert_eq!(notes.len(), 2);
         assert!(notes[0].is_expanded, "Root note should be expanded");
@@ -3834,7 +4005,7 @@ mod tests {
     #[test]
     fn test_toggle_note_expansion() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         assert!(root.is_expanded, "Root should start expanded");
@@ -3853,7 +4024,7 @@ mod tests {
     #[test]
     fn test_toggle_note_expansion_with_child_notes() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         let child_id = ws
@@ -3874,7 +4045,7 @@ mod tests {
     #[test]
     fn test_toggle_note_expansion_nonexistent_note() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Try to toggle a note that doesn't exist
         let result = ws.toggle_note_expansion("nonexistent-id");
@@ -3884,7 +4055,7 @@ mod tests {
     #[test]
     fn test_set_and_get_selected_note() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
 
@@ -3909,13 +4080,13 @@ mod tests {
 
         // Create workspace and set selection
         {
-            let mut ws = Workspace::create(temp.path(), "").unwrap();
+            let mut ws = Workspace::create(temp.path(), "", None).unwrap();
             let root = ws.list_all_notes().unwrap()[0].clone();
             ws.set_selected_note(Some(&root.id)).unwrap();
         }
 
         // Open workspace and verify selection persists
-        let ws = Workspace::open(temp.path(), "").unwrap();
+        let ws = Workspace::open(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         let selected = ws.get_selected_note().unwrap();
         assert_eq!(selected, Some(root.id), "Selection should persist across open");
@@ -3924,7 +4095,7 @@ mod tests {
     #[test]
     fn test_set_selected_note_overwrites_previous() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         let child_id = ws
@@ -3945,7 +4116,7 @@ mod tests {
     #[test]
     fn test_create_note_root() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Delete existing root note to simulate empty workspace
         let existing_root = ws.list_all_notes().unwrap()[0].clone();
@@ -3968,7 +4139,7 @@ mod tests {
     #[test]
     fn test_create_note_root_invalid_type() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Delete existing root note
         let existing_root = ws.list_all_notes().unwrap()[0].clone();
@@ -3985,7 +4156,7 @@ mod tests {
     #[test]
     fn test_sibling_insertion_does_not_create_duplicate_positions() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
 
@@ -4009,7 +4180,7 @@ mod tests {
     #[test]
     fn test_get_note_with_corrupt_fields_json_returns_error() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
 
         // Corrupt the stored JSON directly.
@@ -4026,7 +4197,7 @@ mod tests {
     #[test]
     fn test_list_all_notes_with_corrupt_fields_json_returns_error() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
 
         ws.storage.connection_mut().execute(
@@ -4041,7 +4212,7 @@ mod tests {
     #[test]
     fn test_sibling_insertion_preserves_correct_order() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
 
@@ -4064,7 +4235,7 @@ mod tests {
     #[test]
     fn test_update_note() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Get the root note
         let notes = ws.list_all_notes().unwrap();
@@ -4090,7 +4261,7 @@ mod tests {
     #[test]
     fn test_update_note_not_found() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let result = ws.update_note("nonexistent-id", "Title".to_string(), BTreeMap::new());
         assert!(matches!(result, Err(KrillnotesError::NoteNotFound(_))));
@@ -4099,7 +4270,7 @@ mod tests {
     #[test]
     fn test_count_children() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Get root note
         let notes = ws.list_all_notes().unwrap();
@@ -4125,7 +4296,7 @@ mod tests {
     #[test]
     fn test_delete_note_recursive() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Get root note
         let root = ws.list_all_notes().unwrap()[0].clone();
@@ -4156,7 +4327,7 @@ mod tests {
     #[test]
     fn test_delete_note_recursive_not_found() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let result = ws.delete_note_recursive("nonexistent-id");
         assert!(matches!(result, Err(KrillnotesError::NoteNotFound(_))));
     }
@@ -4164,7 +4335,7 @@ mod tests {
     #[test]
     fn test_delete_note_promote() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Get root note
         let root = ws.list_all_notes().unwrap()[0].clone();
@@ -4198,7 +4369,7 @@ mod tests {
     #[test]
     fn test_update_contact_rejects_empty_required_fields() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         // Contact schema is already loaded from starter scripts.
 
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
@@ -4236,7 +4407,7 @@ mod tests {
     #[test]
     fn test_delete_note_promote_not_found() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let result = ws.delete_note_promote("nonexistent-id");
         assert!(matches!(result, Err(KrillnotesError::NoteNotFound(_))));
@@ -4249,7 +4420,7 @@ mod tests {
     #[test]
     fn test_delete_note_promote_no_position_collision() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Build tree: root -> sib1 (pos 0) -> child1 (pos 0)
         //                                   -> child2 (pos 1)
@@ -4295,7 +4466,7 @@ mod tests {
     #[test]
     fn test_update_contact_derives_title_from_hook() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         // Contact schema is already loaded from starter scripts.
 
         let notes = ws.list_all_notes().unwrap();
@@ -4340,7 +4511,7 @@ mod tests {
     #[test]
     fn test_workspace_created_with_starter_scripts() {
         let temp = NamedTempFile::new().unwrap();
-        let workspace = Workspace::create(temp.path(), "").unwrap();
+        let workspace = Workspace::create(temp.path(), "", None).unwrap();
         let scripts = workspace.list_user_scripts().unwrap();
         assert!(!scripts.is_empty(), "New workspace should have starter scripts");
         // Verify first starter script is TextNote
@@ -4352,7 +4523,7 @@ mod tests {
     #[test]
     fn test_create_user_script() {
         let temp = NamedTempFile::new().unwrap();
-        let mut workspace = Workspace::create(temp.path(), "").unwrap();
+        let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let starter_count = workspace.list_user_scripts().unwrap().len();
         let source = "// @name: Test Script\n// @description: A test\nschema(\"TestType\", #{ fields: [] });";
         let (script, errors) = workspace.create_user_script(source).unwrap();
@@ -4366,7 +4537,7 @@ mod tests {
     #[test]
     fn test_create_user_script_missing_name_fails() {
         let temp = NamedTempFile::new().unwrap();
-        let mut workspace = Workspace::create(temp.path(), "").unwrap();
+        let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let source = "// no name here\nschema(\"X\", #{ fields: [] });";
         let result = workspace.create_user_script(source);
         assert!(result.is_err());
@@ -4375,7 +4546,7 @@ mod tests {
     #[test]
     fn test_update_user_script() {
         let temp = NamedTempFile::new().unwrap();
-        let mut workspace = Workspace::create(temp.path(), "").unwrap();
+        let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let source = "// @name: Original\nschema(\"Orig\", #{ fields: [] });";
         let (script, _) = workspace.create_user_script(source).unwrap();
 
@@ -4388,7 +4559,7 @@ mod tests {
     #[test]
     fn test_delete_user_script() {
         let temp = NamedTempFile::new().unwrap();
-        let mut workspace = Workspace::create(temp.path(), "").unwrap();
+        let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let initial_count = workspace.list_user_scripts().unwrap().len();
         let source = "// @name: ToDelete\nschema(\"Del\", #{ fields: [] });";
         let (script, _) = workspace.create_user_script(source).unwrap();
@@ -4401,7 +4572,7 @@ mod tests {
     #[test]
     fn test_toggle_user_script() {
         let temp = NamedTempFile::new().unwrap();
-        let mut workspace = Workspace::create(temp.path(), "").unwrap();
+        let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let source = "// @name: Toggle\nschema(\"Tog\", #{ fields: [] });";
         let (script, _) = workspace.create_user_script(source).unwrap();
         assert!(script.enabled);
@@ -4414,7 +4585,7 @@ mod tests {
     #[test]
     fn test_user_scripts_sorted_by_load_order() {
         let temp = NamedTempFile::new().unwrap();
-        let mut workspace = Workspace::create(temp.path(), "").unwrap();
+        let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let starter_count = workspace.list_user_scripts().unwrap().len();
 
         let s1 = "// @name: Second\nschema(\"S2\", #{ fields: [] });";
@@ -4435,13 +4606,13 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
 
         {
-            let mut workspace = Workspace::create(temp.path(), "").unwrap();
+            let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
             workspace.create_user_script(
                 "// @name: TestOpen\nschema(\"OpenType\", #{ fields: [#{ name: \"x\", type: \"text\" }] });"
             ).unwrap(); // (UserScript, Vec<ScriptError>) — result not inspected here
         }
 
-        let workspace = Workspace::open(temp.path(), "").unwrap();
+        let workspace = Workspace::open(temp.path(), "", None).unwrap();
         assert!(workspace.script_registry().get_schema("OpenType").is_ok());
     }
 
@@ -4450,21 +4621,21 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
 
         {
-            let mut workspace = Workspace::create(temp.path(), "").unwrap();
+            let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
             let (script, _) = workspace.create_user_script(
                 "// @name: Disabled\nschema(\"DisType\", #{ fields: [#{ name: \"x\", type: \"text\" }] });"
             ).unwrap();
             workspace.toggle_user_script(&script.id, false).unwrap();
         }
 
-        let workspace = Workspace::open(temp.path(), "").unwrap();
+        let workspace = Workspace::open(temp.path(), "", None).unwrap();
         assert!(workspace.script_registry().get_schema("DisType").is_err());
     }
 
     #[test]
     fn test_delete_note_with_strategy() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         let child_id = ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
@@ -4496,7 +4667,7 @@ mod tests {
     /// preserves that order: `child_ids[0]` is at position 0, etc.
     fn setup_with_children(n: usize) -> (Workspace, String, Vec<String>, NamedTempFile) {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         let mut child_ids: Vec<String> = Vec::new();
         for i in 0..n {
@@ -4595,7 +4766,7 @@ mod tests {
     #[test]
     fn test_run_view_hook_returns_html_without_hook() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Load a schema with a textarea field but no on_view hook.
         ws.create_user_script(
@@ -4631,7 +4802,7 @@ schema("Memo", #{
     #[test]
     fn test_create_user_script_rejects_compile_error() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let initial_count = ws.list_user_scripts().unwrap().len();
 
@@ -4648,7 +4819,7 @@ schema("Memo", #{
     #[test]
     fn test_update_user_script_rejects_compile_error() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let initial_count = ws.list_user_scripts().unwrap().len();
 
@@ -4675,7 +4846,7 @@ schema("Memo", #{
     #[test]
     fn test_create_workspace_with_password() {
         let temp = NamedTempFile::new().unwrap();
-        let ws = Workspace::create(temp.path(), "secret").unwrap();
+        let ws = Workspace::create(temp.path(), "secret", None).unwrap();
         // Should have at least one note (the root note)
         assert!(!ws.list_all_notes().unwrap().is_empty());
     }
@@ -4683,23 +4854,23 @@ schema("Memo", #{
     #[test]
     fn test_open_workspace_with_password() {
         let temp = NamedTempFile::new().unwrap();
-        Workspace::create(temp.path(), "secret").unwrap();
-        let ws = Workspace::open(temp.path(), "secret").unwrap();
+        Workspace::create(temp.path(), "secret", None).unwrap();
+        let ws = Workspace::open(temp.path(), "secret", None).unwrap();
         assert!(!ws.list_all_notes().unwrap().is_empty());
     }
 
     #[test]
     fn test_open_workspace_wrong_password() {
         let temp = NamedTempFile::new().unwrap();
-        Workspace::create(temp.path(), "secret").unwrap();
-        let result = Workspace::open(temp.path(), "wrong");
+        Workspace::create(temp.path(), "secret", None).unwrap();
+        let result = Workspace::open(temp.path(), "wrong", None);
         assert!(matches!(result, Err(KrillnotesError::WrongPassword)));
     }
 
     #[test]
     fn test_deep_copy_note_as_child() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // root → child
         let root = ws.list_all_notes().unwrap()[0].clone();
@@ -4731,7 +4902,7 @@ schema("Memo", #{
     #[test]
     fn test_deep_copy_note_recursive() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // root → note_a → note_b
         let root = ws.list_all_notes().unwrap()[0].clone();
@@ -4776,7 +4947,7 @@ schema("Memo", #{
     #[test]
     fn test_on_add_child_hook_fires_on_create() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.script_registry_mut().load_script(r#"
             schema("Folder", #{
@@ -4808,7 +4979,7 @@ schema("Memo", #{
     #[test]
     fn test_on_add_child_hook_fires_for_sibling_under_hooked_parent() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.script_registry_mut().load_script(r#"
             schema("Folder", #{
@@ -4839,7 +5010,7 @@ schema("Memo", #{
     #[test]
     fn test_on_add_child_hook_does_not_fire_for_root_level_creation() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // No on_add_child hook registered — creating a sibling of root should work silently
         let root = ws.list_all_notes().unwrap()[0].clone();
@@ -4851,7 +5022,7 @@ schema("Memo", #{
     #[test]
     fn test_on_add_child_hook_fires_on_move() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.script_registry_mut().load_script(r#"
             schema("Folder", #{
@@ -4887,7 +5058,7 @@ schema("Memo", #{
     #[test]
     fn test_run_tree_action_reorders_children() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         let parent_id = ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
@@ -4927,7 +5098,7 @@ add_tree_action("Sort A→Z", ["TextNote"], |note| {
     #[test]
     fn test_tree_action_create_note_writes_to_db() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.create_user_script(r#"
 // @name: CreateAction
@@ -4958,7 +5129,7 @@ add_tree_action("Add Item", ["TaFolder"], |folder| {
     #[test]
     fn test_tree_action_update_note_writes_to_db() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.create_user_script(r#"
 // @name: UpdateAction
@@ -4986,7 +5157,7 @@ add_tree_action("Mark Done", ["TaTask"], |note| {
     #[test]
     fn test_tree_action_nested_create_builds_subtree() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.create_user_script(r#"
 // @name: NestedCreate
@@ -5021,7 +5192,7 @@ add_tree_action("Add Sprint With Task", ["TaSprint"], |sprint| {
     #[test]
     fn test_tree_action_error_rolls_back_all_writes() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.create_user_script(r#"
 // @name: ErrorAction
@@ -5049,7 +5220,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     #[test]
     fn test_note_tags_round_trip() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         assert!(root.tags.is_empty());
 
@@ -5061,14 +5232,14 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     #[test]
     fn test_get_all_tags_empty() {
         let temp = NamedTempFile::new().unwrap();
-        let ws = Workspace::create(temp.path(), "").unwrap();
+        let ws = Workspace::create(temp.path(), "", None).unwrap();
         assert!(ws.get_all_tags().unwrap().is_empty());
     }
 
     #[test]
     fn test_get_all_tags_sorted_distinct() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         let child_id = ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
         ws.update_note_tags(&root.id, vec!["rust".into(), "design".into()]).unwrap();
@@ -5080,7 +5251,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     #[test]
     fn test_get_notes_for_tag() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         let child_id = ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
         ws.update_note_tags(&root.id, vec!["rust".into()]).unwrap();
@@ -5102,7 +5273,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     #[test]
     fn test_update_note_tags_replaces_existing() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         ws.update_note_tags(&root.id, vec!["old".into()]).unwrap();
         ws.update_note_tags(&root.id, vec!["new".into()]).unwrap();
@@ -5113,7 +5284,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     #[test]
     fn test_update_note_tags_normalises() {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         ws.update_note_tags(&root.id, vec!["  Rust  ".into(), "RUST".into(), "rust".into()]).unwrap();
         let note = ws.get_note(&root.id).unwrap();
@@ -5126,7 +5297,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     /// Returns the workspace ready to use.
     fn create_test_workspace_with_schema(schema_script: &str) -> Workspace {
         let temp = NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         // Wrap the bare schema call in the required front matter so create_user_script accepts it.
         let source = format!("// @name: TestSchema\n{schema_script}");
         ws.create_user_script(&source).unwrap();
@@ -5374,7 +5545,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn operations_log_always_records_create_note() {
         // The operation log is always active — every mutation must be recorded.
         let temp = tempfile::NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         let root = ws.list_all_notes().unwrap()[0].clone();
         ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
         let ops = ws.list_operations(None, None, None).unwrap();
@@ -5387,7 +5558,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_workspace_has_attachment_key_when_encrypted() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let ws = Workspace::create(&db_path, "hunter2").unwrap();
+        let ws = Workspace::create(&db_path, "hunter2", None).unwrap();
         assert!(ws.attachment_key().is_some(), "Encrypted workspace must have attachment_key");
     }
 
@@ -5395,7 +5566,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_workspace_has_no_attachment_key_when_unencrypted() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let ws = Workspace::create(&db_path, "").unwrap();
+        let ws = Workspace::create(&db_path, "", None).unwrap();
         assert!(ws.attachment_key().is_none(), "Unencrypted workspace must have no attachment_key");
     }
 
@@ -5403,7 +5574,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_workspace_creates_attachments_directory() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        Workspace::create(&db_path, "").unwrap();
+        Workspace::create(&db_path, "", None).unwrap();
         assert!(dir.path().join("attachments").is_dir());
     }
 
@@ -5411,10 +5582,10 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_workspace_attachment_key_stable_across_open() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let ws1 = Workspace::create(&db_path, "mypass").unwrap();
+        let ws1 = Workspace::create(&db_path, "mypass", None).unwrap();
         let key1 = ws1.attachment_key().unwrap().clone();
         drop(ws1);
-        let ws2 = Workspace::open(&db_path, "mypass").unwrap();
+        let ws2 = Workspace::open(&db_path, "mypass", None).unwrap();
         let key2 = ws2.attachment_key().unwrap();
         assert_eq!(key1, *key2, "Key must be derived deterministically from password + workspace_id");
     }
@@ -5422,7 +5593,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     #[test]
     fn test_get_set_workspace_metadata() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        let mut ws = Workspace::create(temp.path(), "").unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         // Fresh workspace returns default (no error)
         let initial = ws.get_workspace_metadata().unwrap();
@@ -5467,7 +5638,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_attach_file_stores_metadata_and_file() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "testpass").unwrap();
+        let mut ws = Workspace::create(&db_path, "testpass", None).unwrap();
         let notes = ws.list_all_notes().unwrap();
         let root_id = &notes[0].id;
 
@@ -5484,7 +5655,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_get_attachment_bytes_decrypts_correctly() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "testpass").unwrap();
+        let mut ws = Workspace::create(&db_path, "testpass", None).unwrap();
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
 
         let data = b"secret file content";
@@ -5497,7 +5668,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_get_attachments_returns_metadata_list() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "").unwrap();
+        let mut ws = Workspace::create(&db_path, "", None).unwrap();
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
 
         ws.attach_file(&root_id, "a.pdf", None, b"data a").unwrap();
@@ -5514,7 +5685,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_delete_attachment_soft_deletes() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "testpass").unwrap();
+        let mut ws = Workspace::create(&db_path, "testpass", None).unwrap();
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
 
         let meta = ws.attach_file(&root_id, "bye.txt", None, b"temp").unwrap();
@@ -5536,7 +5707,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_attach_file_enforces_size_limit() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "").unwrap();
+        let mut ws = Workspace::create(&db_path, "", None).unwrap();
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
 
         ws.set_attachment_max_size_bytes(Some(10)).unwrap();
@@ -5549,7 +5720,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_update_note_cleans_up_replaced_file_field() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "").unwrap();
+        let mut ws = Workspace::create(&db_path, "", None).unwrap();
 
         // Use the root TextNote that is always created on workspace init.
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
@@ -5580,7 +5751,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_operation_log_always_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
 
         // The operation log should record the CreateNote even without sync.
@@ -5594,7 +5765,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_update_note_cleans_up_cleared_file_field() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "").unwrap();
+        let mut ws = Workspace::create(&db_path, "", None).unwrap();
 
         let root_id = ws.list_all_notes().unwrap()[0].id.clone();
 
@@ -5617,7 +5788,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_can_undo_initially_false() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let ws = Workspace::create(&path, "").unwrap();
+        let ws = Workspace::create(&path, "", None).unwrap();
         assert!(!ws.can_undo());
         assert!(!ws.can_redo());
     }
@@ -5626,7 +5797,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_collect_subtree_notes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         let child_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
         let _grandchild = ws.create_note(&child_id, AddPosition::AsChild, "TextNote").unwrap();
@@ -5641,7 +5812,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_group_collapses_to_one_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         // Clear the undo entry from root creation
         ws.undo_stack.clear();
@@ -5662,7 +5833,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_create_note() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         ws.undo_stack.clear(); // ignore root creation
 
@@ -5678,7 +5849,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_update_note_restores_old_title() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         ws.undo_stack.clear();
 
@@ -5699,7 +5870,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_delete_note_restores_subtree() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         let child_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
         ws.undo_stack.clear();
@@ -5716,7 +5887,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_move_note_restores_position() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         let child_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
         let sibling_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
@@ -5740,7 +5911,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_delete_script_restores_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
 
         let src = "// @name: TestScript\n// @description: desc\n";
         let (script, _) = ws.create_user_script(src).unwrap();
@@ -5757,7 +5928,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_redo_create_note_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         ws.undo_stack.clear();
 
@@ -5782,7 +5953,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_delete_note_full_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         let child_id = ws.create_note(&root_id, AddPosition::AsChild, "TextNote").unwrap();
         ws.undo_stack.clear();
@@ -5798,7 +5969,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_tree_action_collapses_to_one_undo_entry() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         let root_id = ws.create_note_root("TextNote").unwrap();
         ws.undo_stack.clear();
 
@@ -5816,11 +5987,11 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_limit_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
         ws.set_undo_limit(10).unwrap();
         drop(ws);
 
-        let ws2 = Workspace::open(&path, "").unwrap();
+        let ws2 = Workspace::open(&path, "", None).unwrap();
         assert_eq!(ws2.undo_limit, 10);
     }
 
@@ -5828,7 +5999,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_undo_limit_clamp_and_trim() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
 
         ws.set_undo_limit(0).unwrap();
         assert_eq!(ws.get_undo_limit(), 1);
@@ -5855,7 +6026,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         // the update.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
 
         let src_v1 = "// @name: CycleScript\n// @description: v1\nlet x = 1;";
         let (script, _) = ws.create_user_script(src_v1).unwrap();
@@ -5887,7 +6058,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         // the script with its real content on redo, not an empty placeholder.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.krillnotes");
-        let mut ws = Workspace::create(&path, "").unwrap();
+        let mut ws = Workspace::create(&path, "", None).unwrap();
 
         let src = "// @name: RedoScript\n// @description: test\nlet y = 42;";
         let (script, _) = ws.create_user_script(src).unwrap();
@@ -5913,7 +6084,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_write_info_json_creates_file() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let ws = Workspace::create(&db_path, "").unwrap();
+        let ws = Workspace::create(&db_path, "", None).unwrap();
         ws.write_info_json().unwrap();
 
         let info_path = dir.path().join("info.json");
@@ -5930,7 +6101,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_write_info_json_counts_notes() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        let mut ws = Workspace::create(&db_path, "").unwrap();
+        let mut ws = Workspace::create(&db_path, "", None).unwrap();
 
         let root = ws.list_all_notes().unwrap()[0].clone();
         ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
@@ -5946,7 +6117,7 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_info_json_written_on_create() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        Workspace::create(&db_path, "").unwrap();
+        Workspace::create(&db_path, "", None).unwrap();
         assert!(dir.path().join("info.json").exists(), "info.json must exist after create");
     }
 
@@ -5954,9 +6125,9 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
     fn test_info_json_written_on_open() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("notes.db");
-        Workspace::create(&db_path, "").unwrap();
+        Workspace::create(&db_path, "", None).unwrap();
         std::fs::remove_file(dir.path().join("info.json")).unwrap(); // remove it
-        Workspace::open(&db_path, "").unwrap();
+        Workspace::open(&db_path, "", None).unwrap();
         assert!(dir.path().join("info.json").exists(), "info.json must be rewritten on open");
     }
 }
