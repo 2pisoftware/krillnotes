@@ -62,6 +62,30 @@ pub enum KrillnotesError {
     /// Attachment exceeds the workspace size limit.
     #[error("Attachment too large: {size} bytes (limit: {limit} bytes)")]
     AttachmentTooLarge { size: u64, limit: u64 },
+
+    #[error("Identity not found: {0}")]
+    IdentityNotFound(String),
+
+    #[error("Identity already exists: {0}")]
+    IdentityAlreadyExists(String),
+
+    #[error("Wrong passphrase for identity")]
+    IdentityWrongPassphrase,
+
+    #[error("Identity file corrupt: {0}")]
+    IdentityCorrupt(String),
+
+    #[error("Cannot delete identity with bound workspaces: {0}")]
+    IdentityHasBoundWorkspaces(String),
+
+    #[error("Workspace not bound to any identity: {0}")]
+    WorkspaceNotBound(String),
+
+    #[error("Invalid .swarmid file: {0}")]
+    SwarmIdInvalidFormat(String),
+
+    #[error("Unsupported .swarmid version: {0}")]
+    SwarmIdVersionUnsupported(u32),
 }
 
 #[cfg(test)]
@@ -112,6 +136,28 @@ impl KrillnotesError {
             Self::AttachmentEncryption(_) => "Could not encrypt or decrypt the attachment".to_string(),
             Self::AttachmentTooLarge { size, limit } => {
                 format!("File too large ({} bytes). This workspace limits attachments to {} bytes.", size, limit)
+            }
+            Self::IdentityNotFound(id) => format!("Identity not found: {id}"),
+            Self::IdentityAlreadyExists(name) => {
+                format!("An identity named \"{name}\" already exists.")
+            }
+            Self::IdentityWrongPassphrase => {
+                "Wrong passphrase. Please check your passphrase and try again.".to_string()
+            }
+            Self::IdentityCorrupt(msg) => {
+                format!("Identity file is corrupt or unreadable: {msg}")
+            }
+            Self::IdentityHasBoundWorkspaces(id) => {
+                format!("Cannot delete identity {id} — it still has workspaces bound to it. Unbind all workspaces first.")
+            }
+            Self::WorkspaceNotBound(id) => {
+                format!("Workspace {id} is not bound to any identity.")
+            }
+            Self::SwarmIdInvalidFormat(msg) => {
+                format!("The .swarmid file is invalid: {msg}")
+            }
+            Self::SwarmIdVersionUnsupported(v) => {
+                format!("This .swarmid file uses version {v}, which is not supported by this version of Krillnotes.")
             }
         }
     }

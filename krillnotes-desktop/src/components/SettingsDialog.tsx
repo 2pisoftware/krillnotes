@@ -21,7 +21,6 @@ interface SettingsDialogProps {
 function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   const { t } = useTranslation();
   const [workspaceDir, setWorkspaceDir] = useState('');
-  const [cachePasswords, setCachePasswords] = useState(false);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [language, setLanguage] = useState(() => i18n.language ?? 'en');
@@ -36,7 +35,6 @@ function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       invoke<AppSettings>('get_settings')
         .then(s => {
           setWorkspaceDir(s.workspaceDirectory);
-          setCachePasswords(s.cacheWorkspacePasswords);
           setLanguage(s.language ?? 'en');
           setOriginalLanguage(s.language ?? 'en');
           setError('');
@@ -88,7 +86,6 @@ function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       await invoke('update_settings', {
         patch: {
           workspaceDirectory: workspaceDir,
-          cacheWorkspacePasswords: cachePasswords,
           language,
         },
       });
@@ -169,23 +166,6 @@ function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
               <p className="text-xs text-muted-foreground mt-1">
                 {t('settings.workspaceDirHint')}
               </p>
-            </div>
-
-            <div className="mb-4">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={cachePasswords}
-                  onChange={e => setCachePasswords(e.target.checked)}
-                  className="w-4 h-4"
-                />
-                <div>
-                  <span className="block text-sm font-medium">{t('settings.rememberPasswords')}</span>
-                  <span className="block text-xs text-muted-foreground mt-0.5">
-                    {t('settings.rememberPasswordsHint')}
-                  </span>
-                </div>
-              </label>
             </div>
 
             <div className="flex flex-col gap-1">
