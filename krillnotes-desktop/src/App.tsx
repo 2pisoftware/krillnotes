@@ -43,6 +43,7 @@ const createMenuHandlers = (
   },
 
   'File > Open Workspace clicked': () => {
+    setShowIdentityManager(false);
     setShowOpenWorkspace(true);
   },
 
@@ -69,6 +70,7 @@ const createMenuHandlers = (
   },
 
   'File > Manage Identities clicked': () => {
+    setShowOpenWorkspace(false);
     setShowIdentityManager(true);
   },
 });
