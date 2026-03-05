@@ -9,7 +9,9 @@ import NewWorkspaceDialog from './components/NewWorkspaceDialog';
 import WorkspaceManagerDialog from './components/WorkspaceManagerDialog';
 import SettingsDialog from './components/SettingsDialog';
 import SetPasswordDialog from './components/SetPasswordDialog';
-import type { WorkspaceInfo as WorkspaceInfoType, AppSettings } from './types';
+import type { WorkspaceInfo as WorkspaceInfoType, AppSettings, IdentityRef } from './types';
+import CreateIdentityDialog from './components/CreateIdentityDialog';
+import IdentityManagerDialog from './components/IdentityManagerDialog';
 import './styles/globals.css';
 import { ThemeProvider } from './contexts/ThemeContext';
 import i18n from './i18n';
@@ -34,6 +36,7 @@ const createMenuHandlers = (
   setShowOpenWorkspace: (show: boolean) => void,
   setShowSettings: (show: boolean) => void,
   setShowExportPasswordDialog: (show: boolean) => void,
+  setShowIdentityManager: (show: boolean) => void,
   doImport: (zipPath: string) => void,
 ) => ({
   'File > New Workspace clicked': () => {
@@ -65,6 +68,10 @@ const createMenuHandlers = (
   'Edit > Settings clicked': () => {
     setShowSettings(true);
   },
+
+  'File > Manage Identities clicked': () => {
+    setShowIdentityManager(true);
+  },
 });
 
 function App() {
@@ -89,6 +96,8 @@ function App() {
   const [exportPasswordConfirm, setExportPasswordConfirm] = useState('');
   const [showImportWorkspacePasswordDialog, setShowImportWorkspacePasswordDialog] = useState(false);
   const [pendingImportArgs, setPendingImportArgs] = useState<{ zipPath: string; folderPath: string; zipPassword?: string } | null>(null);
+  const [showCreateFirstIdentity, setShowCreateFirstIdentity] = useState(false);
+  const [showIdentityManager, setShowIdentityManager] = useState(false);
 
   useEffect(() => {
     // If this is a workspace window (not "main"), fetch workspace info immediately
@@ -102,6 +111,13 @@ function App() {
           .catch(err => console.error('Failed to fetch workspace info:', err));
       }
     }
+
+    // First-launch identity check: show create identity dialog if no identities exist
+    invoke<IdentityRef[]>('list_identities').then(identities => {
+      if (identities.length === 0) {
+        setShowCreateFirstIdentity(true);
+      }
+    }).catch(err => console.error('Failed to check identities:', err));
   }, []);
 
   // Cold-start: pull any file path that arrived via OS file-open before JS
@@ -153,6 +169,7 @@ function App() {
       setShowOpenWorkspace,
       setShowSettings,
       setShowExportPasswordDialog,
+      setShowIdentityManager,
       (zipPath) => proceedWithImport(zipPath, null),
     );
 
@@ -521,6 +538,16 @@ function App() {
           </div>
         </div>
       )}
+      <CreateIdentityDialog
+        isOpen={showCreateFirstIdentity}
+        isFirstLaunch={true}
+        onCreated={() => setShowCreateFirstIdentity(false)}
+        onCancel={() => setShowCreateFirstIdentity(false)}
+      />
+      <IdentityManagerDialog
+        isOpen={showIdentityManager}
+        onClose={() => setShowIdentityManager(false)}
+      />
     </div>
     </ThemeProvider>
   );
