@@ -1,3 +1,9 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+//
+// Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
+
 // @name: Zettelkasten
 // @description: An atomic note-taking system. Zettel notes are auto-titled with
 // today's date and first words of the body. The Kasten folder shows recent notes
