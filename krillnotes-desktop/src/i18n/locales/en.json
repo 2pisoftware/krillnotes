@@ -28,8 +28,6 @@
     "title": "Settings",
     "workspaceDir": "Default Workspace Directory",
     "workspaceDirHint": "New workspaces will be created in this directory.",
-    "rememberPasswords": "Remember workspace passwords for this session",
-    "rememberPasswordsHint": "Passwords are kept in memory until the app closes. Off by default.",
     "appearance": "Appearance",
     "mode": "Mode",
     "modeLight": "Light",

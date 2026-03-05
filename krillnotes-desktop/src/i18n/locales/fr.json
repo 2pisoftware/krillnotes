@@ -28,8 +28,6 @@
     "title": "Paramètres",
     "workspaceDir": "Répertoire d'espaces de travail par défaut",
     "workspaceDirHint": "Les nouveaux espaces de travail seront créés dans ce répertoire.",
-    "rememberPasswords": "Mémoriser les mots de passe pour cette session",
-    "rememberPasswordsHint": "Les mots de passe sont conservés en mémoire jusqu'à la fermeture de l'application. Désactivé par défaut.",
     "appearance": "Apparence",
     "mode": "Mode",
     "modeLight": "Clair",

@@ -28,8 +28,6 @@
     "title": "설정",
     "workspaceDir": "기본 작업 공간 디렉터리",
     "workspaceDirHint": "새 작업 공간이 이 디렉터리에 생성됩니다.",
-    "rememberPasswords": "이 세션의 비밀번호 기억",
-    "rememberPasswordsHint": "비밀번호는 앱을 닫을 때까지 메모리에 유지됩니다. 기본값은 꺼짐입니다.",
     "appearance": "외관",
     "mode": "모드",
     "modeLight": "라이트",

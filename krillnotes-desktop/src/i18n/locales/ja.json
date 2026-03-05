@@ -28,8 +28,6 @@
     "title": "設定",
     "workspaceDir": "デフォルトのワークスペースディレクトリ",
     "workspaceDirHint": "新しいワークスペースはこのディレクトリに作成されます。",
-    "rememberPasswords": "このセッションのパスワードを記憶する",
-    "rememberPasswordsHint": "パスワードはアプリを閉じるまでメモリに保持されます。デフォルトはオフです。",
     "appearance": "外観",
     "mode": "モード",
     "modeLight": "ライト",

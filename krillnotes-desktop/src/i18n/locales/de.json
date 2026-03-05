@@ -28,8 +28,6 @@
     "title": "Einstellungen",
     "workspaceDir": "Standard-Arbeitsbereichsverzeichnis",
     "workspaceDirHint": "Neue Arbeitsbereiche werden in diesem Verzeichnis erstellt.",
-    "rememberPasswords": "Passwörter für diese Sitzung merken",
-    "rememberPasswordsHint": "Passwörter werden im Arbeitsspeicher gehalten, bis die App geschlossen wird. Standardmäßig deaktiviert.",
     "appearance": "Erscheinungsbild",
     "mode": "Modus",
     "modeLight": "Hell",

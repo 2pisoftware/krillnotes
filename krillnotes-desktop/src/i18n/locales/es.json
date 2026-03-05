@@ -28,8 +28,6 @@
     "title": "Ajustes",
     "workspaceDir": "Directorio de espacios de trabajo predeterminado",
     "workspaceDirHint": "Los nuevos espacios de trabajo se crearán en este directorio.",
-    "rememberPasswords": "Recordar contraseñas para esta sesión",
-    "rememberPasswordsHint": "Las contraseñas se guardan en memoria hasta que se cierra la aplicación. Desactivado por defecto.",
     "appearance": "Apariencia",
     "mode": "Modo",
     "modeLight": "Claro",
