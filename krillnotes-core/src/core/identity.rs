@@ -77,10 +77,13 @@ pub struct IdentitySettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IdentityRef {
     pub uuid: Uuid,
+    #[serde(alias = "display_name")]
     pub display_name: String,
     pub file: String,
+    #[serde(alias = "last_used")]
     pub last_used: DateTime<Utc>,
 }
 
