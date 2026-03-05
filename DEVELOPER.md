@@ -24,6 +24,8 @@ Krillnotes/
 │           ├── delete.rs          # Delete strategies (DeleteAll, PromoteChildren)
 │           ├── user_script.rs     # UserScript type + CRUD operations
 │           ├── export.rs          # Workspace export/import (zip archives)
+│           ├── identity.rs        # Identity model (Ed25519 + Argon2id + AES-GCM + .swarmid)
+│           ├── undo.rs            # RetractInverse enum — undo/redo inverse operations
 │           ├── scripting/
 │           │   ├── mod.rs         # Scripting module root — engine setup, hook dispatch, query fns
 │           │   ├── schema.rs      # Schema registry (field types, flags)
@@ -62,8 +64,11 @@ Krillnotes/
             ├── AddNoteDialog.tsx           # New note dialog (type + position)
             ├── DeleteConfirmDialog.tsx     # Delete confirmation with strategy choice
             ├── ContextMenu.tsx            # Right-click tree menu
-            ├── SetPasswordDialog.tsx      # Set (+ confirm) workspace password
-            ├── EnterPasswordDialog.tsx    # Enter password to open a workspace
+            ├── AttachmentsSection.tsx     # File attachment panel (drag-drop, thumbnails)
+            ├── WorkspaceManagerDialog.tsx # Full workspace manager (list, open, duplicate, delete)
+            ├── IdentityManagerDialog.tsx  # Identity CRUD + .swarmid export/import
+            ├── CreateIdentityDialog.tsx   # New identity form (name + passphrase)
+            ├── UnlockIdentityDialog.tsx   # Passphrase prompt to unlock an identity
             ├── WelcomeDialog.tsx          # First-launch welcome
             ├── EmptyState.tsx             # No-workspace placeholder
             └── StatusMessage.tsx          # Transient success/error toast
@@ -77,17 +82,19 @@ Krillnotes/
 
 ### 1. Local-First Design
 
-All data lives in a single file on the user's disk — a SQLite database with the `.krillnotes` extension. There is no server, no account, and no network requirement.
+All data lives in a **workspace folder** on the user's disk. The folder contains:
 
-The file format is intentionally simple: inspect or back it up with any SQLite tool. The schema is in [krillnotes-core/src/core/schema.sql](krillnotes-core/src/core/schema.sql).
+- `notes.db` — the SQLCipher-encrypted SQLite database (schema in [schema.sql](krillnotes-core/src/core/schema.sql))
+- `attachments/<uuid>` — per-file ChaCha20-Poly1305 encrypted blobs
+- `info.json` — unencrypted metadata sidecar (name, counts, workspace UUID) for the Workspace Manager
+
+There is no server, no account, and no network requirement.
 
 Local-first does not mean sync-never. The architecture is designed so that a future sync layer can be added without changing the core API (see Operation Log below).
 
 ### 2. Operation Log
 
-When sync is enabled, every document mutation — creating a note, updating a field, moving a node, deleting a note, or managing user scripts — is recorded as an `Operation` before being applied.
-
-`Workspace.operation_log` is `Option<OperationLog>`. It is set to `None` in both `create()` and `open()` until sync is implemented, so the log is currently always empty and the Operations Log menu item is permanently greyed out. All call sites use the private `log_op()` helper which no-ops when `operation_log` is `None`.
+Every document mutation — creating a note, updating a field, moving a node, deleting a note, or managing user scripts — is recorded as an `Operation` before being applied. The log is **always active**: it is required for undo/redo (`RetractOperation` entries) and will also drive CRDT sync when that ships.
 
 ```
 User action
@@ -97,8 +104,8 @@ Workspace method (e.g. create_note)
     │
     ├── BEGIN TRANSACTION
     ├── Apply mutation to `notes` table
-    ├── log_op(Operation { ... })   ← no-op while sync is off; appends when sync is on
-    ├── Purge old operations if over limit
+    ├── log_op(Operation { ... })   ← always appended
+    ├── Purge old operations if over limit (configurable via undo_limit in workspace_meta)
     └── COMMIT
 ```
 
@@ -117,8 +124,13 @@ pub enum Operation {
     CreateUserScript { operation_id, timestamp, device_id, script_id, name, description },
     UpdateUserScript { operation_id, timestamp, device_id, script_id, name, description },
     DeleteUserScript { operation_id, timestamp, device_id, script_id },
+
+    // Undo/redo
+    RetractOperation { operation_id, timestamp, device_id, retracted_id },
 }
 ```
+
+**Undo/redo** is implemented by appending a `RetractOperation` that references the operation being undone. The `undo.rs` module computes a `RetractInverse` (the compensating action) from the original operation's stored data. Groups of operations triggered by a single user action are bracketed with `begin_undo_group()` / `end_undo_group()` so they collapse into one Cmd+Z step.
 
 Each operation carries:
 - A stable UUID (`operation_id`)
@@ -173,7 +185,7 @@ schema("Task", #{
 });
 ```
 
-**Field types:** `"text"`, `"textarea"`, `"number"`, `"boolean"`, `"date"`, `"email"`, `"select"`, `"rating"`.
+**Field types:** `"text"`, `"textarea"`, `"number"`, `"boolean"`, `"date"`, `"email"`, `"select"`, `"rating"`, `"file"` (encrypted attachment reference), `"note_link"` (reference to another note by UUID).
 
 **Schema flags:**
 
@@ -245,36 +257,70 @@ When a script is created or updated, all registries are reloaded: the schema and
 
 ### 7. Export / Import
 
-Workspaces can be exported as `.zip` archives ([export.rs](krillnotes-core/src/core/export.rs)). The archive contains:
+Workspaces can be exported as `.krillnotes` archives ([export.rs](krillnotes-core/src/core/export.rs)). The format is a standard zip containing:
 
 - `workspace.json` — All notes with their fields and tags, a global tag list, plus metadata (app version, export timestamp, note count).
 - `scripts/*.rhai` — Each user script as a separate file.
+- `attachments.json` — Attachment metadata manifest.
+- `attachments/<uuid>` — Raw (plaintext) attachment bytes (re-encrypted on import).
 
 Operations are excluded from exports as they are device-specific.
 
-The zip can optionally be encrypted with AES-256 using the `zip` crate's built-in AES support. This is a separate layer from the workspace database encryption — the zip password protects the archive in transit, and the workspace password protects the database at rest.
+The zip can optionally be encrypted with AES-256 using the `zip` crate's built-in AES support. This is a separate layer from the workspace database encryption — the zip password protects the archive in transit.
 
-Importing reads a zip (prompting for the zip password if encrypted), creates a fresh **SQLCipher-encrypted** workspace database (prompting for a new workspace password), inserts all notes and scripts, and opens the new workspace. A `peek_import` command allows inspecting the archive metadata (version, note count, script count) before committing to the import.
+Importing reads a zip (prompting for the zip password if encrypted), creates a fresh **SQLCipher-encrypted** workspace database bound to the currently unlocked identity, inserts all notes, scripts, and attachments (re-encrypting each attachment under the new workspace key), and opens the new workspace. A `peek_import` command allows inspecting the archive metadata (version, note count, script count) before committing to the import.
 
-### 8. Multi-Window Architecture
+### 8. Identity System
 
-Each open workspace gets its own Tauri window. The frontend is a single React application that loads in every window, but each instance fetches data from its own workspace via the window label.
+The identity system ([identity.rs](krillnotes-core/src/core/identity.rs)) provides cryptographic identity management, replacing per-workspace user-visible passwords.
 
-**AppState** ([lib.rs](krillnotes-desktop/src-tauri/src/lib.rs)):
+**Key concepts:**
+
+- An **identity** is an Ed25519 signing keypair. The private key is encrypted at rest with AES-256-GCM using a key derived from the user's passphrase via Argon2id (64 MiB, 3 iterations in production).
+- A **workspace binding** stores the workspace's randomly-generated SQLCipher password encrypted under the identity's public key.
+- An **unlocked identity** (`UnlockedIdentity`) holds the decrypted signing key in memory for the duration of the session.
+
+**On-disk layout** (in `~/.config/krillnotes/`):
+
+```
+identities/<uuid>.json       ← one per identity (IdentityFile)
+identity_settings.json       ← registry of identity refs + workspace bindings
+```
+
+**Crypto chain for workspace access:**
+
+```
+passphrase → Argon2id → AES-256-GCM key → decrypt Ed25519 seed
+                                                   │
+                                    HKDF-SHA256 → per-workspace DB password key
+                                                   │
+                                    Decrypt stored DB password → open SQLCipher DB
+```
+
+**AppState additions** ([lib.rs](krillnotes-desktop/src-tauri/src/lib.rs)):
 
 ```rust
 pub struct AppState {
-    pub workspaces:           Arc<Mutex<HashMap<String, Workspace>>>,  // label → Workspace
-    pub workspace_paths:      Arc<Mutex<HashMap<String, PathBuf>>>,    // label → path on disk
-    pub workspace_passwords:  Arc<Mutex<HashMap<PathBuf, String>>>,    // path → password (session cache)
-    pub paste_menu_items:     Arc<Mutex<HashMap<String, (MenuItem, MenuItem)>>>, // label → (paste_as_child, paste_as_sibling)
-    pub workspace_menu_items: Arc<Mutex<HashMap<String, Vec<MenuItem>>>>,        // label → workspace-gated items
+    pub workspaces:            Arc<Mutex<HashMap<String, Workspace>>>,
+    pub workspace_paths:       Arc<Mutex<HashMap<String, PathBuf>>>,
+    pub identity_manager:      Arc<Mutex<IdentityManager>>,
+    pub unlocked_identities:   Arc<Mutex<HashMap<Uuid, UnlockedIdentity>>>,
+    pub paste_menu_items:      Arc<Mutex<HashMap<String, (MenuItem, MenuItem)>>>,
+    pub workspace_menu_items:  Arc<Mutex<HashMap<String, Vec<MenuItem>>>>,
 }
 ```
 
-`workspace_passwords` is populated only when the `cache_workspace_passwords` setting is enabled. It is never persisted to disk — passwords are cleared when the app quits.
+**`.swarmid` format** — a portable identity export: the `IdentityFile` JSON wrapped in a `SwarmIdFile` envelope (format version, export timestamp). Import preserves workspace bindings if the same UUID already exists (`import_swarmid_overwrite`).
 
-Window labels are derived from the workspace filename (e.g., `notes` for `notes.krillnotes`), with a numeric suffix appended on collision (`notes-2`, `notes-3`, ...).
+**Tauri commands:** `list_identities`, `create_identity`, `unlock_identity`, `lock_identity`, `delete_identity`, `rename_identity`, `change_identity_passphrase`, `get_unlocked_identities`, `is_identity_unlocked`, `get_workspaces_for_identity`, `export_swarmid`, `import_swarmid`, `import_swarmid_overwrite`.
+
+### 9. Multi-Window Architecture
+
+Each open workspace gets its own Tauri window. The frontend is a single React application that loads in every window, but each instance fetches data from its own workspace via the window label.
+
+**AppState** is documented in section 8 (Identity System) above. See [lib.rs](krillnotes-desktop/src-tauri/src/lib.rs) for the full definition.
+
+Window labels are derived from the workspace folder name (e.g., `notes` for a folder named `notes`), with a numeric suffix appended on collision (`notes-2`, `notes-3`, ...).
 
 Every Tauri command receives a `window: tauri::Window` parameter and uses `window.label()` to look up the correct `Workspace`. This means all commands are automatically scoped to the calling window with no extra routing logic.
 
@@ -425,7 +471,9 @@ The `locales::menu_strings` function merges the target locale's `menu` object ov
 | Desktop backend | Tauri v2, mimalloc (global allocator) |
 | Frontend | React 19, TypeScript 5, Vite, Tailwind CSS v4 |
 | Internationalisation | i18next + react-i18next (frontend); compile-time JSON embedding via `build.rs` (native menu) |
-| Encryption | SQLCipher (AES-256-CBC, PBKDF2-HMAC-SHA512) for workspace DBs; AES-256 zip for exports |
+| Workspace encryption | SQLCipher (AES-256-CBC, PBKDF2-HMAC-SHA512) for workspace DBs; ChaCha20-Poly1305 for attachment files |
+| Archive encryption | AES-256 zip for `.krillnotes` export archives |
+| Identity crypto | ed25519-dalek 2.x (keypairs), argon2 0.5 (KDF), aes-gcm 0.10 (key encryption), hkdf (workspace key derivation) |
 | Error handling | thiserror |
 | IDs | uuid v4 |
 | Timestamps | chrono |
@@ -464,8 +512,9 @@ Tests live alongside the code they test in `#[cfg(test)]` modules at the bottom 
 | 7 — Operations log viewer | Done | Filterable history, date/type filters, purge |
 | 8 — Export / Import | Done | Zip-based workspace export and import with version checks |
 | 9 — Encryption | Done | SQLCipher AES-256 for workspace DBs; optional AES-256 zip for exports |
-| 10 — Undo / redo | Planned | Replay / invert operation log |
-| 11 — Sync infrastructure | Planned | CRDT merge, conflict resolution, `synced` flag |
+| 10 — Undo / redo | Done | `RetractOperation` log entries; undo groups; per-workspace history limit |
+| 11 — Identity model | Done | Ed25519 + Argon2id; workspace binding; `.swarmid` portable export |
+| 12 — Sync infrastructure | Planned | CRDT merge, conflict resolution, `synced` flag, swarm discovery |
 
 ---
 
@@ -482,9 +531,11 @@ Tests live alongside the code they test in `#[cfg(test)]` modules at the bottom 
 | [krillnotes-core/src/core/export.rs](krillnotes-core/src/core/export.rs) | Workspace export/import (zip) |
 | [krillnotes-core/src/core/delete.rs](krillnotes-core/src/core/delete.rs) | Delete strategies (DeleteAll, PromoteChildren) |
 | [krillnotes-core/src/core/storage.rs](krillnotes-core/src/core/storage.rs) | SQLCipher connection management, PRAGMA key, migrations, unencrypted-workspace detection |
-| [krillnotes-core/src/core/schema.sql](krillnotes-core/src/core/schema.sql) | Database DDL (4 tables) |
+| [krillnotes-core/src/core/identity.rs](krillnotes-core/src/core/identity.rs) | Identity model — Ed25519 + Argon2id + AES-GCM; workspace bindings; `.swarmid` export/import |
+| [krillnotes-core/src/core/undo.rs](krillnotes-core/src/core/undo.rs) | `RetractInverse` enum — maps operations to their compensating inverses |
+| [krillnotes-core/src/core/schema.sql](krillnotes-core/src/core/schema.sql) | Database DDL (6 tables: notes, note_tags, operations, workspace_meta, user_scripts, attachments) |
 | [krillnotes-desktop/src-tauri/build.rs](krillnotes-desktop/src-tauri/build.rs) | Compile-time locale embedding — generates `locales_generated.rs` from `src/i18n/locales/*.json` |
-| [krillnotes-desktop/src-tauri/src/lib.rs](krillnotes-desktop/src-tauri/src/lib.rs) | Tauri commands + AppState (incl. password cache, menu item handles) |
+| [krillnotes-desktop/src-tauri/src/lib.rs](krillnotes-desktop/src-tauri/src/lib.rs) | Tauri commands + AppState (identity manager, unlocked identities, menu item handles) |
 | [krillnotes-desktop/src-tauri/src/locales.rs](krillnotes-desktop/src-tauri/src/locales.rs) | `menu_strings(lang)` — locale lookup with English merge-over fallback |
 | [krillnotes-desktop/src-tauri/src/menu.rs](krillnotes-desktop/src-tauri/src/menu.rs) | Native menu builder — accepts `&serde_json::Value` locale strings |
 | [krillnotes-desktop/src/App.tsx](krillnotes-desktop/src/App.tsx) | React root, menu event wiring, export/import |

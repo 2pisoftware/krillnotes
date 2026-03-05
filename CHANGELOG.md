@@ -5,11 +5,20 @@ All notable changes to Krillnotes will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] — 2026-03-05
+
+> **Breaking change:** This release replaces per-workspace passwords with an identity-based authentication system. Workspaces created with v0.2.x that used a password cannot be opened directly — export them from v0.2.x via **File → Export Workspace** and re-import into v0.3.0. Additionally, the project is now licensed under MPL-2.0 (previously MIT).
 
 ### Added
-- **Workspace Manager** — Replaces the minimal Open Workspace dialog with a full manager. The list shows each workspace's name, last-modified date, and size on disk, sortable by name or modified date. Selecting a workspace reveals an info panel with created date, note count, attachment count, and size — all read from an unencrypted `info.json` sidecar so no password is required just to view metadata. Per-workspace actions: **Open** (tries cached password first; falls back to password dialog; also triggered by double-clicking a row), **Duplicate** (uses the export→import pipeline; prompts for new name and optional new password), **Delete** (irreversible red confirmation banner; blocked if the workspace is currently open), and **New** (passes through to the existing New Workspace dialog).
-- **Session password caching on by default** — `cache_workspace_passwords` now defaults to `true`. The in-memory session cache means you are not re-prompted when reopening a workspace you already opened in the same session. Users who prefer to be prompted every time can disable this in Settings.
+- **Identity system** — A cryptographic identity (an Ed25519 keypair protected by an Argon2id-derived passphrase) now manages workspace access. Each workspace is bound to an identity; the workspace's randomly-generated database password is stored encrypted under the identity key. You unlock your identity once per session with your passphrase, and all bound workspaces open without any additional password prompts.
+- **Identity Manager** — A new Identity Manager dialog (accessible from Settings) lets you create, rename, unlock, lock, and delete identities. Each identity shows its UUID and the list of workspaces bound to it.
+- **`.swarmid` export/import** — Identities can be exported as a portable `.swarmid` file (encrypted JSON containing your key material). Import a `.swarmid` file on another device to access the same workspaces. On import, an existing identity with the same UUID can be overwritten while preserving all workspace bindings.
+- **Workspace Manager** — Replaces the minimal Open Workspace dialog with a full manager. The list shows each workspace's name, last-modified date, and size on disk, sortable by name or modified date. Selecting a workspace reveals an info panel with created date, note count, attachment count, and size — all read from an unencrypted `info.json` sidecar so no password is required just to view metadata. Per-workspace actions: **Open** (requires the bound identity to be unlocked; also triggered by double-clicking a row), **Duplicate** (uses the export→import pipeline; prompts for new name), **Delete** (irreversible red confirmation banner; blocked if the workspace is currently open), and **New** (opens the New Workspace dialog and binds the new workspace to your unlocked identity).
+- **Random workspace passwords** — New workspaces no longer ask for a user-visible password. A cryptographically random 32-byte base64 key is generated at creation time, used as the SQLCipher database password, and immediately encrypted under the bound identity. Users never see or type a workspace password.
+
+### Changed
+- **License: MIT → MPL-2.0** — Krillnotes is now published under the [Mozilla Public License 2.0](https://mozilla.org/MPL/2.0/). Existing integrations that relied on the MIT license should review the MPL-2.0 terms (file-level copyleft; compatible with GPL).
+- **Workspace opening requires an unlocked identity** — `EnterPasswordDialog` and `SetPasswordDialog` are removed. Opening a workspace now requires unlocking the bound identity first. If no identity is unlocked, the Workspace Manager prompts you to unlock one before opening.
 
 ---
 
@@ -205,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Platform-aware menus: macOS app menu, Edit menu with standard shortcuts; Tools menu for Operations Log and Script Manager.
 - Cross-platform release workflow via GitHub Actions (macOS, Windows, Linux).
 
-[Unreleased]: https://github.com/careck/krillnotes/compare/v0.2.6...HEAD
+[0.3.0]: https://github.com/careck/krillnotes/compare/v0.2.6...v0.3.0
 [0.2.6]: https://github.com/careck/krillnotes/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/careck/krillnotes/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/careck/krillnotes/compare/v0.2.3...v0.2.4

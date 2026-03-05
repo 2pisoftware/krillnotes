@@ -11,22 +11,26 @@ Built with Rust, Tauri v2, React, and SQLCipher (encrypted SQLite).
 ## Features
 
 - **Hierarchical notes** — Organize notes in an infinite tree. Each note can have children, with configurable sort order (alphabetical ascending/descending, or manual positioning).
-- **Typed note schemas** — Note types are defined as [Rhai](https://rhai.rs/) scripts. The built-in `TextNote` type ships out of the box; custom types support fields of type `text`, `textarea`, `number`, `boolean`, `date`, `email`, `select`, and `rating`.
+- **Typed note schemas** — Note types are defined as [Rhai](https://rhai.rs/) scripts. The built-in `TextNote` type ships out of the box; custom types support fields of type `text`, `textarea`, `number`, `boolean`, `date`, `email`, `select`, `rating`, `file`, and `note_link`.
 - **User scripts** — Each workspace stores its own Rhai scripts in the database. Create, edit, enable/disable, reorder, and delete scripts from a built-in script manager — no file system access required.
 - **Template gallery** — Ready-to-use templates live in the `templates/` folder: a book collection organiser and a Zettelkasten atomic-note system. Copy the Rhai source into the Script Manager to activate a template in any workspace.
 - **Tags** — Attach free-form tags to any note. Tags are displayed as colour-coded pills in the note view, shown in the tree's tag cloud panel, and matched by the search bar. Scripts can read `note.tags` in `on_view` hooks and query all notes carrying a given tag with `get_notes_for_tag()`.
 - **On-save hooks** — Rhai scripts can register `on_save` hooks that compute derived fields (e.g. auto-generating a note title from first name + last name, calculating a read duration, or setting a status badge).
 - **Search** — A live search bar with debounced fuzzy matching across note titles and all text fields. Keyboard-navigable results; selecting a match expands collapsed ancestors and scrolls the note into view.
-- **Export / Import** — Export an entire workspace as a `.zip` archive (notes + user scripts), with an optional AES-256 password to encrypt the zip. Import a zip into a new workspace; the app detects encrypted archives and prompts for the password before importing.
+- **Export / Import** — Export an entire workspace as a `.krillnotes` archive (notes + attachments + user scripts), with an optional AES-256 password. Import an archive into a new workspace; the app detects encrypted archives and prompts for the password before importing.
+- **File attachments** — Attach any file to a note. Attachments are encrypted at rest alongside the database. Images render as thumbnails; all file types can be downloaded or opened. Attachment size limit is configurable per workspace.
 - **Undo / Redo** — Cmd+Z / Cmd+Shift+Z (toolbar buttons also available). Undoes note creates, edits, deletes, and moves. Multi-step tree actions collapse into a single undo step. History limit is configurable per workspace (default 50, max 500). The script editor has its own independent undo stack that does not mix with the note-tree history.
 - **Operations log viewer** — Browse the full mutation history, filter by operation type or date range, and purge old entries to reclaim space.
 - **Operation log** — Every mutation (create, update, move, delete, script changes, undo/redo) is appended to an immutable log before being applied, enabling device sync when it ships.
+- **Identity system** — A cryptographic identity (Ed25519 keypair, passphrase-protected via Argon2id) manages workspace access. Unlock your identity once per session with your passphrase; all bound workspaces open without additional prompts. Identities are portable via `.swarmid` export/import — move your identity to another device and all your workspaces follow.
+- **Workspace Manager** — Browse, open, duplicate, and delete workspaces from a dedicated manager. Each entry shows name, size, last-modified date, note count, and attachment count — all without needing to unlock the workspace.
+- **Internationalisation** — 7 language packs ship out of the box: English, German, French, Spanish, Japanese, Korean, and Simplified Chinese. The active language is chosen from Settings and takes effect immediately, including the native application menu.
 - **Tree keyboard navigation** — Arrow keys to move between nodes, Right/Left to expand/collapse, Enter to edit the selected note.
 - **Resizable panels** — Drag the divider between the tree and the detail panel to resize.
 - **Context menu** — Right-click on any tree node for quick actions (Add Note, Edit, Delete).
 - **Multi-window** — Open multiple workspaces simultaneously, each in its own window.
-- **Encrypted workspaces** — Every workspace is encrypted at rest with SQLCipher (AES-256-CBC, PBKDF2-HMAC-SHA512 key derivation). A password is set when the workspace is created and required to open it. Passwords can optionally be remembered for the duration of the session.
-- **Local-first** — All data is stored in a single `.krillnotes` file on disk. No account, no cloud dependency, no internet connection required.
+- **Encrypted workspaces** — Every workspace is encrypted at rest with SQLCipher (AES-256-CBC, PBKDF2-HMAC-SHA512 key derivation). Workspace passwords are randomly generated and managed by the identity system — you never type a workspace password directly.
+- **Local-first** — All data is stored on disk. No account, no cloud dependency, no internet connection required.
 - **Cross-platform** — Runs on macOS, Linux, and Windows via Tauri.
 
 ---
@@ -76,19 +80,28 @@ cargo test -p krillnotes-core
 
 ## File Format
 
-Each workspace is a single **SQLCipher-encrypted** database with the `.krillnotes` extension. The file contains four tables:
+Each workspace is a **folder** on disk containing:
+
+- `notes.db` — a SQLCipher-encrypted SQLite database
+- `attachments/` — per-attachment encrypted files (ChaCha20-Poly1305)
+- `info.json` — unencrypted metadata sidecar (name, note count, size, workspace UUID) readable without a password
+
+The database contains five tables:
 
 | Table | Purpose |
 |-------|---------|
 | `notes` | The note tree (id, title, type, parent, position, fields) |
 | `note_tags` | Many-to-many junction between notes and tags |
 | `operations` | Append-only mutation log (CRDT-style) |
-| `workspace_meta` | Per-device metadata (device ID, selection state) |
+| `workspace_meta` | Per-device metadata (device ID, selection state, undo limit) |
 | `user_scripts` | Per-workspace Rhai scripts (id, name, source code, load order, enabled flag) |
+| `attachments` | Attachment metadata (id, note_id, filename, MIME type, size, hash) |
 
-The file uses AES-256-CBC encryption (SQLCipher v4 defaults: PBKDF2-HMAC-SHA512, 256,000 iterations). It cannot be opened with a plain SQLite browser — you need SQLCipher-aware tooling and the correct password.
+The database uses AES-256-CBC encryption (SQLCipher v4 defaults: PBKDF2-HMAC-SHA512, 256,000 iterations). Workspace passwords are randomly generated and stored encrypted under your identity key — you need SQLCipher-aware tooling **and** the correct randomly-generated password to open the file outside of Krillnotes.
 
-> **Old workspaces (created before v0.1.3):** Unencrypted workspaces are rejected with a migration message. Open them in an older version of Krillnotes, export via **File → Export Workspace**, then import the `.zip` here.
+> **Migrating from v0.2.x:** Workspaces created with v0.2.x used a user-supplied password. Export them in v0.2.x via **File → Export Workspace**, then import the `.krillnotes` archive into v0.3.0 using **New Workspace from Archive**.
+
+> **Migrating from v0.1.x:** Unencrypted workspaces are rejected with a migration message. Open them in v0.1.x, export via **File → Export Workspace**, then import here.
 
 ---
 
@@ -97,7 +110,7 @@ The file uses AES-256-CBC encryption (SQLCipher v4 defaults: PBKDF2-HMAC-SHA512,
 macOS Gatekeeper blocks unsigned apps with an "app is damaged and can't be opened" message. To bypass this after installing from the `.dmg`:
 
 ```bash
-xattr -cr /Applications/krillnotes-desktop.app
+xattr -cr /Applications/Krillnotes.app
 ```
 
 This removes the quarantine flag macOS adds when mounting a DMG. The app will open normally afterwards.
@@ -106,4 +119,4 @@ This removes the quarantine flag macOS adds when mounting a DMG. The app will op
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MPL-2.0 — see [LICENSE](LICENSE). Previously MIT (through v0.2.x).
