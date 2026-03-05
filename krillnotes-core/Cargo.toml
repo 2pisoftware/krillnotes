@@ -2,9 +2,11 @@
 name = "krillnotes-core"
 version = "0.2.5"
 edition = "2021"
-authors = ["Your Name"]
-description = "Core library for Krillnotes - local-first note-taking"
-license = "MIT"
+authors = ["TripleACS Pty Ltd t/a 2pi Software <info@2pisoftware.com>"]
+description = "Core library for Krill Notes — a local-first, schema-driven note-taking application"
+license = "MPL-2.0"
+repository = "https://github.com/2pisoftware/krillnotes"
+homepage = "https://krillnotes.org"
 
 [dependencies]
 rusqlite = { workspace = true }
