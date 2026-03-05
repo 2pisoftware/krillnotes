@@ -114,6 +114,25 @@ pub struct UnlockedIdentity {
     pub verifying_key: ed25519_dalek::VerifyingKey,
 }
 
+// ---------------------------------------------------------------------------
+// .swarmid portable identity file
+// ---------------------------------------------------------------------------
+
+/// Portable identity export file (`<name>.swarmid`).
+/// The `identity` field is the same on-disk `IdentityFile` — private key
+/// is already encrypted with Argon2id + AES-256-GCM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmIdFile {
+    pub format: String,   // always "swarmid"
+    pub version: u32,     // always 1
+    pub identity: IdentityFile,
+}
+
+impl SwarmIdFile {
+    pub const FORMAT: &'static str = "swarmid";
+    pub const VERSION: u32 = 1;
+}
+
 impl IdentityManager {
     /// Create a new `IdentityManager`.
     ///
@@ -902,5 +921,35 @@ mod tests {
         assert!(params.get("m_cost").unwrap().is_u64());
         assert!(params.get("t_cost").unwrap().is_u64());
         assert!(params.get("p_cost").unwrap().is_u64());
+    }
+
+    #[test]
+    fn swarmid_file_roundtrip() {
+        let inner = IdentityFile {
+            identity_uuid: Uuid::new_v4(),
+            display_name: "Test".to_string(),
+            public_key: "abc".to_string(),
+            private_key_enc: EncryptedKey {
+                ciphertext: "ct".to_string(),
+                nonce: "nn".to_string(),
+                kdf: "argon2id".to_string(),
+                kdf_params: KdfParams {
+                    salt: "sl".to_string(),
+                    m_cost: 1,
+                    t_cost: 1,
+                    p_cost: 1,
+                },
+            },
+        };
+        let swarmid = SwarmIdFile {
+            format: SwarmIdFile::FORMAT.to_string(),
+            version: SwarmIdFile::VERSION,
+            identity: inner.clone(),
+        };
+        let json = serde_json::to_string(&swarmid).unwrap();
+        assert!(json.contains("\"format\":\"swarmid\""));
+        assert!(json.contains("\"version\":1"));
+        let parsed: SwarmIdFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.identity.display_name, "Test");
     }
 }

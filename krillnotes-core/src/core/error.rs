@@ -74,6 +74,12 @@ pub enum KrillnotesError {
 
     #[error("Workspace not bound to any identity: {0}")]
     WorkspaceNotBound(String),
+
+    #[error("Invalid .swarmid file: {0}")]
+    SwarmIdInvalidFormat(String),
+
+    #[error("Unsupported .swarmid version: {0}")]
+    SwarmIdVersionUnsupported(u32),
 }
 
 #[cfg(test)]
@@ -140,6 +146,12 @@ impl KrillnotesError {
             }
             Self::WorkspaceNotBound(id) => {
                 format!("Workspace {id} is not bound to any identity.")
+            }
+            Self::SwarmIdInvalidFormat(msg) => {
+                format!("The .swarmid file is invalid: {msg}")
+            }
+            Self::SwarmIdVersionUnsupported(v) => {
+                format!("This .swarmid file uses version {v}, which is not supported by this version of Krillnotes.")
             }
         }
     }
