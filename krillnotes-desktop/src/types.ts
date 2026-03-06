@@ -92,6 +92,17 @@ export interface DeleteResult {
   affectedIds: string[];
 }
 
+export type SaveResult =
+  | { Ok: Note }
+  | {
+      ValidationErrors: {
+        fieldErrors: Record<string, string>;
+        noteErrors: string[];
+        previewTitle: string | null;
+        previewFields: Record<string, FieldValue>;
+      };
+    };
+
 export interface UserScript {
   id: string;
   name: string;

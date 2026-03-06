@@ -903,6 +903,95 @@ fn update_note(
         .map_err(|e| e.to_string())
 }
 
+/// Full save pipeline: runs group visibility, field validation, required checks,
+/// on_save hook, and then writes to the database.
+///
+/// Returns `SaveResult::Ok(note)` on success or `SaveResult::ValidationErrors`
+/// when any validation step fails.
+#[tauri::command]
+fn save_note(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    note_id: String,
+    title: String,
+    fields: BTreeMap<String, FieldValue>,
+) -> std::result::Result<SaveResult, String> {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get_mut(label)
+        .ok_or("No workspace open")?;
+
+    workspace.save_note_with_pipeline(&note_id, title, fields)
+        .map_err(|e| e.to_string())
+}
+
+/// Runs the `validate` closure for a single field.
+///
+/// Returns `None` when the field is valid or has no validate closure.
+/// Returns `Some(error_message)` when the closure returns an error.
+#[tauri::command]
+fn validate_field(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    schema_name: String,
+    field_name: String,
+    value: serde_json::Value,
+) -> std::result::Result<Option<String>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get(label)
+        .ok_or("No workspace open")?;
+
+    let fv: FieldValue = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    workspace.script_registry()
+        .validate_field(&schema_name, &field_name, &fv)
+        .map_err(|e| e.to_string())
+}
+
+/// Runs `validate` closures for all fields that have them.
+///
+/// Returns a map of `field_name → error_message` for each invalid field.
+#[tauri::command]
+fn validate_fields(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    schema_name: String,
+    fields: BTreeMap<String, FieldValue>,
+) -> std::result::Result<BTreeMap<String, String>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get(label)
+        .ok_or("No workspace open")?;
+
+    workspace.script_registry()
+        .validate_fields(&schema_name, &fields)
+        .map_err(|e| e.to_string())
+}
+
+/// Evaluates `visible` closures for each `FieldGroup`.
+///
+/// Returns a map of `group_name → bool`.
+#[tauri::command]
+fn evaluate_group_visibility(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    schema_name: String,
+    fields: BTreeMap<String, FieldValue>,
+) -> std::result::Result<BTreeMap<String, bool>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get(label)
+        .ok_or("No workspace open")?;
+
+    workspace.script_registry()
+        .evaluate_group_visibility(&schema_name, &fields)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn update_note_tags(
     window: tauri::Window,
@@ -2643,6 +2732,10 @@ pub fn run() {
             get_note_view,
             get_note_hover,
             update_note,
+            save_note,
+            validate_field,
+            validate_fields,
+            evaluate_group_visibility,
             update_note_tags,
             get_all_tags,
             get_notes_for_tag,
