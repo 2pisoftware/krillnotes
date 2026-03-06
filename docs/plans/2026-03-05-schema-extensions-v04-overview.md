@@ -2,7 +2,7 @@
 
 **Spec:** `docs/swarm/KrillNotes_Schema_Extensions_Spec_v0_4.docx`
 **Date:** 2026-03-05
-**Branch base:** `swarm`
+**Branch base:** `master`
 
 This document is the master plan for implementing the Schema Extensions Spec v0.4.
 It covers field validation, note-level validation (reject), field groups, the
@@ -199,4 +199,4 @@ Phase 3 (versioning + migration)
 Each phase produces its own design doc and implementation plan at
 `docs/plans/2026-MM-DD-schema-extensions-phase-N-*.md`.
 
-All work branches off `swarm`. PRs target `swarm`.
+All work branches off `master`. PRs target `master`.

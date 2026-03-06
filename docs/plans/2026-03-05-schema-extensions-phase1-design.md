@@ -3,7 +3,7 @@
 **Spec:** `docs/swarm/KrillNotes_Schema_Extensions_Spec_v0_4.docx` (Sections 2–7, Appendices A–D)
 **Parent plan:** `docs/plans/2026-03-05-schema-extensions-v04-overview.md`
 **Date:** 2026-03-05
-**Branch base:** `swarm`
+**Branch base:** `master`
 
 Phase 1 delivers: the gated operations model, field-level validation, note-level
 validation (reject), and field groups with conditional visibility. This is a
