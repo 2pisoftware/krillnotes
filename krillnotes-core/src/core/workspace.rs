@@ -15,8 +15,8 @@ use crate::core::user_script;
 #[allow(unused_imports)]
 use crate::{
     get_device_id, DeleteResult, DeleteStrategy, FieldValue, KrillnotesError, Note,
-    Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, ScriptError,
-    ScriptRegistry, Storage, UndoResult, UserScript,
+    Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, SaveResult,
+    ScriptError, ScriptRegistry, Storage, UndoResult, UserScript,
 };
 use rhai::Dynamic;
 use rusqlite::Connection;
@@ -2632,6 +2632,88 @@ impl Workspace {
     ///
     /// # Errors
     ///
+    /// Full 7-step save pipeline with validation:
+    ///
+    /// 1. Evaluate group visibility
+    /// 2. Run field `validate` closures (only on visible fields)
+    /// 3. Check required constraints (only on visible fields)
+    /// 4-7. Delegate to `update_note` (on_save hook + DB write)
+    ///
+    /// Returns `SaveResult::ValidationErrors` when any step produces errors.
+    /// Returns `SaveResult::Ok(note)` on success.
+    pub fn save_note_with_pipeline(
+        &mut self,
+        note_id: &str,
+        title: String,
+        fields: BTreeMap<String, FieldValue>,
+    ) -> Result<SaveResult> {
+        let note = self.get_note(note_id)
+            .map_err(|_| KrillnotesError::NoteNotFound(note_id.to_string()))?;
+        let schema = self.script_registry.get_schema(&note.node_type)?;
+
+        // Step 1: Evaluate group visibility.
+        let visibility = self.script_registry.evaluate_group_visibility(
+            &note.node_type, &fields,
+        )?;
+
+        // Collect visible field names (top-level + fields from visible groups).
+        let visible_field_names: std::collections::HashSet<String> = schema.fields.iter()
+            .map(|f| f.name.clone())
+            .chain(
+                schema.field_groups.iter()
+                    .filter(|g| visibility.get(&g.name).copied().unwrap_or(true))
+                    .flat_map(|g| g.fields.iter().map(|f| f.name.clone()))
+            )
+            .collect();
+
+        // Step 2: Run validate closures on visible fields.
+        let all_errors = self.script_registry.validate_fields(&note.node_type, &fields)?;
+        let mut field_errors: BTreeMap<String, String> = all_errors.into_iter()
+            .filter(|(k, _)| visible_field_names.contains(k))
+            .collect();
+
+        // Step 3: Required check on visible required fields.
+        for field_def in schema.all_fields() {
+            if field_def.required && visible_field_names.contains(&field_def.name) {
+                let empty = match fields.get(&field_def.name) {
+                    None => true,
+                    Some(FieldValue::Text(s))   => s.is_empty(),
+                    Some(FieldValue::Email(s))  => s.is_empty(),
+                    Some(FieldValue::Date(None))
+                    | Some(FieldValue::NoteLink(None))
+                    | Some(FieldValue::File(None)) => true,
+                    _ => false,
+                };
+                if empty && !field_errors.contains_key(&field_def.name) {
+                    field_errors.insert(field_def.name.clone(), "Required".to_string());
+                }
+            }
+        }
+
+        if !field_errors.is_empty() {
+            return Ok(SaveResult::ValidationErrors {
+                field_errors,
+                note_errors: vec![],
+                preview_title: None,
+                preview_fields: BTreeMap::new(),
+            });
+        }
+
+        // Steps 4-7: update_note (runs on_save hook + writes to DB).
+        match self.update_note(note_id, title, fields) {
+            Ok(updated) => Ok(SaveResult::Ok(updated)),
+            Err(KrillnotesError::ValidationFailed(msg)) => {
+                Ok(SaveResult::ValidationErrors {
+                    field_errors: BTreeMap::new(),
+                    note_errors: vec![msg],
+                    preview_title: None,
+                    preview_fields: BTreeMap::new(),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Returns [`crate::KrillnotesError::NoteNotFound`] if no note with `note_id`
     /// exists in the database.  Returns [`crate::KrillnotesError::Json`] if
     /// `fields` cannot be serialised to JSON.  Returns
@@ -6314,5 +6396,81 @@ add_tree_action("Add Item", ["TAFolder"], |note| {
             err_msg.contains("set_field") || err_msg.contains("gated") || err_msg.contains("old"),
             "Expected migration error, got: {err_msg}"
         );
+    }
+
+    // ── save_note_with_pipeline ───────────────────────────────────────────────
+
+    #[test]
+    fn test_save_pipeline_success() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineOk
+schema("PipeItem", #{
+    fields: [
+        #{ name: "value", type: "text", required: false },
+    ],
+    on_save: |note| { commit(); }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "PipeItem").unwrap();
+        let mut fields = BTreeMap::new();
+        fields.insert("value".to_string(), FieldValue::Text("hello".into()));
+        let result = ws.save_note_with_pipeline(&note_id, "My Item".to_string(), fields).unwrap();
+        assert!(matches!(result, SaveResult::Ok(_)), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_save_pipeline_validation_error() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineValidate
+schema("RatedItem", #{
+    fields: [
+        #{
+            name: "score", type: "number", required: false,
+            validate: |v| if v < 0.0 { "Must be positive" } else { () },
+        },
+    ],
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "RatedItem").unwrap();
+        let mut fields = BTreeMap::new();
+        fields.insert("score".to_string(), FieldValue::Number(-1.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Item".to_string(), fields).unwrap();
+        match result {
+            SaveResult::ValidationErrors { field_errors, .. } => {
+                assert!(field_errors.contains_key("score"), "expected score error");
+            }
+            other => panic!("expected ValidationErrors, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_save_pipeline_reject_error() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineReject
+schema("RejectItem", #{
+    fields: [],
+    on_save: |note| {
+        reject("Always rejected");
+        commit();
+    }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "RejectItem").unwrap();
+        let result = ws.save_note_with_pipeline(&note_id, "Item".to_string(), BTreeMap::new()).unwrap();
+        match result {
+            SaveResult::ValidationErrors { note_errors, .. } => {
+                assert!(!note_errors.is_empty(), "expected note_errors from reject()");
+            }
+            other => panic!("expected ValidationErrors, got: {:?}", other),
+        }
     }
 }

@@ -545,9 +545,24 @@ impl SchemaRegistry {
         // Always take the SaveTransaction back before checking errors.
         let tx = super::take_save_tx().unwrap_or_default();
 
-        let result = result.map_err(|e| {
-            KrillnotesError::Scripting(format!("on_save hook error in '{}': {e}", entry.script_name))
-        })?;
+        // If the hook threw (e.g. commit() failing because reject() was called), but the
+        // tx has soft errors, treat as ValidationFailed rather than a Scripting error.
+        // This preserves the structured error data from reject() calls.
+        let result = match result {
+            Err(_) if tx.has_errors() => {
+                let msgs: Vec<String> = tx.soft_errors.iter().map(|e| {
+                    match &e.field {
+                        Some(f) => format!("{}: {}", f, e.message),
+                        None => e.message.clone(),
+                    }
+                }).collect();
+                return Err(KrillnotesError::ValidationFailed(msgs.join("; ")));
+            }
+            Err(e) => return Err(KrillnotesError::Scripting(
+                format!("on_save hook error in '{}': {e}", entry.script_name)
+            )),
+            Ok(v) => v,
+        };
 
         // Old-style hooks return the note map. Detect and reject with a clear migration message.
         if result.is::<Map>() {
