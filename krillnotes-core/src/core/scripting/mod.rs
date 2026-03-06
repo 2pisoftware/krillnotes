@@ -13,11 +13,10 @@ mod display_helpers;
 mod hooks;
 mod schema;
 
-// Re-exported for API stability; currently a placeholder for future global/lifecycle hooks.
 pub use hooks::HookRegistry;
 pub(crate) use schema::field_value_to_dynamic;
-pub use schema::{AddChildResult, FieldDefinition, FieldGroup, Schema};
-// StarterScript is defined in this file and re-exported via lib.rs.
+pub use schema::{AddChildResult, FieldDefinition, FieldGroup, Schema, ViewRegistration, ScriptWarning};
+use schema::{DeferredBinding, BindingKind};
 
 use crate::{FieldValue, KrillnotesError, Note, Result};
 use crate::core::attachment::AttachmentMeta;
@@ -143,7 +142,6 @@ pub struct ScriptRegistry {
     /// Tracks which script name registered each schema name, for collision detection.
     schema_owners: Arc<Mutex<HashMap<String, String>>>,
     schema_registry: schema::SchemaRegistry,
-    hook_registry: hooks::HookRegistry,
     query_context: Arc<Mutex<Option<QueryContext>>>,
     /// Per-run note + attachment context set before a hook call and cleared after.
     pub run_context: Arc<Mutex<Option<NoteRunContext>>>,
@@ -161,35 +159,121 @@ impl ScriptRegistry {
         let current_loading_script_name: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let schema_owners: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let hook_registry = hooks::HookRegistry::new();
+        // Register register_view/hover/menu — deferred binding functions
+        let deferred_arc = schema_registry.deferred_bindings_arc();
+        let view_ast_arc = Arc::clone(&current_loading_ast);
+        let view_name_arc = Arc::clone(&current_loading_script_name);
 
-        // Register add_tree_action() host function — writes tree context menu actions into HookRegistry.
-        let hook_registry_clone = hook_registry.clone();
-        let add_tree_name_arc = Arc::clone(&current_loading_script_name);
-        let add_tree_ast_arc  = Arc::clone(&current_loading_ast);
-        engine.register_fn("add_tree_action",
+        // 3-arg form: register_view(type, label, closure)
+        let d1 = Arc::clone(&deferred_arc);
+        let a1 = Arc::clone(&view_ast_arc);
+        let n1 = Arc::clone(&view_name_arc);
+        engine.register_fn("register_view",
+            move |target_type: String, label: String, fn_ptr: FnPtr|
+            -> std::result::Result<Dynamic, Box<EvalAltResult>>
+            {
+                let ast = a1.lock().unwrap().clone()
+                    .ok_or_else(|| -> Box<EvalAltResult> {
+                        "register_view() called outside of load_script".to_string().into()
+                    })?;
+                let script_name = n1.lock().unwrap().clone().unwrap_or_default();
+                d1.lock().unwrap().push(DeferredBinding {
+                    kind: BindingKind::View,
+                    target_type,
+                    fn_ptr,
+                    ast: Arc::new(ast),
+                    script_name,
+                    display_first: false,
+                    label: Some(label),
+                    applies_to: vec![],
+                });
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        // 4-arg form: register_view(type, label, options, closure)
+        let d2 = Arc::clone(&deferred_arc);
+        let a2 = Arc::clone(&view_ast_arc);
+        let n2 = Arc::clone(&view_name_arc);
+        engine.register_fn("register_view",
+            move |target_type: String, label: String, options: rhai::Map, fn_ptr: FnPtr|
+            -> std::result::Result<Dynamic, Box<EvalAltResult>>
+            {
+                let ast = a2.lock().unwrap().clone()
+                    .ok_or_else(|| -> Box<EvalAltResult> {
+                        "register_view() called outside of load_script".to_string().into()
+                    })?;
+                let script_name = n2.lock().unwrap().clone().unwrap_or_default();
+                let display_first = options.get("display_first")
+                    .and_then(|v| v.as_bool().ok())
+                    .unwrap_or(false);
+                d2.lock().unwrap().push(DeferredBinding {
+                    kind: BindingKind::View,
+                    target_type,
+                    fn_ptr,
+                    ast: Arc::new(ast),
+                    script_name,
+                    display_first,
+                    label: Some(label),
+                    applies_to: vec![],
+                });
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        // register_hover(target_type, closure)
+        let d3 = Arc::clone(&deferred_arc);
+        let a3 = Arc::clone(&view_ast_arc);
+        let n3 = Arc::clone(&view_name_arc);
+        engine.register_fn("register_hover",
+            move |target_type: String, fn_ptr: FnPtr|
+            -> std::result::Result<Dynamic, Box<EvalAltResult>>
+            {
+                let ast = a3.lock().unwrap().clone()
+                    .ok_or_else(|| -> Box<EvalAltResult> {
+                        "register_hover() called outside of load_script".to_string().into()
+                    })?;
+                let script_name = n3.lock().unwrap().clone().unwrap_or_default();
+                d3.lock().unwrap().push(DeferredBinding {
+                    kind: BindingKind::Hover,
+                    target_type,
+                    fn_ptr,
+                    ast: Arc::new(ast),
+                    script_name,
+                    display_first: false,
+                    label: None,
+                    applies_to: vec![],
+                });
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        // register_menu(label, target_types, closure)
+        let d4 = Arc::clone(&deferred_arc);
+        let a4 = Arc::clone(&view_ast_arc);
+        let n4 = Arc::clone(&view_name_arc);
+        engine.register_fn("register_menu",
             move |label: String, types: rhai::Array, fn_ptr: FnPtr|
             -> std::result::Result<Dynamic, Box<EvalAltResult>>
             {
-                let ast = add_tree_ast_arc.lock().unwrap().clone()
+                let ast = a4.lock().unwrap().clone()
                     .ok_or_else(|| -> Box<EvalAltResult> {
-                        "add_tree_action() called outside of load_script".to_string().into()
+                        "register_menu() called outside of load_script".to_string().into()
                     })?;
-                let script_name = add_tree_name_arc.lock().unwrap()
-                    .clone()
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                let allowed_types: Vec<String> = types
-                    .into_iter()
-                    .filter_map(|v| v.try_cast::<String>())
+                let script_name = n4.lock().unwrap().clone().unwrap_or_default();
+                let applies_to: Vec<String> = types.into_iter()
+                    .filter_map(|v| v.into_string().ok())
                     .collect();
-                let entry = hooks::TreeActionEntry {
-                    label,
-                    allowed_types,
-                    script_name,
+                d4.lock().unwrap().push(DeferredBinding {
+                    kind: BindingKind::Menu,
+                    target_type: String::new(),
                     fn_ptr,
-                    ast,
-                };
-                hook_registry_clone.register_tree_action(entry);
+                    ast: Arc::new(ast),
+                    script_name,
+                    display_first: false,
+                    label: Some(label),
+                    applies_to,
+                });
                 Ok(Dynamic::UNIT)
             }
         );
@@ -197,9 +281,7 @@ impl ScriptRegistry {
         // Register schema() host function — writes schema and schema-bound hooks into SchemaRegistry.
         let schemas_arc       = schema_registry.schemas_arc();
         let on_save_arc       = schema_registry.on_save_hooks_arc();
-        let on_view_arc       = schema_registry.on_view_hooks_arc();
         let on_add_child_arc  = schema_registry.on_add_child_hooks_arc();
-        let on_hover_arc      = schema_registry.on_hover_hooks_arc();
         let schema_ast_arc    = Arc::clone(&current_loading_ast);
         let schema_name_arc   = Arc::clone(&current_loading_script_name);
         let schema_owners_arc = Arc::clone(&schema_owners);
@@ -239,15 +321,6 @@ impl ScriptRegistry {
                 on_save_arc.lock().unwrap().insert(name.clone(), HookEntry { fn_ptr, ast, script_name: script_name.clone() });
             }
 
-            // Extract optional on_view closure.
-            if let Some(fn_ptr) = def.get("on_view").and_then(|v| v.clone().try_cast::<FnPtr>()) {
-                let ast = schema_ast_arc.lock().unwrap().clone()
-                    .ok_or_else(|| -> Box<EvalAltResult> {
-                        "schema() called outside of load_script".to_string().into()
-                    })?;
-                on_view_arc.lock().unwrap().insert(name.clone(), HookEntry { fn_ptr, ast, script_name: script_name.clone() });
-            }
-
             // Extract optional on_add_child closure.
             if let Some(fn_ptr) = def.get("on_add_child").and_then(|v| v.clone().try_cast::<FnPtr>()) {
                 let ast = schema_ast_arc.lock().unwrap().clone()
@@ -255,15 +328,6 @@ impl ScriptRegistry {
                         "schema() called outside of load_script".to_string().into()
                     })?;
                 on_add_child_arc.lock().unwrap().insert(name.clone(), HookEntry { fn_ptr, ast, script_name: script_name.clone() });
-            }
-
-            // Extract optional on_hover closure.
-            if let Some(fn_ptr) = def.get("on_hover").and_then(|v| v.clone().try_cast::<FnPtr>()) {
-                let ast = schema_ast_arc.lock().unwrap().clone()
-                    .ok_or_else(|| -> Box<EvalAltResult> {
-                        "schema() called outside of load_script".to_string().into()
-                    })?;
-                on_hover_arc.lock().unwrap().insert(name.clone(), HookEntry { fn_ptr, ast, script_name: script_name.clone() });
             }
 
             Ok(Dynamic::UNIT)
@@ -644,7 +708,6 @@ impl ScriptRegistry {
             current_loading_script_name,
             schema_owners,
             schema_registry,
-            hook_registry,
             query_context,
             run_context,
         })
@@ -778,91 +841,91 @@ impl ScriptRegistry {
         self.schema_registry.has_hook(schema_name)
     }
 
-    /// Returns `true` if a view hook is registered for `schema_name`.
-    pub fn has_view_hook(&self, schema_name: &str) -> bool {
-        self.schema_registry.has_view_hook(schema_name)
+    /// Returns `true` if any view registrations exist for `schema_name`.
+    pub fn has_views(&self, schema_name: &str) -> bool {
+        self.schema_registry.has_views(schema_name)
     }
 
-    /// Returns `true` if an on_hover hook is registered for `schema_name`.
-    pub fn has_hover_hook(&self, schema_name: &str) -> bool {
-        self.schema_registry.has_hover_hook(schema_name)
+    /// Returns `true` if a hover registration exists for `schema_name`.
+    pub fn has_hover(&self, schema_name: &str) -> bool {
+        self.schema_registry.has_hover(schema_name)
+    }
+
+    /// Returns the view registrations for a schema type.
+    pub fn get_views_for_type(&self, schema_name: &str) -> Vec<ViewRegistration> {
+        self.schema_registry.get_views_for_type(schema_name)
+    }
+
+    /// Returns warnings from unresolved deferred bindings.
+    pub fn get_script_warnings(&self) -> Vec<ScriptWarning> {
+        self.schema_registry.get_warnings()
+    }
+
+    /// Resolves deferred bindings against registered schemas.
+    pub fn resolve_bindings(&self) {
+        self.schema_registry.resolve_bindings();
     }
 
     /// Renders a default HTML view for `note` using schema field type information.
-    ///
-    /// Used when no `on_view` hook is registered for the note's type — the result
-    /// is sent to the frontend instead of falling back to `FieldDisplay.tsx`.
-    ///
-    /// Textarea fields are rendered as CommonMark HTML; all other fields are
-    /// HTML-escaped plain text. Fields not in the schema appear in a legacy section.
-    ///
-    /// `resolved_titles` maps note IDs to their display titles so that NoteLink
-    /// fields render as clickable anchors. Pass `&Default::default()` when no
-    /// resolution is needed.
     pub fn render_default_view(&self, note: &Note, resolved_titles: &std::collections::HashMap<String, String>, attachments: &[crate::core::attachment::AttachmentMeta]) -> String {
         let schema = self.schema_registry.get(&note.node_type).ok();
         display_helpers::render_default_view(note, schema.as_ref(), resolved_titles, attachments)
     }
 
-    /// Runs the view hook registered for the given note's schema, if any.
+    /// Builds a note map for view/hover hooks.
+    fn build_note_map(&self, note: &Note) -> Map {
+        let mut fields_map = Map::new();
+        for (k, v) in &note.fields {
+            fields_map.insert(k.as_str().into(), field_value_to_dynamic(v));
+        }
+        let mut note_map = Map::new();
+        note_map.insert("id".into(), Dynamic::from(note.id.clone()));
+        note_map.insert("node_type".into(), Dynamic::from(note.node_type.clone()));
+        note_map.insert("title".into(), Dynamic::from(note.title.clone()));
+        note_map.insert("fields".into(), Dynamic::from(fields_map));
+        let tags_array: rhai::Array = note.tags.iter()
+            .map(|t| Dynamic::from(t.clone()))
+            .collect();
+        note_map.insert("tags".into(), Dynamic::from(tags_array));
+        note_map
+    }
+
+    /// Runs the default view for a note (first display_first, or first registered).
     ///
-    /// Populates the query context from `context`, calls the hook, then clears
-    /// the context so query functions return empty results outside of a hook call.
-    ///
-    /// Returns `Ok(None)` when no hook is registered for the note's schema.
-    /// Returns `Ok(Some(html))` with the generated HTML on success.
+    /// Returns `Ok(None)` when no views are registered for the note's schema.
     pub fn run_on_view_hook(
         &self,
         note: &Note,
         context: QueryContext,
     ) -> Result<Option<String>> {
-        // Build the note map ({ id, node_type, title, fields, tags } — superset of on_save).
-        let mut fields_map = Map::new();
-        for (k, v) in &note.fields {
-            fields_map.insert(k.as_str().into(), field_value_to_dynamic(v));
-        }
-        let mut note_map = Map::new();
-        note_map.insert("id".into(), Dynamic::from(note.id.clone()));
-        note_map.insert("node_type".into(), Dynamic::from(note.node_type.clone()));
-        note_map.insert("title".into(), Dynamic::from(note.title.clone()));
-        note_map.insert("fields".into(), Dynamic::from(fields_map));
-        let tags_array: rhai::Array = note.tags.iter()
-            .map(|t| Dynamic::from(t.clone()))
-            .collect();
-        note_map.insert("tags".into(), Dynamic::from(tags_array));
-
-        // Install query context, run hook, then clear.
+        let note_map = self.build_note_map(note);
         *self.query_context.lock().unwrap() = Some(context);
-        let result = self.schema_registry.run_on_view_hook(&self.engine, note_map);
+        let result = self.schema_registry.run_default_view(&self.engine, note_map);
         *self.query_context.lock().unwrap() = None;
         result
     }
 
-    /// Runs the hover hook registered for the given note's schema, if any.
-    ///
-    /// Returns `Ok(None)` when no hook is registered for the note's schema.
-    /// Returns `Ok(Some(html))` with the generated HTML on success.
+    /// Renders a specific named view for a note.
+    pub fn run_view(
+        &self,
+        note: &Note,
+        view_label: &str,
+        context: QueryContext,
+    ) -> Result<String> {
+        let note_map = self.build_note_map(note);
+        *self.query_context.lock().unwrap() = Some(context);
+        let result = self.schema_registry.run_view(&self.engine, note_map, view_label);
+        *self.query_context.lock().unwrap() = None;
+        result
+    }
+
+    /// Runs the hover registration for a note, if any.
     pub fn run_on_hover_hook(
         &self,
         note: &Note,
         context: QueryContext,
     ) -> Result<Option<String>> {
-        // Build note map — same shape as on_view (id, node_type, title, fields, tags).
-        let mut fields_map = Map::new();
-        for (k, v) in &note.fields {
-            fields_map.insert(k.as_str().into(), field_value_to_dynamic(v));
-        }
-        let mut note_map = Map::new();
-        note_map.insert("id".into(), Dynamic::from(note.id.clone()));
-        note_map.insert("node_type".into(), Dynamic::from(note.node_type.clone()));
-        note_map.insert("title".into(), Dynamic::from(note.title.clone()));
-        note_map.insert("fields".into(), Dynamic::from(fields_map));
-        let tags_array: rhai::Array = note.tags.iter()
-            .map(|t| Dynamic::from(t.clone()))
-            .collect();
-        note_map.insert("tags".into(), Dynamic::from(tags_array));
-
-        // Install query context, run hook, then clear.
+        let note_map = self.build_note_map(note);
         *self.query_context.lock().unwrap() = Some(context);
         let result = self.schema_registry.run_on_hover_hook(&self.engine, note_map);
         *self.query_context.lock().unwrap() = None;
@@ -873,35 +936,40 @@ impl ScriptRegistry {
     pub fn clear_all(&self) {
         self.schema_registry.clear();
         self.schema_owners.lock().unwrap().clear();
-        self.hook_registry.clear();
         *self.query_context.lock().unwrap() = None;
         *self.run_context.lock().unwrap() = None;
     }
 
-    /// Returns a map of `note_type → [action_label, …]` for every registered tree action.
+    /// Returns a map of `note_type → [action_label, …]` for every registered menu action.
     pub fn tree_action_map(&self) -> HashMap<String, Vec<String>> {
-        self.hook_registry.tree_action_map()
+        self.schema_registry.menu_action_map()
     }
 
-    /// Runs the tree action registered under `label`, passing `note` to the callback.
-    ///
-    /// Returns a [`hooks::TreeActionResult`] containing:
-    /// - `reorder`: `Some(ids)` if the callback returned an array of strings.
-    /// - `transaction`: a [`SaveTransaction`] with pending notes queued via
-    ///   `create_child()` / `set_title()` / `set_field()` / `commit()`.
-    ///
-    /// Returns `Err(...)` if the callback throws a Rhai error.
+    /// Returns a map of `note_type → [action_label, …]` — alias for `tree_action_map`.
+    pub fn menu_action_map(&self) -> HashMap<String, Vec<String>> {
+        self.schema_registry.menu_action_map()
+    }
+
+    /// Runs the menu action registered under `label`, passing `note` to the callback.
     pub fn invoke_tree_action_hook(
         &self,
         label: &str,
         note: &Note,
         context: QueryContext,
     ) -> Result<hooks::TreeActionResult> {
-        let entry = self.hook_registry.find_tree_action(label);
+        let regs = self.schema_registry.menu_registrations_arc();
+        let regs_guard = regs.lock().unwrap();
+        let entry = regs_guard.values()
+            .flat_map(|v| v.iter())
+            .find(|r| r.label == label);
 
-        let (fn_ptr, ast, script_name) = entry.ok_or_else(|| {
+        let entry = entry.ok_or_else(|| {
             KrillnotesError::Scripting(format!("unknown tree action: {label:?}"))
         })?;
+        let fn_ptr = entry.fn_ptr.clone();
+        let ast = entry.ast.as_ref().clone();
+        let script_name = entry.script_name.clone();
+        drop(regs_guard);
 
         // Build note map — same shape as on_save / on_view.
         let mut fields_map = Map::new();
@@ -2876,8 +2944,8 @@ mod tests {
                 on_hover: |note| { "hover: " + note.title },
             });
         "#, "HoverHook").unwrap();
-        assert!(registry.has_hover_hook("WithHover"));
-        assert!(!registry.has_hover_hook("Nonexistent"));
+        assert!(registry.has_hover("WithHover"));
+        assert!(!registry.has_hover("Nonexistent"));
     }
 
     #[test]

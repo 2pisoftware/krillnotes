@@ -1633,7 +1633,7 @@ impl Workspace {
         let note = self.get_note(note_id)?;
 
         // No hook registered: generate the default view without fetching all notes.
-        if !self.script_registry.has_view_hook(&note.node_type) {
+        if !self.script_registry.has_views(&note.node_type) {
             // Pre-resolve NoteLink field targets to titles for the default renderer.
             let mut resolved_titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             for value in note.fields.values() {
@@ -1707,7 +1707,7 @@ impl Workspace {
     pub fn run_hover_hook(&self, note_id: &str) -> Result<Option<String>> {
         let note = self.get_note(note_id)?;
 
-        if !self.script_registry.has_hover_hook(&note.node_type) {
+        if !self.script_registry.has_hover(&note.node_type) {
             return Ok(None);
         }
 
