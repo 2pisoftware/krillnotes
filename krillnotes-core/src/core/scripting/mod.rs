@@ -1236,7 +1236,7 @@ mod tests {
             id: "n1".to_string(), node_type: "Folder".to_string(),
             title: "F".to_string(), parent_id: None, position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            fields: std::collections::BTreeMap::new(), is_expanded: false, tags: vec![],
+            fields: std::collections::BTreeMap::new(), is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: std::collections::HashMap::new(),
@@ -2171,7 +2171,7 @@ mod tests {
         let note = Note {
             id: "n1".into(), title: "Test".into(), node_type: "Memo".into(),
             parent_id: None, position: 0.0, created_at: 0, modified_at: 0,
-            created_by: 0, modified_by: 0, fields, is_expanded: false, tags: vec![],
+            created_by: 0, modified_by: 0, fields, is_expanded: false, tags: vec![], schema_version: 1,
         };
 
         let html = registry.render_default_view(&note, &Default::default(), &[]);
@@ -2220,7 +2220,7 @@ mod tests {
             created_by: 0,
             modified_by: 0,
             fields: BTreeMap::new(),
-            is_expanded: false, tags: vec![],
+            is_expanded: false, tags: vec![], schema_version: 1,
         };
 
         let context = QueryContext {
@@ -2520,7 +2520,7 @@ mod tests {
             id: "n1".to_string(), node_type: "BoomView".to_string(),
             title: "T".to_string(), parent_id: None, position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            fields: BTreeMap::new(), is_expanded: false, tags: vec![],
+            fields: BTreeMap::new(), is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: HashMap::new(),
@@ -2583,7 +2583,7 @@ mod tests {
             node_type: "TextNote".into(), parent_id: None,
             fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            is_expanded: false, tags: vec![],
+            is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: Default::default(),
@@ -2610,7 +2610,7 @@ mod tests {
             node_type: "TextNote".into(), parent_id: None,
             fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            is_expanded: false, tags: vec![],
+            is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: Default::default(),
@@ -2632,7 +2632,7 @@ mod tests {
             node_type: "TextNote".into(), parent_id: None,
             fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            is_expanded: false, tags: vec![],
+            is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: Default::default(),
@@ -2659,7 +2659,7 @@ mod tests {
             node_type: "TextNote".into(), parent_id: None,
             fields: std::collections::BTreeMap::new(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            is_expanded: false, tags: vec![],
+            is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: Default::default(),
@@ -2681,7 +2681,7 @@ mod tests {
             node_type: node_type.into(), parent_id: None,
             fields: Default::default(), position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
-            is_expanded: false, tags: vec![],
+            is_expanded: false, tags: vec![], schema_version: 1,
         }
     }
 
@@ -2850,7 +2850,7 @@ mod tests {
             title: "T".to_string(), parent_id: None, position: 0.0,
             created_at: 0, modified_at: 0, created_by: 0, modified_by: 0,
             fields: std::collections::BTreeMap::new(), is_expanded: false,
-            tags: vec!["rust".to_string(), "notes".to_string()],
+            tags: vec!["rust".to_string(), "notes".to_string()], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: std::collections::HashMap::new(),
@@ -3049,7 +3049,7 @@ mod tests {
             id: "id1".into(), title: "Test Note".into(), node_type: "HoverRun".into(),
             parent_id: None, position: 0.0, created_at: 0, modified_at: 0,
             created_by: 0, modified_by: 0,
-            fields: std::collections::BTreeMap::new(), is_expanded: false, tags: vec![],
+            fields: std::collections::BTreeMap::new(), is_expanded: false, tags: vec![], schema_version: 1,
         };
         let ctx = QueryContext {
             notes_by_id: Default::default(), children_by_id: Default::default(),
@@ -3143,7 +3143,7 @@ mod tests {
         fields.insert("photo".to_string(), FieldValue::File(Some("abc-uuid-123".to_string())));
         let note = Note {
             id: "n1".to_string(), node_type: "PhotoNote".to_string(),
-            title: "T".to_string(), parent_id: None, fields, tags: vec![],
+            title: "T".to_string(), parent_id: None, fields, tags: vec![], schema_version: 1,
             created_at: 0, modified_at: 0, position: 0.0,
             created_by: 0, modified_by: 0, is_expanded: false,
         };
@@ -3174,7 +3174,7 @@ mod tests {
         fields.insert("photo".to_string(), FieldValue::File(None));
         let note = Note {
             id: "n2".to_string(), node_type: "PhotoNote".to_string(),
-            title: "T".to_string(), parent_id: None, fields, tags: vec![],
+            title: "T".to_string(), parent_id: None, fields, tags: vec![], schema_version: 1,
             created_at: 0, modified_at: 0, position: 0.0,
             created_by: 0, modified_by: 0, is_expanded: false,
         };

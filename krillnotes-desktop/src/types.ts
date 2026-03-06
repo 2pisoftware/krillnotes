@@ -24,6 +24,7 @@ export interface Note {
   fields: Record<string, FieldValue>;
   isExpanded: boolean;
   tags: string[];
+  schemaVersion: number;
 }
 
 export interface TreeNode {
