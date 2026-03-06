@@ -708,10 +708,15 @@ pub fn render_default_view(
                 group_rows.push(field_row_html(&label, &value_html));
             }
             if !group_rows.is_empty() {
+                let open_attr = if group.collapsed { "" } else { " open" };
                 sections.push(format!(
-                    "<div class=\"kn-view-section\"><div class=\"kn-view-section-title\">{}</div><dl class=\"kn-view-fields\">{}</dl></div>",
-                    group.name,
-                    group_rows.join("")
+                    "<details class=\"kn-view-group\"{open_attr}>\
+                       <summary class=\"kn-view-group-summary\">{name}</summary>\
+                       <dl class=\"kn-view-fields\">{rows}</dl>\
+                     </details>",
+                    open_attr = open_attr,
+                    name = group.name,
+                    rows = group_rows.join("")
                 ));
             }
         }
