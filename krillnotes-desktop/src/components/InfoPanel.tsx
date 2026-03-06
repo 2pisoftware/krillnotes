@@ -313,7 +313,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     if (!selectedNote || !schemaInfo.fieldGroups.some(g => g.hasVisibleClosure)) return;
     try {
       const vis = await invoke<Record<string, boolean>>('evaluate_group_visibility', {
-        noteId: selectedNote.id,
+        schemaName: selectedNote.nodeType,
         fields,
       });
       setGroupVisible(vis);
@@ -326,7 +326,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     if (!selectedNote || !fieldDef.hasValidate) return;
     try {
       const error = await invoke<string | null>('validate_field', {
-        noteId: selectedNote.id,
+        schemaName: selectedNote.nodeType,
         fieldName,
         value: editedFields[fieldName] ?? defaultValueForFieldType(fieldDef.fieldType),
       });

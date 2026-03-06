@@ -207,12 +207,16 @@ pub enum SaveResult {
     /// Validation or reject errors blocked the save.
     ValidationErrors {
         /// Field-pinned errors: field_name -> error message.
+        #[serde(rename = "fieldErrors")]
         field_errors: BTreeMap<String, String>,
         /// Note-level errors from reject().
+        #[serde(rename = "noteErrors")]
         note_errors: Vec<String>,
         /// Preview title from set_title() (if any).
+        #[serde(rename = "previewTitle")]
         preview_title: Option<String>,
         /// Preview fields from set_field() calls.
+        #[serde(rename = "previewFields")]
         preview_fields: BTreeMap<String, FieldValue>,
     },
 }
