@@ -7,6 +7,7 @@
 //! Schema definitions and the private schema store for Krillnotes note types.
 
 use crate::{FieldValue, KrillnotesError, Result};
+use crate::core::save_transaction::SaveTransaction;
 use chrono::NaiveDate;
 use rhai::{Dynamic, Engine, FnPtr, Map, AST};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,21 @@ pub struct FieldDefinition {
     /// Ignored for non-`file` field types.
     #[serde(default)]
     pub allowed_types: Vec<String>,
+    /// Field-level validation closure. Receives the field value, returns `()`
+    /// for valid or a `String` error message for invalid.
+    #[serde(skip)]
+    pub validate: Option<rhai::FnPtr>,
+}
+
+/// A named group of fields with optional conditional visibility.
+#[derive(Debug, Clone)]
+pub struct FieldGroup {
+    pub name: String,
+    pub fields: Vec<FieldDefinition>,
+    /// Visibility closure: `|fields_map| -> bool`. `None` means always visible.
+    pub visible: Option<rhai::FnPtr>,
+    /// Initial collapsed state in the UI.
+    pub collapsed: bool,
 }
 
 /// A parsed note-type schema containing an ordered list of field definitions.
@@ -80,9 +96,21 @@ pub struct Schema {
     /// MIME types accepted by the note-level attachments panel; empty means all types are allowed.
     /// Ignored when `allow_attachments` is `false`.
     pub attachment_types: Vec<String>,
+    /// Named field groups with optional visibility rules.
+    pub field_groups: Vec<FieldGroup>,
+    /// AST of the script that defined this schema. Required to call `validate`
+    /// and `visible` closures stored on individual fields and groups.
+    pub ast: Option<rhai::AST>,
 }
 
 impl Schema {
+    /// All fields in declaration order: top-level first, then each group's fields.
+    pub fn all_fields(&self) -> Vec<&FieldDefinition> {
+        self.fields.iter()
+            .chain(self.field_groups.iter().flat_map(|g| g.fields.iter()))
+            .collect()
+    }
+
     /// Checks that all fields marked `required: true` have non-empty values.
     ///
     /// "Empty" means:
@@ -97,7 +125,7 @@ impl Schema {
     /// Returns [`KrillnotesError::ValidationFailed`] for the first required
     /// field that is empty, naming the field in the error message.
     pub fn validate_required_fields(&self, fields: &BTreeMap<String, FieldValue>) -> crate::Result<()> {
-        for field_def in &self.fields {
+        for field_def in self.all_fields() {
             if !field_def.required {
                 continue;
             }
@@ -123,7 +151,7 @@ impl Schema {
     /// Returns a map of field names to their zero-value defaults.
     pub fn default_fields(&self) -> BTreeMap<String, FieldValue> {
         let mut fields = BTreeMap::new();
-        for field_def in &self.fields {
+        for field_def in self.all_fields() {
             let default_value = match field_def.field_type.as_str() {
                 "text" | "textarea" => FieldValue::Text(String::new()),
                 "number" => FieldValue::Number(0.0),
@@ -142,6 +170,91 @@ impl Schema {
         fields
     }
 
+    /// Parses a single `FieldDefinition` from a Rhai Dynamic (must be a map).
+    pub(super) fn parse_field_def(field_item: &Dynamic) -> Result<FieldDefinition> {
+        let field_map = field_item
+            .clone()
+            .try_cast::<Map>()
+            .ok_or_else(|| KrillnotesError::Scripting("Field must be a map".to_string()))?;
+
+        let field_name = field_map
+            .get("name")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .ok_or_else(|| KrillnotesError::Scripting("Field missing 'name'".to_string()))?;
+
+        let field_type = field_map
+            .get("type")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .ok_or_else(|| KrillnotesError::Scripting("Field missing 'type'".to_string()))?;
+
+        let required = field_map
+            .get("required")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(false);
+
+        let can_view = field_map
+            .get("can_view")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(true);
+
+        let can_edit = field_map
+            .get("can_edit")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(true);
+
+        let mut options: Vec<String> = Vec::new();
+        if let Some(arr) = field_map
+            .get("options")
+            .and_then(|v| v.clone().try_cast::<rhai::Array>())
+        {
+            for item in arr {
+                let s = item.try_cast::<String>().ok_or_else(|| {
+                    KrillnotesError::Scripting("options array must contain only strings".into())
+                })?;
+                options.push(s);
+            }
+        }
+
+        let max: i64 = field_map
+            .get("max")
+            .and_then(|v| v.clone().try_cast::<i64>())
+            .unwrap_or(0);
+
+        if max < 0 {
+            return Err(KrillnotesError::Scripting(
+                format!("field '{}': max must be >= 0, got {}", field_name, max)
+            ));
+        }
+
+        let target_type: Option<String> = field_map
+            .get("target_type")
+            .and_then(|v| v.clone().try_cast::<String>());
+
+        let show_on_hover = field_map
+            .get("show_on_hover")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(false);
+
+        let mut allowed_types: Vec<String> = Vec::new();
+        if let Some(arr) = field_map
+            .get("allowed_types")
+            .and_then(|v| v.clone().try_cast::<rhai::Array>())
+        {
+            for item in arr {
+                let s = item.try_cast::<String>().ok_or_else(|| {
+                    KrillnotesError::Scripting("allowed_types array must contain only strings".into())
+                })?;
+                allowed_types.push(s);
+            }
+        }
+
+        let validate: Option<rhai::FnPtr> = field_map
+            .get("validate")
+            .and_then(|v| v.clone().try_cast::<rhai::FnPtr>());
+
+        Ok(FieldDefinition { name: field_name, field_type, required, can_view, can_edit, options, max, target_type, show_on_hover, allowed_types, validate })
+    }
+
     /// Parses a `Schema` from a Rhai object map produced by a `schema(...)` call.
     ///
     /// # Errors
@@ -154,83 +267,15 @@ impl Schema {
             .ok_or_else(|| KrillnotesError::Scripting("Missing 'fields' array".to_string()))?;
 
         let mut fields = Vec::new();
+        let mut all_field_names = std::collections::HashSet::new();
         for field_item in fields_array {
-            let field_map = field_item
-                .try_cast::<Map>()
-                .ok_or_else(|| KrillnotesError::Scripting("Field must be a map".to_string()))?;
-
-            let field_name = field_map
-                .get("name")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("Field missing 'name'".to_string()))?;
-
-            let field_type = field_map
-                .get("type")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("Field missing 'type'".to_string()))?;
-
-            let required = field_map
-                .get("required")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(false);
-
-            let can_view = field_map
-                .get("can_view")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(true);
-
-            let can_edit = field_map
-                .get("can_edit")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(true);
-
-            let mut options: Vec<String> = Vec::new();
-            if let Some(arr) = field_map
-                .get("options")
-                .and_then(|v| v.clone().try_cast::<rhai::Array>())
-            {
-                for item in arr {
-                    let s = item.try_cast::<String>().ok_or_else(|| {
-                        KrillnotesError::Scripting("options array must contain only strings".into())
-                    })?;
-                    options.push(s);
-                }
+            let field = Self::parse_field_def(&field_item)?;
+            if !all_field_names.insert(field.name.clone()) {
+                return Err(KrillnotesError::Scripting(format!(
+                    "Duplicate field name '{}' in schema '{}'", field.name, name
+                )));
             }
-
-            let max: i64 = field_map
-                .get("max")
-                .and_then(|v| v.clone().try_cast::<i64>())
-                .unwrap_or(0);
-
-            if max < 0 {
-                return Err(KrillnotesError::Scripting(
-                    format!("field '{}': max must be >= 0, got {}", field_name, max)
-                ));
-            }
-
-            let target_type: Option<String> = field_map
-                .get("target_type")
-                .and_then(|v| v.clone().try_cast::<String>());
-
-            let show_on_hover = field_map
-                .get("show_on_hover")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(false);
-
-            let mut allowed_types: Vec<String> = Vec::new();
-            if let Some(arr) = field_map
-                .get("allowed_types")
-                .and_then(|v| v.clone().try_cast::<rhai::Array>())
-            {
-                for item in arr {
-                    let s = item.try_cast::<String>().ok_or_else(|| {
-                        KrillnotesError::Scripting("allowed_types array must contain only strings".into())
-                    })?;
-                    allowed_types.push(s);
-                }
-            }
-
-            fields.push(FieldDefinition { name: field_name, field_type, required, can_view, can_edit, options, max, target_type, show_on_hover, allowed_types });
+            fields.push(field);
         }
 
         let title_can_view = def
@@ -292,7 +337,53 @@ impl Schema {
             }
         }
 
-        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types })
+        let mut field_groups: Vec<FieldGroup> = Vec::new();
+        if let Some(groups_array) = def
+            .get("field_groups")
+            .and_then(|v| v.clone().try_cast::<rhai::Array>())
+        {
+            for group_item in groups_array {
+                let group_map = group_item
+                    .try_cast::<Map>()
+                    .ok_or_else(|| KrillnotesError::Scripting("field_groups entry must be a map".to_string()))?;
+
+                let group_name = group_map
+                    .get("name")
+                    .and_then(|v| v.clone().try_cast::<String>())
+                    .ok_or_else(|| KrillnotesError::Scripting("field group missing 'name'".to_string()))?;
+
+                let collapsed = group_map
+                    .get("collapsed")
+                    .and_then(|v| v.clone().try_cast::<bool>())
+                    .unwrap_or(false);
+
+                let visible: Option<rhai::FnPtr> = group_map
+                    .get("visible")
+                    .and_then(|v| v.clone().try_cast::<rhai::FnPtr>());
+
+                let group_fields_array = group_map
+                    .get("fields")
+                    .and_then(|v| v.clone().try_cast::<rhai::Array>())
+                    .ok_or_else(|| KrillnotesError::Scripting(
+                        format!("field group '{}' missing 'fields' array", group_name)
+                    ))?;
+
+                let mut group_fields = Vec::new();
+                for field_item in group_fields_array {
+                    let field = Self::parse_field_def(&field_item)?;
+                    if !all_field_names.insert(field.name.clone()) {
+                        return Err(KrillnotesError::Scripting(format!(
+                            "Duplicate field name '{}' in schema '{}'", field.name, name
+                        )));
+                    }
+                    group_fields.push(field);
+                }
+
+                field_groups.push(FieldGroup { name: group_name, fields: group_fields, visible, collapsed });
+            }
+        }
+
+        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types, field_groups, ast: None })
     }
 }
 
@@ -398,6 +489,15 @@ impl SchemaRegistry {
 
     /// Runs the on_save hook for `schema_name`, if registered.
     ///
+    /// Returns `Ok(None)` when no hook is registered.
+    /// Returns `Ok(Some(tx))` with the populated [`SaveTransaction`] on success.
+    /// The transaction's `committed` flag indicates whether `commit()` was called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KrillnotesError::Scripting`] if the hook throws a Rhai error, or if
+    /// the hook returns a Map (old-style mutation) instead of using `set_field`/`commit`.
+    ///
     /// Called from [`ScriptRegistry::run_on_save_hook`](super::ScriptRegistry::run_on_save_hook).
     pub(super) fn run_on_save_hook(
         &self,
@@ -407,7 +507,7 @@ impl SchemaRegistry {
         node_type: &str,
         title: &str,
         fields: &BTreeMap<String, FieldValue>,
-    ) -> Result<Option<(String, BTreeMap<String, FieldValue>)>> {
+    ) -> Result<Option<SaveTransaction>> {
         let entry = {
             let hooks = self.on_save_hooks
                 .lock()
@@ -429,38 +529,54 @@ impl SchemaRegistry {
         note_map.insert("title".into(),     Dynamic::from(title.to_string()));
         note_map.insert("fields".into(),    Dynamic::from(fields_map));
 
+        // Populate the thread-local SaveTransaction before calling the hook.
+        let tx = SaveTransaction::for_existing_note(
+            note_id.to_string(),
+            node_type.to_string(),
+            title.to_string(),
+            fields.clone(),
+        );
+        super::set_save_tx(tx);
+
         let result = entry
             .fn_ptr
-            .call::<Dynamic>(engine, &entry.ast, (Dynamic::from(note_map),))
-            .map_err(|e| KrillnotesError::Scripting(format!("on_save hook error in '{}': {e}", entry.script_name)))?;
+            .call::<Dynamic>(engine, &entry.ast, (Dynamic::from(note_map),));
 
-        let result_map = result.try_cast::<Map>().ok_or_else(|| {
-            KrillnotesError::Scripting("on_save hook must return the note map".to_string())
-        })?;
+        // Always take the SaveTransaction back before checking errors.
+        let tx = super::take_save_tx().unwrap_or_default();
 
-        let new_title = result_map
-            .get("title")
-            .and_then(|v| v.clone().try_cast::<String>())
-            .ok_or_else(|| KrillnotesError::Scripting("hook result 'title' must be a string".to_string()))?;
+        // If the hook threw (e.g. commit() failing because reject() was called), but the
+        // tx has soft errors, treat as ValidationFailed rather than a Scripting error.
+        // This preserves the structured error data from reject() calls.
+        let result = match result {
+            Err(_) if tx.has_errors() => {
+                let msgs: Vec<String> = tx.soft_errors.iter().map(|e| {
+                    match &e.field {
+                        Some(f) => format!("{}: {}", f, e.message),
+                        None => e.message.clone(),
+                    }
+                }).collect();
+                return Err(KrillnotesError::ValidationFailed(msgs.join("; ")));
+            }
+            Err(e) => return Err(KrillnotesError::Scripting(
+                format!("on_save hook error in '{}': {e}", entry.script_name)
+            )),
+            Ok(v) => v,
+        };
 
-        let new_fields_dyn = result_map
-            .get("fields")
-            .and_then(|v| v.clone().try_cast::<Map>())
-            .ok_or_else(|| KrillnotesError::Scripting("hook result 'fields' must be a map".to_string()))?;
-
-        let mut new_fields = BTreeMap::new();
-        for field_def in &schema.fields {
-            let dyn_val = new_fields_dyn
-                .get(field_def.name.as_str())
-                .cloned()
-                .unwrap_or(Dynamic::UNIT);
-            let fv = dynamic_to_field_value(dyn_val, &field_def.field_type).map_err(|e| {
-                KrillnotesError::Scripting(format!("field '{}': {}", field_def.name, e))
-            })?;
-            new_fields.insert(field_def.name.clone(), fv);
+        // Old-style hooks return the note map. Detect and reject with a clear migration message.
+        if result.is::<Map>() {
+            return Err(KrillnotesError::Scripting(
+                format!(
+                    "on_save hook in '{}' uses the old direct-mutation style (returns the note map). \
+                     Migrate to the gated model: use set_field(note.id, \"field\", value), \
+                     set_title(note.id, \"title\"), and commit() instead.",
+                    entry.script_name
+                )
+            ));
         }
 
-        Ok(Some((new_title, new_fields)))
+        Ok(Some(tx))
     }
 
     /// Runs the on_view hook for `schema_name`, if registered.
@@ -542,6 +658,9 @@ impl SchemaRegistry {
     ///
     /// Returns `Ok(None)` when no hook is registered for the parent schema.
     /// Returns `Ok(Some(AddChildResult))` with optional parent/child updates on success.
+    ///
+    /// The hook must use the gated SaveTransaction API (`set_field`, `set_title`, `commit`).
+    /// Hooks that return a map (old-style direct mutation) are rejected with a migration error.
     pub(super) fn run_on_add_child_hook(
         &self,
         engine: &Engine,
@@ -590,66 +709,89 @@ impl SchemaRegistry {
         child_map.insert("title".into(),     Dynamic::from(child_title.to_string()));
         child_map.insert("fields".into(),    Dynamic::from(c_fields_map));
 
+        // Pre-seed the SaveTransaction with both parent and child so that
+        // set_field / set_title calls inside the hook can target either note.
+        let mut tx = SaveTransaction::new();
+        tx.register_existing_note(
+            parent_id.to_string(),
+            parent_type.to_string(),
+            parent_title.to_string(),
+            parent_fields.clone(),
+        );
+        tx.register_existing_note(
+            child_id.to_string(),
+            child_type.to_string(),
+            child_title.to_string(),
+            child_fields.clone(),
+        );
+        super::set_save_tx(tx);
+
         let result = entry
             .fn_ptr
-            .call::<Dynamic>(engine, &entry.ast, (Dynamic::from(parent_map), Dynamic::from(child_map)))
-            .map_err(|e| KrillnotesError::Scripting(
-                format!("on_add_child hook error in '{}': {e}", entry.script_name)
-            ))?;
+            .call::<Dynamic>(engine, &entry.ast, (Dynamic::from(parent_map), Dynamic::from(child_map)));
 
-        // If the hook returned unit (no-op), treat as no modification
-        if result.is_unit() {
-            return Ok(Some(AddChildResult { parent: None, child: None }));
+        // Always take the SaveTransaction back before inspecting errors.
+        let tx = super::take_save_tx().unwrap_or_default();
+
+        let result = match result {
+            Err(e) => return Err(KrillnotesError::Scripting(
+                format!("on_add_child hook error in '{}': {e}", entry.script_name)
+            )),
+            Ok(v) => v,
+        };
+
+        // Old-style hooks return a map #{ parent: ..., child: ... }.
+        // Detect and reject with a clear migration message.
+        if result.is::<Map>() {
+            return Err(KrillnotesError::Scripting(
+                format!(
+                    "on_add_child hook in '{}' uses the old direct-mutation style (returns a map). \
+                     Migrate to the gated model: use set_field(id, \"field\", value), \
+                     set_title(id, \"title\"), and commit() instead.",
+                    entry.script_name
+                )
+            ));
         }
 
-        let result_map = result.try_cast::<Map>().ok_or_else(|| {
-            KrillnotesError::Scripting(
-                "on_add_child hook must return a map #{ parent: ..., child: ... } or ()".to_string()
-            )
-        })?;
-
-        // Extract optional parent modifications
-        let parent_update = if let Some(pm) = result_map.get("parent").and_then(|v| v.clone().try_cast::<Map>()) {
-            let new_title = pm.get("title")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result parent 'title' must be a string".to_string()))?;
-            let new_fields_dyn = pm.get("fields")
-                .and_then(|v| v.clone().try_cast::<Map>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result parent 'fields' must be a map".to_string()))?;
-            let mut new_fields = BTreeMap::new();
-            for field_def in &parent_schema.fields {
-                let dyn_val = new_fields_dyn.get(field_def.name.as_str()).cloned().unwrap_or(Dynamic::UNIT);
-                let fv = dynamic_to_field_value(dyn_val, &field_def.field_type)
-                    .map_err(|e| KrillnotesError::Scripting(format!("parent field '{}': {e}", field_def.name)))?;
-                new_fields.insert(field_def.name.clone(), fv);
-            }
-            Some((new_title, new_fields))
-        } else {
-            None
-        };
-
-        // Extract optional child modifications
-        let child_update = if let Some(cm) = result_map.get("child").and_then(|v| v.clone().try_cast::<Map>()) {
-            let new_title = cm.get("title")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result child 'title' must be a string".to_string()))?;
-            let new_fields_dyn = cm.get("fields")
-                .and_then(|v| v.clone().try_cast::<Map>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result child 'fields' must be a map".to_string()))?;
-            let mut new_fields = BTreeMap::new();
-            for field_def in &child_schema.fields {
-                let dyn_val = new_fields_dyn.get(field_def.name.as_str()).cloned().unwrap_or(Dynamic::UNIT);
-                let fv = dynamic_to_field_value(dyn_val, &field_def.field_type)
-                    .map_err(|e| KrillnotesError::Scripting(format!("child field '{}': {e}", field_def.name)))?;
-                new_fields.insert(field_def.name.clone(), fv);
-            }
-            Some((new_title, new_fields))
-        } else {
-            None
-        };
+        // Extract modifications from the transaction's pending notes.
+        let parent_update = extract_note_update(&tx, parent_id, parent_schema);
+        let child_update  = extract_note_update(&tx, child_id,  child_schema);
 
         Ok(Some(AddChildResult { parent: parent_update, child: child_update }))
     }
+}
+
+/// Extracts title and fields updates from a completed [`SaveTransaction`] for one note.
+///
+/// Returns `Some((title, fields))` if the note has any pending changes, or `None`
+/// if the hook left it unmodified.
+fn extract_note_update(
+    tx: &SaveTransaction,
+    note_id: &str,
+    schema: &Schema,
+) -> Option<(String, BTreeMap<String, FieldValue>)> {
+    let pending = tx.pending_notes.get(note_id)?;
+
+    // Only return Some if the hook actually changed something.
+    let title_changed  = pending.pending_title.is_some();
+    let fields_changed = !pending.pending_fields.is_empty();
+
+    if !title_changed && !fields_changed {
+        return None;
+    }
+
+    let new_title = pending.effective_title().to_string();
+
+    // Build the effective fields map restricted to schema-defined fields.
+    let effective = pending.effective_fields();
+    let mut new_fields = BTreeMap::new();
+    for field_def in schema.all_fields() {
+        if let Some(fv) = effective.get(&field_def.name) {
+            new_fields.insert(field_def.name.clone(), fv.clone());
+        }
+    }
+
+    Some((new_title, new_fields))
 }
 
 /// Converts a [`FieldValue`] to a Rhai [`Dynamic`] for passing into hook closures.

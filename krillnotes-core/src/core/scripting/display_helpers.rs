@@ -688,9 +688,44 @@ pub fn render_default_view(
             ));
         }
 
-        // Render any fields not in the schema as "legacy".
-        let schema_names: std::collections::HashSet<&str> =
-            schema.fields.iter().map(|f| f.name.as_str()).collect();
+        // Render field groups.
+        for group in &schema.field_groups {
+            let mut group_rows: Vec<String> = Vec::new();
+            for field_def in &group.fields {
+                if !field_def.can_view {
+                    continue;
+                }
+                let Some(value) = note.fields.get(&field_def.name) else { continue };
+                if is_field_empty(value) {
+                    continue;
+                }
+                let label = humanise_key(&field_def.name);
+                let value_html =
+                    format_field_value_html(value, &field_def.field_type, field_def.max, resolved_titles, image_ctx);
+                if value_html.is_empty() {
+                    continue;
+                }
+                group_rows.push(field_row_html(&label, &value_html));
+            }
+            if !group_rows.is_empty() {
+                let open_attr = if group.collapsed { "" } else { " open" };
+                sections.push(format!(
+                    "<details class=\"kn-view-group\"{open_attr}>\
+                       <summary class=\"kn-view-group-summary\">{name}</summary>\
+                       <dl class=\"kn-view-fields\">{rows}</dl>\
+                     </details>",
+                    open_attr = open_attr,
+                    name = group.name,
+                    rows = group_rows.join("")
+                ));
+            }
+        }
+
+        // Render any fields not in the schema (top-level or in any field group) as "legacy".
+        let schema_names: std::collections::HashSet<&str> = schema.fields.iter()
+            .map(|f| f.name.as_str())
+            .chain(schema.field_groups.iter().flat_map(|g| g.fields.iter().map(|f| f.name.as_str())))
+            .collect();
         let mut legacy: Vec<(&String, &FieldValue)> = note
             .fields
             .iter()
@@ -846,13 +881,13 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "notes".into(), field_type: "textarea".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![], validate: None,
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -878,13 +913,13 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "name".into(), field_type: "text".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![], validate: None,
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -910,13 +945,13 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "secret".into(), field_type: "text".into(),
                 required: false, can_view: false, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![], validate: None,
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -945,13 +980,13 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "body".into(), field_type: "textarea".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![], validate: None,
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -1004,13 +1039,13 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "known".into(), field_type: "text".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![], validate: None,
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -1341,12 +1376,12 @@ mod tests {
             fields: vec![FieldDefinition {
                 name: "body".into(), field_type: "textarea".into(),
                 required: false, can_view: true, can_edit: true,
-                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![],
+                options: vec![], max: 0, target_type: None, show_on_hover: false, allowed_types: vec![], validate: None,
             }],
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
-            allow_attachments: false, attachment_types: vec![],
+            allow_attachments: false, attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);

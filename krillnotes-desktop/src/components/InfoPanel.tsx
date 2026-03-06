@@ -10,7 +10,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
-import type { Note, FieldValue, SchemaInfo, AttachmentMeta } from '../types';
+import type { Note, FieldValue, SchemaInfo, FieldDefinition, AttachmentMeta, SaveResult } from '../types';
 import FieldDisplay from './FieldDisplay';
 import FieldEditor from './FieldEditor';
 import TagPill from './TagPill';
@@ -64,6 +64,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     hasHoverHook: false,
     allowAttachments: false,
     attachmentTypes: [],
+    fieldGroups: [],
   });
   const [customViewHtml, setCustomViewHtml] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -75,6 +76,10 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   const [tagInput, setTagInput] = useState('');
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [recentlyDeleted, setRecentlyDeleted] = useState<AttachmentMeta[]>([]);
+  const [groupCollapsed, setGroupCollapsed] = useState<Record<string, boolean>>({});
+  const [groupVisible, setGroupVisible] = useState<Record<string, boolean>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [noteErrors, setNoteErrors] = useState<string[]>([]);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const viewHtmlRef = useRef<HTMLDivElement>(null);
@@ -87,7 +92,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   const emptySchemaInfo: SchemaInfo = {
     fields: [], titleCanView: true, titleCanEdit: true, childrenSort: 'none',
     allowedParentTypes: [], allowedChildrenTypes: [], hasViewHook: false, hasHoverHook: false,
-    allowAttachments: false, attachmentTypes: [],
+    allowAttachments: false, attachmentTypes: [], fieldGroups: [],
   };
 
   useEffect(() => {
@@ -144,6 +149,10 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
       setTagInput('');
       setTagSuggestions([]);
       setIsDirty(false);
+      setGroupCollapsed({});
+      setGroupVisible({});
+      setFieldErrors({});
+      setNoteErrors([]);
     }
   }, [selectedNote?.id]);
 
@@ -300,6 +309,37 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     );
   }
 
+  const evaluateGroupVisibility = async (fields: Record<string, FieldValue>) => {
+    if (!selectedNote || !schemaInfo.fieldGroups.some(g => g.hasVisibleClosure)) return;
+    try {
+      const vis = await invoke<Record<string, boolean>>('evaluate_group_visibility', {
+        noteId: selectedNote.id,
+        fields,
+      });
+      setGroupVisible(vis);
+    } catch {
+      // ignore — groups default to visible
+    }
+  };
+
+  const handleFieldBlur = async (fieldName: string, fieldDef: FieldDefinition) => {
+    if (!selectedNote || !fieldDef.hasValidate) return;
+    try {
+      const error = await invoke<string | null>('validate_field', {
+        noteId: selectedNote.id,
+        fieldName,
+        value: editedFields[fieldName] ?? defaultValueForFieldType(fieldDef.fieldType),
+      });
+      setFieldErrors(prev => {
+        const next = { ...prev };
+        if (error) { next[fieldName] = error; } else { delete next[fieldName]; }
+        return next;
+      });
+    } catch {
+      // ignore validation errors silently
+    }
+  };
+
   const handleCancel = async () => {
     if (isDirty) {
       if (!await confirm(t('notes.discardChanges'))) {
@@ -313,18 +353,34 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     setTagInput('');
     setTagSuggestions([]);
     setIsDirty(false);
+    setFieldErrors({});
+    setNoteErrors([]);
     onEditDone();
   };
 
   const handleSave = async () => {
     if (!selectedNote) return;
+    setFieldErrors({});
+    setNoteErrors([]);
 
     try {
-      const updatedNote = await invoke<Note>('update_note', {
+      const result = await invoke<SaveResult>('save_note', {
         noteId: selectedNote.id,
         title: editedTitle,
         fields: editedFields,
       });
+
+      if ('validationErrors' in result) {
+        setFieldErrors(result.validationErrors.fieldErrors);
+        setNoteErrors(result.validationErrors.noteErrors);
+        if (result.validationErrors.previewTitle !== null) {
+          setEditedTitle(result.validationErrors.previewTitle);
+        }
+        setEditedFields(prev => ({ ...prev, ...result.validationErrors.previewFields }));
+        return;
+      }
+
+      const updatedNote = result.ok;
       await invoke('update_note_tags', { noteId: selectedNote.id, tags: editedTags });
       setEditedTitle(updatedNote.title);
       setEditedFields({ ...updatedNote.fields });
@@ -343,7 +399,11 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   };
 
   const handleFieldChange = (fieldName: string, value: FieldValue) => {
-    setEditedFields(prev => ({ ...prev, [fieldName]: value }));
+    setEditedFields(prev => {
+      const next = { ...prev, [fieldName]: value };
+      evaluateGroupVisibility(next);
+      return next;
+    });
     setIsDirty(true);
   };
 
@@ -359,7 +419,10 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     return new Date(timestamp * 1000).toLocaleString();
   };
 
-  const schemaFieldNames = new Set(schemaInfo.fields.map(f => f.name));
+  const schemaFieldNames = new Set([
+    ...schemaInfo.fields.map(f => f.name),
+    ...schemaInfo.fieldGroups.flatMap(g => g.fields.map(f => f.name)),
+  ]);
   const allFieldNames = Object.keys(selectedNote.fields);
   const legacyFieldNames = allFieldNames.filter(name => !schemaFieldNames.has(name));
 
@@ -527,10 +590,19 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
         {/* Default field rendering — shown in edit mode, or when no custom view exists */}
         {(isEditing || !customViewHtml) && <h2 className="text-xl font-semibold mb-4">{t('notes.fields')}</h2>}
 
+        {/* Note-level validation errors banner */}
+        {isEditing && noteErrors.length > 0 && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-300 rounded-md">
+            {noteErrors.map((msg, i) => (
+              <p key={i} className="text-sm text-red-600">{msg}</p>
+            ))}
+          </div>
+        )}
+
         {isEditing ? (
-          schemaInfo.fields
-            .filter(field => field.canEdit)
-            .map(field => (
+          <>
+            {/* Top-level fields */}
+            {schemaInfo.fields.filter(field => field.canEdit).map(field => (
               <FieldEditor
                 key={field.name}
                 fieldName={field.name}
@@ -542,27 +614,120 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
                 targetType={field.targetType}
                 noteId={selectedNote.id}
                 fieldDef={field}
+                error={fieldErrors[field.name]}
+                onBlur={() => handleFieldBlur(field.name, field)}
                 onChange={(value) => handleFieldChange(field.name, value)}
               />
-            ))
+            ))}
+
+            {/* Field groups */}
+            {schemaInfo.fieldGroups.map(group => {
+              const isVisible = !group.hasVisibleClosure || (groupVisible[group.name] !== false);
+              const hasData = group.fields.some(f =>
+                !isEmptyFieldValue(editedFields[f.name] ?? defaultValueForFieldType(f.fieldType))
+              );
+              if (!isVisible && !hasData) return null;
+
+              const isCollapsed = groupCollapsed[group.name] ?? group.collapsed;
+              return (
+                <div key={group.name} className={`mt-4 border border-border rounded-lg ${!isVisible ? 'opacity-50' : ''}`}>
+                  <button
+                    type="button"
+                    className="w-full px-4 py-2 text-left flex items-center gap-2 font-medium text-sm select-none"
+                    onClick={() => setGroupCollapsed(prev => ({ ...prev, [group.name]: !isCollapsed }))}
+                  >
+                    <ChevronRight size={14} className={`transition-transform ${isCollapsed ? '' : 'rotate-90'}`} />
+                    {group.name}
+                    {!isVisible && <span className="text-xs text-muted-foreground ml-2 font-normal">(hidden — data exists)</span>}
+                  </button>
+                  {!isCollapsed && (
+                    <div className="px-4 pb-2 pt-1">
+                      {group.fields.filter(f => f.canEdit).map(field => (
+                        <FieldEditor
+                          key={field.name}
+                          fieldName={field.name}
+                          fieldType={field.fieldType}
+                          value={editedFields[field.name] ?? defaultValueForFieldType(field.fieldType)}
+                          required={field.required}
+                          options={field.options}
+                          max={field.max}
+                          targetType={field.targetType}
+                          noteId={selectedNote.id}
+                          fieldDef={field}
+                          error={fieldErrors[field.name]}
+                          onBlur={() => handleFieldBlur(field.name, field)}
+                          onChange={(value) => handleFieldChange(field.name, value)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
         ) : (!customViewHtml && (() => {
-          const visibleFields = schemaInfo.fields
+          const visibleTopFields = schemaInfo.fields
             .filter(field => field.canView)
             .filter(field => !isEmptyFieldValue(selectedNote.fields[field.name] ?? defaultValueForFieldType(field.fieldType)));
-          if (visibleFields.length === 0) return null;
+
+          const visibleGroups = schemaInfo.fieldGroups.filter(group => {
+            if (group.hasVisibleClosure && groupVisible[group.name] === false) return false;
+            return group.fields.some(f =>
+              f.canView && !isEmptyFieldValue(selectedNote.fields[f.name] ?? defaultValueForFieldType(f.fieldType))
+            );
+          });
+
+          if (visibleTopFields.length === 0 && visibleGroups.length === 0) return null;
           return (
-            <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1">
-              {visibleFields.map(field => (
-                <FieldDisplay
-                  key={field.name}
-                  fieldName={field.name}
-                  fieldType={field.fieldType}
-                  value={selectedNote.fields[field.name] ?? defaultValueForFieldType(field.fieldType)}
-                  max={field.max}
-                  noteId={selectedNote.id}
-                />
-              ))}
-            </dl>
+            <>
+              {visibleTopFields.length > 0 && (
+                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1">
+                  {visibleTopFields.map(field => (
+                    <FieldDisplay
+                      key={field.name}
+                      fieldName={field.name}
+                      fieldType={field.fieldType}
+                      value={selectedNote.fields[field.name] ?? defaultValueForFieldType(field.fieldType)}
+                      max={field.max}
+                      noteId={selectedNote.id}
+                    />
+                  ))}
+                </dl>
+              )}
+              {visibleGroups.map(group => {
+                const groupVisibleFields = group.fields
+                  .filter(f => f.canView)
+                  .filter(f => !isEmptyFieldValue(selectedNote.fields[f.name] ?? defaultValueForFieldType(f.fieldType)));
+                if (groupVisibleFields.length === 0) return null;
+                const isCollapsed = groupCollapsed[group.name] ?? group.collapsed;
+                return (
+                  <div key={group.name} className="mt-4 border border-border rounded-lg">
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2 text-left flex items-center gap-2 font-medium text-sm select-none"
+                      onClick={() => setGroupCollapsed(prev => ({ ...prev, [group.name]: !isCollapsed }))}
+                    >
+                      <ChevronRight size={14} className={`transition-transform ${isCollapsed ? '' : 'rotate-90'}`} />
+                      {group.name}
+                    </button>
+                    {!isCollapsed && (
+                      <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 px-4 pb-3">
+                        {groupVisibleFields.map(field => (
+                          <FieldDisplay
+                            key={field.name}
+                            fieldName={field.name}
+                            fieldType={field.fieldType}
+                            value={selectedNote.fields[field.name] ?? defaultValueForFieldType(field.fieldType)}
+                            max={field.max}
+                            noteId={selectedNote.id}
+                          />
+                        ))}
+                      </dl>
+                    )}
+                  </div>
+                );
+              })}
+            </>
           );
         })())}
 
@@ -616,11 +781,14 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
           schemaInfo.fields.filter(f =>
             f.canView && !isEmptyFieldValue(selectedNote.fields[f.name] ?? defaultValueForFieldType(f.fieldType))
           ).length === 0 &&
+          schemaInfo.fieldGroups.every(g =>
+            g.fields.every(f => !f.canView || isEmptyFieldValue(selectedNote.fields[f.name] ?? defaultValueForFieldType(f.fieldType)))
+          ) &&
           legacyFieldNames.filter(n => !isEmptyFieldValue(selectedNote.fields[n])).length === 0 && (
             <p className="text-muted-foreground italic">{t('notes.noFields')}</p>
           )
         }
-        {isEditing && schemaInfo.fields.length === 0 && legacyFieldNames.length === 0 && (
+        {isEditing && schemaInfo.fields.length === 0 && schemaInfo.fieldGroups.length === 0 && legacyFieldNames.length === 0 && (
           <p className="text-muted-foreground italic">{t('notes.noFields')}</p>
         )}
       </div>

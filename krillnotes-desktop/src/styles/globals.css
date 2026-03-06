@@ -94,6 +94,17 @@ body {
                            letter-spacing: 0.06em; color: var(--color-muted-foreground);
                            margin-bottom: 0.5rem; }
 
+.kn-view-group           { margin-top: 1rem; border: 1px solid var(--color-border);
+                           border-radius: 0.5rem; }
+.kn-view-group-summary   { display: flex; align-items: center; gap: 0.5rem;
+                           padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
+                           cursor: pointer; user-select: none; list-style: none; }
+.kn-view-group-summary::-webkit-details-marker { display: none; }
+.kn-view-group-summary::before { content: "›"; font-size: 1rem; line-height: 1;
+                                  transition: transform 0.15s; display: inline-block; }
+.kn-view-group[open] > .kn-view-group-summary::before { transform: rotate(90deg); }
+.kn-view-group .kn-view-fields  { padding: 0.25rem 1rem 0.75rem; }
+
 .kn-view-stack           { display: flex; flex-direction: column; gap: 0.75rem; }
 .kn-view-columns         { display: grid; gap: 1rem; }
 

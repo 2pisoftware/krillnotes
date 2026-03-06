@@ -20,10 +20,12 @@ interface FieldEditorProps {
   targetType?: string;
   noteId?: string;
   fieldDef?: FieldDefinition;
+  error?: string;
+  onBlur?: () => void;
   onChange: (value: FieldValue) => void;
 }
 
-function FieldEditor({ fieldName, fieldType, value, required, options, max, targetType, noteId, fieldDef, onChange }: FieldEditorProps) {
+function FieldEditor({ fieldName, fieldType, value, required, options, max, targetType, noteId, fieldDef, error, onBlur, onChange }: FieldEditorProps) {
   const { t } = useTranslation();
   const renderEditor = () => {
     if (fieldType === 'file') {
@@ -156,12 +158,20 @@ function FieldEditor({ fieldName, fieldType, value, required, options, max, targ
   };
 
   return (
-    <div className="mb-4">
+    <div
+      className="mb-4"
+      onBlur={(e) => {
+        if (onBlur && !e.currentTarget.contains(e.relatedTarget as Node)) {
+          onBlur();
+        }
+      }}
+    >
       <label className="block text-sm font-medium mb-1">
         {humaniseKey(fieldName)}
         {required && <span className="text-red-500 ml-1">*</span>}
       </label>
       {renderEditor()}
+      {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
     </div>
   );
 }

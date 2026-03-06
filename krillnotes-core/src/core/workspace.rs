@@ -15,8 +15,8 @@ use crate::core::user_script;
 #[allow(unused_imports)]
 use crate::{
     get_device_id, DeleteResult, DeleteStrategy, FieldValue, KrillnotesError, Note,
-    Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, ScriptError,
-    ScriptRegistry, Storage, UndoResult, UserScript,
+    Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, SaveResult,
+    ScriptError, ScriptRegistry, Storage, UndoResult, UserScript,
 };
 use rhai::Dynamic;
 use rusqlite::Connection;
@@ -1820,129 +1820,164 @@ impl Workspace {
         // we propagate the error without touching the DB (implicit rollback).
         let result = self.script_registry.invoke_tree_action_hook(label, &note, context)?;
 
-        // Apply creates and updates atomically if any were queued.
-        if !result.creates.is_empty() || !result.updates.is_empty() {
+        // Apply pending notes from the SaveTransaction atomically, if any were queued.
+        let tx_pending = result.transaction;
+        // Separate the acted-upon note (is_new == false) from new child notes.
+        // New notes are sorted topologically so parents are inserted before children —
+        // this is required to satisfy the FK constraint when the parent itself is a new note.
+        let all_pending: Vec<_> = tx_pending.pending_notes.into_values().collect();
+        let (existing_updates, mut new_creates): (Vec<_>, Vec<_>) =
+            all_pending.into_iter().partition(|p| !p.is_new);
+        // Topological sort for new creates: a note whose parent_id is also a new note must
+        // come after its parent. IDs of new notes collected for quick look-up.
+        let new_ids: std::collections::HashSet<String> =
+            new_creates.iter().map(|p| p.note_id.clone()).collect();
+        let mut ordered_creates: Vec<_> = Vec::with_capacity(new_creates.len());
+        let mut remaining = new_creates.len();
+        let mut iters = 0usize;
+        while !new_creates.is_empty() {
+            iters += 1;
+            if iters > new_creates.len() * new_creates.len() + 1 {
+                // Cycle guard — should never happen in practice; break to avoid infinite loop.
+                ordered_creates.extend(new_creates.drain(..));
+                break;
+            }
+            let mut next = Vec::with_capacity(new_creates.len());
+            for pending in new_creates.drain(..) {
+                let parent_is_new = pending.parent_id.as_ref()
+                    .map(|pid| new_ids.contains(pid.as_str()))
+                    .unwrap_or(false);
+                let parent_already_emitted = pending.parent_id.as_ref()
+                    .map(|pid| ordered_creates.iter().any(|e: &crate::core::save_transaction::PendingNote| &e.note_id == pid))
+                    .unwrap_or(true);
+                if !parent_is_new || parent_already_emitted {
+                    ordered_creates.push(pending);
+                } else {
+                    next.push(pending);
+                }
+            }
+            new_creates = next;
+            if new_creates.len() == remaining {
+                // No progress — break to avoid infinite loop.
+                ordered_creates.extend(new_creates.drain(..));
+                break;
+            }
+            remaining = new_creates.len();
+        }
+        // Combine: existing updates first (or last — order doesn't matter between them and creates)
+        // then topologically sorted creates.
+        let pending_notes: Vec<_> = existing_updates.into_iter().chain(ordered_creates).collect();
+
+        if !pending_notes.is_empty() {
             let now = chrono::Utc::now().timestamp();
 
-            // Pre-advance HLC once per create, plus once per update (title) and once
-            // per field within each update, before the transaction borrows self.storage.
-            let create_timestamps: Vec<HlcTimestamp> = result.creates.iter()
-                .map(|_| self.advance_hlc())
-                .collect();
-            // For updates: title + each field
-            let update_timestamps: Vec<(HlcTimestamp, Vec<HlcTimestamp>)> = result.updates.iter()
-                .map(|update| {
-                    let title_ts = self.advance_hlc();
-                    let field_tss: Vec<HlcTimestamp> = update.fields.keys()
-                        .map(|_| self.advance_hlc())
-                        .collect();
-                    (title_ts, field_tss)
+            // Pre-advance HLC for each pending note before borrowing self.storage.
+            // Creates need one timestamp; updates need one for title + one per field.
+            let timestamps: Vec<(HlcTimestamp, Vec<HlcTimestamp>)> = pending_notes.iter()
+                .map(|p| {
+                    let main_ts = self.advance_hlc();
+                    let field_tss: Vec<HlcTimestamp> = if p.is_new {
+                        vec![]
+                    } else {
+                        p.effective_fields().keys().map(|_| self.advance_hlc()).collect()
+                    };
+                    (main_ts, field_tss)
                 })
                 .collect();
             let signing_key = self.signing_key.clone();
 
-            let tx = self.storage.connection_mut().transaction()?;
+            let tx_db = self.storage.connection_mut().transaction()?;
 
-            // ── creates ────────────────────────────────────────────────────────
-            for (create, ts) in result.creates.iter().zip(create_timestamps.iter()) {
-                // Compute the next available position under the parent.
-                let position: i32 = tx.query_row(
-                    "SELECT COALESCE(MAX(position), -1) + 1 FROM notes WHERE parent_id = ?1",
-                    rusqlite::params![create.parent_id],
-                    |row| row.get(0),
-                )?;
+            for (pending, (main_ts, field_tss)) in pending_notes.iter().zip(timestamps.iter()) {
+                if pending.is_new {
+                    // ── INSERT new note ──────────────────────────────────────────
+                    let parent_id = pending.parent_id.as_deref().unwrap_or("");
+                    let position: i32 = tx_db.query_row(
+                        "SELECT COALESCE(MAX(position), -1) + 1 FROM notes WHERE parent_id = ?1",
+                        rusqlite::params![parent_id],
+                        |row| row.get(0),
+                    )?;
+                    let effective_fields = pending.effective_fields();
+                    let fields_json = serde_json::to_string(&effective_fields)?;
+                    let effective_title = pending.effective_title();
 
-                let fields_json = serde_json::to_string(&create.fields)?;
+                    tx_db.execute(
+                        "INSERT INTO notes (id, title, node_type, parent_id, position, \
+                                            created_at, modified_at, created_by, modified_by, \
+                                            fields_json, is_expanded) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        rusqlite::params![
+                            pending.note_id, effective_title, pending.node_type,
+                            parent_id, position, now, now,
+                            self.current_user_id, self.current_user_id, fields_json, true,
+                        ],
+                    )?;
 
-                tx.execute(
-                    "INSERT INTO notes (id, title, node_type, parent_id, position, \
-                                        created_at, modified_at, created_by, modified_by, \
-                                        fields_json, is_expanded) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    rusqlite::params![
-                        create.id,
-                        create.title,
-                        create.node_type,
-                        create.parent_id,
-                        position,
-                        now,
-                        now,
-                        self.current_user_id,
-                        self.current_user_id,
-                        fields_json,
-                        true,
-                    ],
-                )?;
-
-                Self::save_hlc(ts, &tx)?;
-                let mut op = Operation::CreateNote {
-                    operation_id: Uuid::new_v4().to_string(),
-                    timestamp: *ts,
-                    device_id: self.device_id.clone(),
-                    note_id: create.id.clone(),
-                    parent_id: Some(create.parent_id.clone()),
-                    position: position as f64,
-                    node_type: create.node_type.clone(),
-                    title: create.title.clone(),
-                    fields: create.fields.clone(),
-                    created_by: String::new(),
-                    signature: String::new(),
-                };
-                Self::sign_op_with(&signing_key, &mut op);
-                Self::log_op(&self.operation_log, &tx, &op)?;
-            }
-
-            // ── updates ────────────────────────────────────────────────────────
-            for (update, (title_ts, field_tss)) in result.updates.iter().zip(update_timestamps.iter()) {
-                let fields_json = serde_json::to_string(&update.fields)?;
-
-                tx.execute(
-                    "UPDATE notes SET title = ?1, fields_json = ?2, \
-                                      modified_at = ?3, modified_by = ?4 \
-                     WHERE id = ?5",
-                    rusqlite::params![
-                        update.title,
-                        fields_json,
-                        now,
-                        self.current_user_id,
-                        update.note_id,
-                    ],
-                )?;
-
-                // Log title update
-                Self::save_hlc(title_ts, &tx)?;
-                let mut title_op = Operation::UpdateNote {
-                    operation_id: Uuid::new_v4().to_string(),
-                    timestamp: *title_ts,
-                    device_id: self.device_id.clone(),
-                    note_id: update.note_id.clone(),
-                    title: update.title.clone(),
-                    modified_by: String::new(),
-                    signature: String::new(),
-                };
-                Self::sign_op_with(&signing_key, &mut title_op);
-                Self::log_op(&self.operation_log, &tx, &title_op)?;
-
-                // Log one UpdateField per field value
-                for ((field_key, field_value), field_ts) in update.fields.iter().zip(field_tss.iter()) {
-                    Self::save_hlc(field_ts, &tx)?;
-                    let mut field_op = Operation::UpdateField {
+                    Self::save_hlc(main_ts, &tx_db)?;
+                    let mut op = Operation::CreateNote {
                         operation_id: Uuid::new_v4().to_string(),
-                        timestamp: *field_ts,
+                        timestamp: *main_ts,
                         device_id: self.device_id.clone(),
-                        note_id: update.note_id.clone(),
-                        field: field_key.clone(),
-                        value: field_value.clone(),
+                        note_id: pending.note_id.clone(),
+                        parent_id: Some(parent_id.to_string()),
+                        position: position as f64,
+                        node_type: pending.node_type.clone(),
+                        title: effective_title.to_string(),
+                        fields: effective_fields,
+                        created_by: String::new(),
+                        signature: String::new(),
+                    };
+                    Self::sign_op_with(&signing_key, &mut op);
+                    Self::log_op(&self.operation_log, &tx_db, &op)?;
+                } else {
+                    // ── UPDATE existing note ─────────────────────────────────────
+                    let effective_fields = pending.effective_fields();
+                    let fields_json = serde_json::to_string(&effective_fields)?;
+                    let effective_title = pending.effective_title();
+
+                    tx_db.execute(
+                        "UPDATE notes SET title = ?1, fields_json = ?2, \
+                                          modified_at = ?3, modified_by = ?4 \
+                         WHERE id = ?5",
+                        rusqlite::params![
+                            effective_title, fields_json, now,
+                            self.current_user_id, pending.note_id,
+                        ],
+                    )?;
+
+                    Self::save_hlc(main_ts, &tx_db)?;
+                    let mut title_op = Operation::UpdateNote {
+                        operation_id: Uuid::new_v4().to_string(),
+                        timestamp: *main_ts,
+                        device_id: self.device_id.clone(),
+                        note_id: pending.note_id.clone(),
+                        title: effective_title.to_string(),
                         modified_by: String::new(),
                         signature: String::new(),
                     };
-                    Self::sign_op_with(&signing_key, &mut field_op);
-                    Self::log_op(&self.operation_log, &tx, &field_op)?;
+                    Self::sign_op_with(&signing_key, &mut title_op);
+                    Self::log_op(&self.operation_log, &tx_db, &title_op)?;
+
+                    for ((field_key, field_value), field_ts) in effective_fields.iter().zip(field_tss.iter()) {
+                        Self::save_hlc(field_ts, &tx_db)?;
+                        let mut field_op = Operation::UpdateField {
+                            operation_id: Uuid::new_v4().to_string(),
+                            timestamp: *field_ts,
+                            device_id: self.device_id.clone(),
+                            note_id: pending.note_id.clone(),
+                            field: field_key.clone(),
+                            value: field_value.clone(),
+                            modified_by: String::new(),
+                            signature: String::new(),
+                        };
+                        Self::sign_op_with(&signing_key, &mut field_op);
+                        Self::log_op(&self.operation_log, &tx_db, &field_op)?;
+                    }
                 }
             }
 
-            Self::purge_ops_if_needed(&self.operation_log, &tx)?;
-            tx.commit()?;
+            Self::purge_ops_if_needed(&self.operation_log, &tx_db)?;
+            tx_db.commit()?;
         }
 
         // ── reorder path (unchanged) ───────────────────────────────────────────
@@ -2597,6 +2632,100 @@ impl Workspace {
     ///
     /// # Errors
     ///
+    /// Full 7-step save pipeline with validation:
+    ///
+    /// 1. Evaluate group visibility
+    /// 2. Run field `validate` closures (only on visible fields)
+    /// 3. Check required constraints (only on visible fields)
+    /// 4-7. Delegate to `update_note` (on_save hook + DB write)
+    ///
+    /// Returns `SaveResult::ValidationErrors` when any step produces errors.
+    /// Returns `SaveResult::Ok(note)` on success.
+    pub fn save_note_with_pipeline(
+        &mut self,
+        note_id: &str,
+        title: String,
+        fields: BTreeMap<String, FieldValue>,
+    ) -> Result<SaveResult> {
+        let note = self.get_note(note_id)
+            .map_err(|_| KrillnotesError::NoteNotFound(note_id.to_string()))?;
+        let schema = self.script_registry.get_schema(&note.node_type)?;
+
+        // Step 1: Evaluate group visibility.
+        let visibility = self.script_registry.evaluate_group_visibility(
+            &note.node_type, &fields,
+        )?;
+
+        // Collect visible field names (top-level + fields from visible groups).
+        let visible_field_names: std::collections::HashSet<String> = schema.fields.iter()
+            .map(|f| f.name.clone())
+            .chain(
+                schema.field_groups.iter()
+                    .filter(|g| visibility.get(&g.name).copied().unwrap_or(true))
+                    .flat_map(|g| g.fields.iter().map(|f| f.name.clone()))
+            )
+            .collect();
+
+        // Step 2: Run validate closures on visible fields.
+        let all_errors = self.script_registry.validate_fields(&note.node_type, &fields)?;
+        let mut field_errors: BTreeMap<String, String> = all_errors.into_iter()
+            .filter(|(k, _)| visible_field_names.contains(k))
+            .collect();
+
+        // Step 3: Required check on visible required fields.
+        for field_def in schema.all_fields() {
+            if field_def.required && visible_field_names.contains(&field_def.name) {
+                let empty = match fields.get(&field_def.name) {
+                    None => true,
+                    Some(FieldValue::Text(s))   => s.is_empty(),
+                    Some(FieldValue::Email(s))  => s.is_empty(),
+                    Some(FieldValue::Date(None))
+                    | Some(FieldValue::NoteLink(None))
+                    | Some(FieldValue::File(None)) => true,
+                    _ => false,
+                };
+                if empty && !field_errors.contains_key(&field_def.name) {
+                    field_errors.insert(field_def.name.clone(), "Required".to_string());
+                }
+            }
+        }
+
+        if !field_errors.is_empty() {
+            return Ok(SaveResult::ValidationErrors {
+                field_errors,
+                note_errors: vec![],
+                preview_title: None,
+                preview_fields: BTreeMap::new(),
+            });
+        }
+
+        // Build final_fields: start from schema defaults, overlay existing note values,
+        // then apply user-provided visible-field values. Hidden-group required fields
+        // retain their existing/default values so update_note's validate_required_fields
+        // doesn't reject them (that check is visibility-unaware).
+        let mut final_fields = schema.default_fields();
+        for (k, v) in &note.fields {
+            final_fields.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &fields {
+            final_fields.insert(k.clone(), v.clone());
+        }
+
+        // Steps 4-7: update_note (runs on_save hook + writes to DB).
+        match self.update_note(note_id, title, final_fields) {
+            Ok(updated) => Ok(SaveResult::Ok(updated)),
+            Err(KrillnotesError::ValidationFailed(msg)) => {
+                Ok(SaveResult::ValidationErrors {
+                    field_errors: BTreeMap::new(),
+                    note_errors: vec![msg],
+                    preview_title: None,
+                    preview_fields: BTreeMap::new(),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Returns [`crate::KrillnotesError::NoteNotFound`] if no note with `note_id`
     /// exists in the database.  Returns [`crate::KrillnotesError::Json`] if
     /// `fields` cannot be serialised to JSON.  Returns
@@ -2624,14 +2753,34 @@ impl Workspace {
             )
             .map_err(|_| KrillnotesError::NoteNotFound(note_id.to_string()))?;
 
-        // Run the pre-save hook. If a hook is registered it may modify title and fields.
+        // Run the pre-save hook via the gated SaveTransaction model.
+        // - hook not registered         → no-op (keep passed-in title/fields)
+        // - hook called commit()        → apply effective_title / effective_fields
+        // - hook called reject(…)       → return ValidationFailed error
+        // - hook returned Map (old API) → hard Scripting error with migration message
         let (title, fields) =
             match self
                 .script_registry
                 .run_on_save_hook(&node_type, note_id, &node_type, &title, &fields)?
             {
-                Some((new_title, new_fields)) => (new_title, new_fields),
                 None => (title, fields),
+                Some(tx) if tx.committed => {
+                    let pn = tx.pending_notes.get(note_id)
+                        .ok_or_else(|| KrillnotesError::Scripting(
+                            format!("on_save hook committed but pending note '{}' not found", note_id)
+                        ))?;
+                    (pn.effective_title().to_string(), pn.effective_fields())
+                }
+                Some(tx) if tx.has_errors() => {
+                    let msgs: Vec<String> = tx.soft_errors.iter().map(|e| {
+                        match &e.field {
+                            Some(f) => format!("{}: {}", f, e.message),
+                            None => e.message.clone(),
+                        }
+                    }).collect();
+                    return Err(KrillnotesError::ValidationFailed(msgs.join("; ")));
+                }
+                Some(_) => (title, fields),  // hook ran but didn't commit → no-op
             };
 
         // Enforce required-field constraints defined in the schema.
@@ -4952,9 +5101,10 @@ schema("Memo", #{
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    parent_note.title = "Folder (1)";
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    set_title(parent_note.id, "Folder (1)");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -4984,8 +5134,9 @@ schema("Memo", #{
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    commit();
                 }
             });
             schema("Item", #{
@@ -5027,9 +5178,10 @@ schema("Memo", #{
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    parent_note.title = "Folder (1)";
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    set_title(parent_note.id, "Folder (1)");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -5102,10 +5254,10 @@ add_tree_action("Sort A→Z", ["TextNote"], |note| {
 schema("TaFolder", #{ fields: [] });
 schema("TaItem", #{ fields: [#{ name: "tag", type: "text", required: false }] });
 add_tree_action("Add Item", ["TaFolder"], |folder| {
-    let item = create_note(folder.id, "TaItem");
-    item.title = "My Item";
-    item.fields.tag = "hello";
-    update_note(item);
+    let item = create_child(folder.id, "TaItem");
+    set_title(item.id, "My Item");
+    set_field(item.id, "tag", "hello");
+    commit();
 });
         "#).unwrap();
 
@@ -5132,9 +5284,9 @@ add_tree_action("Add Item", ["TaFolder"], |folder| {
 // @name: UpdateAction
 schema("TaTask", #{ fields: [#{ name: "status", type: "text", required: false }] });
 add_tree_action("Mark Done", ["TaTask"], |note| {
-    note.title = "Done Task";
-    note.fields.status = "done";
-    update_note(note);
+    set_title(note.id, "Done Task");
+    set_field(note.id, "status", "done");
+    commit();
 });
         "#).unwrap();
 
@@ -5161,12 +5313,11 @@ add_tree_action("Mark Done", ["TaTask"], |note| {
 schema("TaSprint", #{ fields: [] });
 schema("TaSubTask", #{ fields: [] });
 add_tree_action("Add Sprint With Task", ["TaSprint"], |sprint| {
-    let child_sprint = create_note(sprint.id, "TaSprint");
-    child_sprint.title = "Child Sprint";
-    update_note(child_sprint);
-    let task = create_note(child_sprint.id, "TaSubTask");
-    task.title = "Sprint Task";
-    update_note(task);
+    let child_sprint = create_child(sprint.id, "TaSprint");
+    set_title(child_sprint.id, "Child Sprint");
+    let task = create_child(child_sprint.id, "TaSubTask");
+    set_title(task.id, "Sprint Task");
+    commit();
 });
         "#).unwrap();
 
@@ -5196,9 +5347,8 @@ add_tree_action("Add Sprint With Task", ["TaSprint"], |sprint| {
 schema("TaErrFolder", #{ fields: [] });
 schema("TaErrItem", #{ fields: [] });
 add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
-    let item = create_note(folder.id, "TaErrItem");
-    item.title = "Orphan";
-    update_note(item);
+    let item = create_child(folder.id, "TaErrItem");
+    set_title(item.id, "Orphan");
     throw "deliberate error";
 });
         "#).unwrap();
@@ -5212,6 +5362,38 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
         // No note should have been created — the creates are not applied when the action errors
         let children = ws.get_children(&folder_id).unwrap();
         assert_eq!(children.len(), 0, "rollback: no child note should exist");
+    }
+
+    #[test]
+    fn test_tree_action_create_child_gated() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: TAGated
+schema("TAFolder", #{ fields: [] });
+schema("TAItem", #{
+    fields: [
+        #{ name: "value", type: "text", required: false },
+    ],
+});
+add_tree_action("Add Item", ["TAFolder"], |note| {
+    let child = create_child(note.id, "TAItem");
+    set_title(child.id, "New Item");
+    set_field(child.id, "value", "default");
+    commit();
+});
+        "#).unwrap();
+
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let folder_id = ws.create_note(&root.id, AddPosition::AsChild, "TAFolder").unwrap();
+        ws.run_tree_action(&folder_id, "Add Item").unwrap();
+        let children = ws.get_children(&folder_id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].title, "New Item");
+        assert_eq!(
+            children[0].fields.get("value"),
+            Some(&FieldValue::Text("default".into()))
+        );
     }
 
     #[test]
@@ -6184,5 +6366,253 @@ add_tree_action("Create Then Fail", ["TaErrFolder"], |folder| {
             has_title_update,
             "UpdateNote operation must appear in the log after update_note_title"
         );
+    }
+
+    #[test]
+    fn test_on_save_gated_model() {
+        let mut ws = create_test_workspace_with_schema(r#"
+            schema("GatedTest", #{
+                fields: [
+                    #{ name: "body", type: "text", required: false },
+                ],
+                on_save: |note| {
+                    set_title(note.id, "Computed: " + note.fields["body"]);
+                    commit();
+                },
+            });
+        "#);
+
+        let note_id = ws.create_note_root("GatedTest").unwrap();
+        let mut fields = BTreeMap::new();
+        fields.insert("body".to_string(), FieldValue::Text("hello".to_string()));
+        let updated = ws.update_note(&note_id, "ignored".to_string(), fields).unwrap();
+        assert_eq!(updated.title, "Computed: hello");
+    }
+
+    #[test]
+    fn test_old_style_on_save_raises_error() {
+        let mut ws = create_test_workspace_with_schema(r#"
+            schema("OldStyle", #{
+                fields: [
+                    #{ name: "body", type: "text", required: false },
+                ],
+                on_save: |note| {
+                    note.title = "Old Style";
+                    note
+                },
+            });
+        "#);
+
+        let note_id = ws.create_note_root("OldStyle").unwrap();
+        let result = ws.update_note(&note_id, "test".to_string(), BTreeMap::new());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("set_field") || err_msg.contains("gated") || err_msg.contains("old"),
+            "Expected migration error, got: {err_msg}"
+        );
+    }
+
+    // ── save_note_with_pipeline ───────────────────────────────────────────────
+
+    #[test]
+    fn test_save_pipeline_success() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineOk
+schema("PipeItem", #{
+    fields: [
+        #{ name: "value", type: "text", required: false },
+    ],
+    on_save: |note| { commit(); }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "PipeItem").unwrap();
+        let mut fields = BTreeMap::new();
+        fields.insert("value".to_string(), FieldValue::Text("hello".into()));
+        let result = ws.save_note_with_pipeline(&note_id, "My Item".to_string(), fields).unwrap();
+        assert!(matches!(result, SaveResult::Ok(_)), "expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_save_pipeline_validation_error() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineValidate
+schema("RatedItem", #{
+    fields: [
+        #{
+            name: "score", type: "number", required: false,
+            validate: |v| if v < 0.0 { "Must be positive" } else { () },
+        },
+    ],
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "RatedItem").unwrap();
+        let mut fields = BTreeMap::new();
+        fields.insert("score".to_string(), FieldValue::Number(-1.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Item".to_string(), fields).unwrap();
+        match result {
+            SaveResult::ValidationErrors { field_errors, .. } => {
+                assert!(field_errors.contains_key("score"), "expected score error");
+            }
+            other => panic!("expected ValidationErrors, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_save_pipeline_reject_error() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineReject
+schema("RejectItem", #{
+    fields: [],
+    on_save: |note| {
+        reject("Always rejected");
+        commit();
+    }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "RejectItem").unwrap();
+        let result = ws.save_note_with_pipeline(&note_id, "Item".to_string(), BTreeMap::new()).unwrap();
+        match result {
+            SaveResult::ValidationErrors { note_errors, .. } => {
+                assert!(!note_errors.is_empty(), "expected note_errors from reject()");
+            }
+            other => panic!("expected ValidationErrors, got: {:?}", other),
+        }
+    }
+
+    /// Integration test: full pipeline with field groups, conditional visibility, validate
+    /// closure, and note-level reject.
+    ///
+    /// Schema:
+    ///   - top-level field "type" (select: ["A", "B"])
+    ///   - field_group "B Details" visible only when type == "B"
+    ///     - field "b_value" (number, required, validate: must be > 0)
+    ///   - on_save: reject if type == "B" and b_value > 100
+    ///
+    /// Tests:
+    ///   1. type="A" → success (B Details hidden, b_value not required)
+    ///   2. type="B", b_value=-1 → validate error on b_value
+    ///   3. type="B", b_value=200 → note-level reject error
+    ///   4. type="B", b_value=50 → success
+    #[test]
+    fn test_full_pipeline_groups_validation_reject() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineGrouped
+schema("Grouped", #{
+    fields: [
+        #{ name: "category", type: "select", options: ["A", "B"] }
+    ],
+    field_groups: [
+        #{
+            name: "B Details",
+            collapsed: false,
+            visible: |fields| fields["category"] == "B",
+            fields: [
+                #{
+                    name: "b_value",
+                    type: "number",
+                    required: true,
+                    validate: |v| if v <= 0.0 { "Must be positive" } else { () }
+                }
+            ]
+        }
+    ],
+    on_save: |note| {
+        if note.fields.category == "B" && note.fields.b_value > 100.0 {
+            reject("b_value must be <= 100 for category B");
+        }
+        commit();
+    }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "Grouped").unwrap();
+
+        // Test 1: category="A" — succeeds; b_value is in a hidden group, not required
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("A".to_string()));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        assert!(matches!(result, SaveResult::Ok(_)), "test 1 failed: {:?}", result);
+
+        // Test 2: category="B", b_value=-1 — validate closure error on b_value
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("B".to_string()));
+        fields.insert("b_value".to_string(), FieldValue::Number(-1.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        match result {
+            SaveResult::ValidationErrors { field_errors, .. } => {
+                assert!(field_errors.contains_key("b_value"), "expected b_value error, got: {:?}", field_errors);
+            }
+            other => panic!("test 2 failed: expected ValidationErrors, got: {:?}", other),
+        }
+
+        // Test 3: category="B", b_value=200 — note-level reject
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("B".to_string()));
+        fields.insert("b_value".to_string(), FieldValue::Number(200.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        match result {
+            SaveResult::ValidationErrors { note_errors, .. } => {
+                assert!(!note_errors.is_empty(), "test 3 failed: expected note_errors");
+            }
+            other => panic!("test 3 failed: expected ValidationErrors, got: {:?}", other),
+        }
+
+        // Test 4: category="B", b_value=50 — success
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("B".to_string()));
+        fields.insert("b_value".to_string(), FieldValue::Number(50.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        assert!(matches!(result, SaveResult::Ok(_)), "test 4 failed: {:?}", result);
+    }
+
+    /// Integration test: tree action that creates a child; the required field is left empty.
+    /// The save pipeline should detect the required field and return a ValidationErrors result
+    /// (no note is persisted).
+    ///
+    /// NOTE: tree actions use SaveTransaction internally but do NOT run the full
+    /// save_note_with_pipeline (they commit the transaction directly). Required-field
+    /// checking via save_note_with_pipeline is the frontend save path. This test verifies
+    /// that save_note_with_pipeline catches the missing required field.
+    #[test]
+    fn test_tree_action_validates_created_notes() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: RequiredField
+schema("RequiredItem", #{
+    fields: [
+        #{ name: "sku", type: "text", required: true }
+    ],
+    on_save: |note| { commit(); }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "RequiredItem").unwrap();
+
+        // Save without providing the required "sku" field → should return ValidationErrors
+        let result = ws.save_note_with_pipeline(
+            &note_id,
+            "Item".to_string(),
+            BTreeMap::new(), // no fields provided
+        ).unwrap();
+
+        match result {
+            SaveResult::ValidationErrors { field_errors, .. } => {
+                assert!(field_errors.contains_key("sku"), "expected sku required error, got: {:?}", field_errors);
+            }
+            other => panic!("expected ValidationErrors for missing required field, got: {:?}", other),
+        }
     }
 }

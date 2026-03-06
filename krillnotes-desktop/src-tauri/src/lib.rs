@@ -677,12 +677,58 @@ struct ScriptMutationResult<T: serde::Serialize> {
     load_errors: Vec<ScriptError>,
 }
 
+/// Serializable field definition with an extra `has_validate` flag for the frontend.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldDefInfo {
+    name: String,
+    field_type: String,
+    required: bool,
+    can_view: bool,
+    can_edit: bool,
+    options: Vec<String>,
+    max: i64,
+    target_type: Option<String>,
+    show_on_hover: bool,
+    allowed_types: Vec<String>,
+    /// `true` if a `validate` closure is registered for this field.
+    has_validate: bool,
+}
+
+impl From<&FieldDefinition> for FieldDefInfo {
+    fn from(f: &FieldDefinition) -> Self {
+        Self {
+            name: f.name.clone(),
+            field_type: f.field_type.clone(),
+            required: f.required,
+            can_view: f.can_view,
+            can_edit: f.can_edit,
+            options: f.options.clone(),
+            max: f.max,
+            target_type: f.target_type.clone(),
+            show_on_hover: f.show_on_hover,
+            allowed_types: f.allowed_types.clone(),
+            has_validate: f.validate.is_some(),
+        }
+    }
+}
+
+/// Serializable field group for the SchemaInfo Tauri response.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldGroupInfo {
+    name: String,
+    fields: Vec<FieldDefInfo>,
+    collapsed: bool,
+    has_visible_closure: bool,
+}
+
 /// Response type for the `get_schema_fields` Tauri command, bundling field
 /// definitions with schema-level title visibility flags.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SchemaInfo {
-    fields: Vec<FieldDefinition>,
+    fields: Vec<FieldDefInfo>,
     title_can_view: bool,
     title_can_edit: bool,
     children_sort: String,
@@ -692,6 +738,28 @@ struct SchemaInfo {
     attachment_types: Vec<String>,
     has_view_hook: bool,
     has_hover_hook: bool,
+    field_groups: Vec<FieldGroupInfo>,
+}
+
+fn schema_to_info(schema: &Schema, has_view_hook: bool, has_hover_hook: bool) -> SchemaInfo {
+    SchemaInfo {
+        has_view_hook,
+        has_hover_hook,
+        fields: schema.fields.iter().map(FieldDefInfo::from).collect(),
+        title_can_view: schema.title_can_view,
+        title_can_edit: schema.title_can_edit,
+        children_sort: schema.children_sort.clone(),
+        allowed_parent_types: schema.allowed_parent_types.clone(),
+        allowed_children_types: schema.allowed_children_types.clone(),
+        allow_attachments: schema.allow_attachments,
+        attachment_types: schema.attachment_types.clone(),
+        field_groups: schema.field_groups.iter().map(|g| FieldGroupInfo {
+            name: g.name.clone(),
+            fields: g.fields.iter().map(FieldDefInfo::from).collect(),
+            collapsed: g.collapsed,
+            has_visible_closure: g.visible.is_some(),
+        }).collect(),
+    }
 }
 
 /// Returns the field definitions for the schema identified by `node_type`.
@@ -717,18 +785,11 @@ fn get_schema_fields(
     let schema = workspace.script_registry().get_schema(&node_type)
         .map_err(|e: KrillnotesError| e.to_string())?;
 
-    Ok(SchemaInfo {
-        has_view_hook: workspace.script_registry().has_view_hook(&node_type),
-        has_hover_hook: workspace.script_registry().has_hover_hook(&node_type),
-        fields: schema.fields,
-        title_can_view: schema.title_can_view,
-        title_can_edit: schema.title_can_edit,
-        children_sort: schema.children_sort,
-        allowed_parent_types: schema.allowed_parent_types,
-        allowed_children_types: schema.allowed_children_types,
-        allow_attachments: schema.allow_attachments,
-        attachment_types: schema.attachment_types,
-    })
+    Ok(schema_to_info(
+        &schema,
+        workspace.script_registry().has_view_hook(&node_type),
+        workspace.script_registry().has_hover_hook(&node_type),
+    ))
 }
 
 /// Returns all schema infos keyed by node type name.
@@ -746,18 +807,7 @@ fn get_all_schemas(
     for (name, schema) in schemas {
         let has_view_hook = workspace.script_registry().has_view_hook(&name);
         let has_hover_hook = workspace.script_registry().has_hover_hook(&name);
-        result.insert(name, SchemaInfo {
-            has_view_hook,
-            has_hover_hook,
-            fields: schema.fields,
-            title_can_view: schema.title_can_view,
-            title_can_edit: schema.title_can_edit,
-            children_sort: schema.children_sort,
-            allowed_parent_types: schema.allowed_parent_types,
-            allowed_children_types: schema.allowed_children_types,
-            allow_attachments: schema.allow_attachments,
-            attachment_types: schema.attachment_types,
-        });
+        result.insert(name, schema_to_info(&schema, has_view_hook, has_hover_hook));
     }
     Ok(result)
 }
@@ -850,6 +900,95 @@ fn update_note(
         .ok_or("No workspace open")?;
 
     workspace.update_note(&note_id, title, fields)
+        .map_err(|e| e.to_string())
+}
+
+/// Full save pipeline: runs group visibility, field validation, required checks,
+/// on_save hook, and then writes to the database.
+///
+/// Returns `SaveResult::Ok(note)` on success or `SaveResult::ValidationErrors`
+/// when any validation step fails.
+#[tauri::command]
+fn save_note(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    note_id: String,
+    title: String,
+    fields: BTreeMap<String, FieldValue>,
+) -> std::result::Result<SaveResult, String> {
+    let label = window.label();
+    let mut workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get_mut(label)
+        .ok_or("No workspace open")?;
+
+    workspace.save_note_with_pipeline(&note_id, title, fields)
+        .map_err(|e| e.to_string())
+}
+
+/// Runs the `validate` closure for a single field.
+///
+/// Returns `None` when the field is valid or has no validate closure.
+/// Returns `Some(error_message)` when the closure returns an error.
+#[tauri::command]
+fn validate_field(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    schema_name: String,
+    field_name: String,
+    value: serde_json::Value,
+) -> std::result::Result<Option<String>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get(label)
+        .ok_or("No workspace open")?;
+
+    let fv: FieldValue = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    workspace.script_registry()
+        .validate_field(&schema_name, &field_name, &fv)
+        .map_err(|e| e.to_string())
+}
+
+/// Runs `validate` closures for all fields that have them.
+///
+/// Returns a map of `field_name → error_message` for each invalid field.
+#[tauri::command]
+fn validate_fields(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    schema_name: String,
+    fields: BTreeMap<String, FieldValue>,
+) -> std::result::Result<BTreeMap<String, String>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get(label)
+        .ok_or("No workspace open")?;
+
+    workspace.script_registry()
+        .validate_fields(&schema_name, &fields)
+        .map_err(|e| e.to_string())
+}
+
+/// Evaluates `visible` closures for each `FieldGroup`.
+///
+/// Returns a map of `group_name → bool`.
+#[tauri::command]
+fn evaluate_group_visibility(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    schema_name: String,
+    fields: BTreeMap<String, FieldValue>,
+) -> std::result::Result<BTreeMap<String, bool>, String> {
+    let label = window.label();
+    let workspaces = state.workspaces.lock()
+        .expect("Mutex poisoned");
+    let workspace = workspaces.get(label)
+        .ok_or("No workspace open")?;
+
+    workspace.script_registry()
+        .evaluate_group_visibility(&schema_name, &fields)
         .map_err(|e| e.to_string())
 }
 
@@ -2593,6 +2732,10 @@ pub fn run() {
             get_note_view,
             get_note_hover,
             update_note,
+            save_note,
+            validate_field,
+            validate_fields,
+            evaluate_group_visibility,
             update_note_tags,
             get_all_tags,
             get_notes_for_tag,

@@ -16,17 +16,73 @@ mod schema;
 // Re-exported for API stability; currently a placeholder for future global/lifecycle hooks.
 pub use hooks::HookRegistry;
 pub(crate) use schema::field_value_to_dynamic;
-pub use schema::{AddChildResult, FieldDefinition, Schema};
+pub use schema::{AddChildResult, FieldDefinition, FieldGroup, Schema};
 // StarterScript is defined in this file and re-exported via lib.rs.
 
 use crate::{FieldValue, KrillnotesError, Note, Result};
 use crate::core::attachment::AttachmentMeta;
+use crate::core::save_transaction::SaveTransaction;
 use schema::HookEntry;
 use chrono::Local;
 use include_dir::{include_dir, Dir};
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map, AST};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+
+// ── Thread-local SaveTransaction for Rhai write-path hooks ────────────────────
+
+thread_local! {
+    static SAVE_TX: RefCell<Option<SaveTransaction>> = RefCell::new(None);
+}
+
+/// Sets the active [`SaveTransaction`] for the current thread.
+///
+/// Called by hook runners before invoking any Rhai write-path closure.
+pub(crate) fn set_save_tx(tx: SaveTransaction) {
+    SAVE_TX.with(|cell| *cell.borrow_mut() = Some(tx));
+}
+
+/// Takes the active [`SaveTransaction`] from the current thread.
+///
+/// Called by hook runners after the Rhai closure returns, to retrieve results.
+pub(crate) fn take_save_tx() -> Option<SaveTransaction> {
+    SAVE_TX.with(|cell| cell.borrow_mut().take())
+}
+
+/// Converts a [`PendingNote`](crate::core::save_transaction::PendingNote) to a Rhai map
+/// with the same shape as the note maps passed to hook callbacks.
+///
+/// Used by `get_children` and `get_note` to expose in-flight new notes to scripts.
+fn pending_note_to_dynamic(pending: &crate::core::save_transaction::PendingNote) -> Dynamic {
+    let mut fields_map = rhai::Map::new();
+    for (k, v) in pending.effective_fields() {
+        fields_map.insert(k.as_str().into(), schema::field_value_to_dynamic(&v));
+    }
+    let mut note_map = rhai::Map::new();
+    note_map.insert("id".into(),        Dynamic::from(pending.note_id.clone()));
+    note_map.insert("node_type".into(), Dynamic::from(pending.node_type.clone()));
+    note_map.insert("title".into(),     Dynamic::from(pending.effective_title().to_string()));
+    note_map.insert("fields".into(),    Dynamic::from(fields_map));
+    note_map.insert("tags".into(),      Dynamic::from(rhai::Array::new()));
+    Dynamic::from_map(note_map)
+}
+
+/// Accesses the active [`SaveTransaction`] for the current thread.
+///
+/// Used internally by the registered Rhai native functions (`set_field`, etc.).
+fn with_save_tx<F, R>(f: F) -> std::result::Result<R, Box<EvalAltResult>>
+where
+    F: FnOnce(&mut SaveTransaction) -> std::result::Result<R, String>,
+{
+    SAVE_TX.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let tx = borrow.as_mut().ok_or_else(|| -> Box<EvalAltResult> {
+            "set_field/set_title/reject/commit called outside a write context".to_string().into()
+        })?;
+        f(tx).map_err(|e| -> Box<EvalAltResult> { e.into() })
+    })
+}
 
 /// Per-run context injected before executing a Rhai script so that
 /// context-aware Rhai helpers (markdown, display_image, etc.) can resolve
@@ -89,8 +145,6 @@ pub struct ScriptRegistry {
     schema_registry: schema::SchemaRegistry,
     hook_registry: hooks::HookRegistry,
     query_context: Arc<Mutex<Option<QueryContext>>>,
-    /// Active transaction context for a running tree action; `None` outside a hook call.
-    action_ctx: Arc<Mutex<Option<hooks::ActionTxContext>>>,
     /// Per-run note + attachment context set before a hook call and cleared after.
     pub run_context: Arc<Mutex<Option<NoteRunContext>>>,
 }
@@ -170,8 +224,10 @@ impl ScriptRegistry {
             }
             schema_owners_arc.lock().unwrap().insert(name.clone(), script_name.clone());
 
-            let s = Schema::parse_from_rhai(&name, &def)
+            let mut s = Schema::parse_from_rhai(&name, &def)
                 .map_err(|e| -> Box<EvalAltResult> { e.to_string().into() })?;
+            // Store the script AST so validate/visible closures can be called later.
+            s.ast = schema_ast_arc.lock().unwrap().clone();
             schemas_arc.lock().unwrap().insert(name.clone(), s);
 
             // Extract optional on_save closure.
@@ -246,15 +302,11 @@ impl ScriptRegistry {
         // ── Query context for on_view hooks ──────────────────────────────────
         let query_context: Arc<Mutex<Option<QueryContext>>> = Arc::new(Mutex::new(None));
 
-        // ── Action transaction context for tree action hooks ─────────────────
-        let action_ctx: Arc<Mutex<Option<hooks::ActionTxContext>>> = Arc::new(Mutex::new(None));
-
         // ── Per-run note + attachment context ─────────────────────────────────
         let run_context: Arc<Mutex<Option<NoteRunContext>>> = Arc::new(Mutex::new(None));
 
         // Register get_children() — returns direct children of a note by ID.
-        let qc1           = Arc::clone(&query_context);
-        let action_ctx_gc = Arc::clone(&action_ctx);
+        let qc1 = Arc::clone(&query_context);
         engine.register_fn("get_children", move |id: String| -> rhai::Array {
             // Collect pre-existing children from the snapshot.
             let mut result: rhai::Array = {
@@ -264,29 +316,31 @@ impl ScriptRegistry {
                     .unwrap_or_default()
             };
 
-            // Also include any in-flight creates with matching parent_id.
-            if let Some(ctx) = action_ctx_gc.lock().unwrap().as_ref() {
-                for create in &ctx.creates {
-                    if create.parent_id == id {
-                        if let Some(dyn_note) = ctx.note_cache.get(&create.id) {
-                            result.push(dyn_note.clone());
+            // Also include any in-flight new pending notes from the thread-local SAVE_TX.
+            SAVE_TX.with(|cell| {
+                if let Some(tx) = cell.borrow().as_ref() {
+                    for pending in tx.pending_notes.values() {
+                        if pending.is_new && pending.parent_id.as_deref() == Some(&id) {
+                            result.push(pending_note_to_dynamic(pending));
                         }
                     }
                 }
-            }
+            });
 
             result
         });
 
         // Register get_note() — returns any note by ID.
-        let qc2           = Arc::clone(&query_context);
-        let action_ctx_gn = Arc::clone(&action_ctx);
+        let qc2 = Arc::clone(&query_context);
         engine.register_fn("get_note", move |id: String| -> Dynamic {
-            // Check action cache first (in-flight notes).
-            if let Some(ctx) = action_ctx_gn.lock().unwrap().as_ref() {
-                if let Some(dyn_note) = ctx.note_cache.get(&id) {
-                    return dyn_note.clone();
-                }
+            // Check thread-local SAVE_TX first (in-flight pending notes).
+            let found = SAVE_TX.with(|cell| {
+                cell.borrow().as_ref().and_then(|tx| {
+                    tx.pending_notes.get(&id).filter(|p| p.is_new).map(pending_note_to_dynamic)
+                })
+            });
+            if let Some(dyn_note) = found {
+                return dyn_note;
             }
             // Fall back to snapshot.
             let guard = qc2.lock().unwrap();
@@ -359,147 +413,48 @@ impl ScriptRegistry {
                 .collect()
         });
 
-        // create_note(parent_id, node_type) — available inside add_tree_action closures only.
-        let action_ctx_create = Arc::clone(&action_ctx);
-        let schema_reg_create = schema_registry.clone();
-        engine.register_fn(
-            "create_note",
+        // create_child(parent_id, node_type) — available inside add_tree_action closures.
+        // Queues a new pending note into the thread-local SaveTransaction and returns a note map.
+        let create_child_schemas = schema_registry.clone();
+        engine.register_fn("create_child",
             move |parent_id: String, node_type: String|
-                -> std::result::Result<rhai::Dynamic, Box<rhai::EvalAltResult>>
+            -> std::result::Result<Dynamic, Box<EvalAltResult>>
             {
-                let mut ctx_guard = action_ctx_create.lock().unwrap();
-                let ctx = ctx_guard.as_mut().ok_or_else(|| {
-                    Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        "create_note() called outside a tree action".into(),
-                        rhai::Position::NONE,
-                    ))
-                })?;
+                let default_fields = {
+                    let schemas_arc = create_child_schemas.schemas_arc();
+                    let registry = schemas_arc.lock().unwrap();
+                    let schema = registry.get(&node_type).ok_or_else(|| -> Box<EvalAltResult> {
+                        format!("create_child: unknown schema {:?}", node_type).into()
+                    })?;
+                    schema.default_fields()
+                };
+                let note_id = uuid::Uuid::new_v4().to_string();
 
-                let schema = schema_reg_create
-                    .get(&node_type)
-                    .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        format!("create_note: unknown schema {:?}: {e}", node_type).into(),
-                        rhai::Position::NONE,
-                    )))?;
-
-                let id = uuid::Uuid::new_v4().to_string();
-
-                let fields = schema.default_fields();
-                let mut fields_map = rhai::Map::new();
-                for (k, v) in &fields {
-                    fields_map.insert(
-                        k.as_str().into(),
-                        schema::field_value_to_dynamic(v),
+                with_save_tx(|tx| {
+                    tx.add_new_note(
+                        note_id.clone(),
+                        parent_id.clone(),
+                        node_type.clone(),
+                        String::new(),
+                        default_fields.clone(),
                     );
-                }
-                let mut note_map = rhai::Map::new();
-                note_map.insert("id".into(),        rhai::Dynamic::from(id.clone()));
-                note_map.insert("node_type".into(), rhai::Dynamic::from(node_type.clone()));
-                note_map.insert("title".into(),     rhai::Dynamic::from(String::new()));
-                note_map.insert("fields".into(),    rhai::Dynamic::from(fields_map));
-                let dyn_note = rhai::Dynamic::from_map(note_map);
-
-                ctx.note_cache.insert(id.clone(), dyn_note.clone());
-                ctx.creates.push(hooks::ActionCreate {
-                    id,
-                    parent_id,
-                    node_type,
-                    title: String::new(),
-                    fields,
-                });
-
-                Ok(dyn_note)
-            },
-        );
-
-        // update_note(note) — persists title/field changes; only in tree action closures.
-        let action_ctx_update = Arc::clone(&action_ctx);
-        let schema_reg_update = schema_registry.clone();
-        engine.register_fn(
-            "update_note",
-            move |note_map: rhai::Dynamic|
-                -> std::result::Result<(), Box<rhai::EvalAltResult>>
-            {
-                let map = note_map.clone().try_cast::<rhai::Map>().ok_or_else(|| {
-                    Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        "update_note: argument must be a note map".into(),
-                        rhai::Position::NONE,
-                    ))
+                    Ok(())
                 })?;
 
-                let note_id = map.get("id")
-                    .and_then(|v| v.clone().try_cast::<String>())
-                    .ok_or_else(|| Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        "update_note: note map must have an `id` field".into(),
-                        rhai::Position::NONE,
-                    )))?;
-
-                // Guard: must be called inside a tree action closure.
-                let mut ctx_guard = action_ctx_update.lock().unwrap();
-                let ctx = ctx_guard.as_mut().ok_or_else(|| {
-                    Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        "update_note() called outside a tree action".into(),
-                        rhai::Position::NONE,
-                    ))
-                })?;
-
-                let node_type = map.get("node_type")
-                    .and_then(|v| v.clone().try_cast::<String>())
-                    .ok_or_else(|| Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        "update_note: note map must have a `node_type` field".into(),
-                        rhai::Position::NONE,
-                    )))?;
-                let title = map.get("title")
-                    .and_then(|v| v.clone().try_cast::<String>())
-                    .unwrap_or_default();
-                let fields_dyn = map.get("fields")
-                    .and_then(|v| v.clone().try_cast::<rhai::Map>())
-                    .unwrap_or_default();
-
-                // Convert Dynamic fields → FieldValue using schema.
-                let schema = schema_reg_update.get(&node_type).map_err(|e| {
-                    Box::new(rhai::EvalAltResult::ErrorRuntime(
-                        format!("update_note: unknown schema {:?}: {e}", node_type).into(),
-                        rhai::Position::NONE,
-                    ))
-                })?;
-                let mut fields = BTreeMap::new();
-                for field_def in &schema.fields {
-                    let dyn_val = fields_dyn
-                        .get(field_def.name.as_str())
-                        .cloned()
-                        .unwrap_or(rhai::Dynamic::UNIT);
-                    let fv = schema::dynamic_to_field_value(dyn_val, &field_def.field_type)
-                        .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
-                            format!("update_note field {:?}: {e}", field_def.name).into(),
-                            rhai::Position::NONE,
-                        )))?;
-                    fields.insert(field_def.name.clone(), fv);
+                // Return a note map to the Rhai script.
+                let mut fields_map = rhai::Map::new();
+                for (k, v) in &default_fields {
+                    fields_map.insert(k.as_str().into(), schema::field_value_to_dynamic(v));
                 }
-
-                // Update the note_cache so get_children/get_note sees the new values.
-                // `note_map` is still intact here — the `.clone()` calls above operated on
-                // copies of individual values, not on `note_map` itself.
-                ctx.note_cache.insert(note_id.clone(), note_map);
-
-                // If the note is an in-flight create, update the create spec directly.
-                if let Some(create) = ctx.creates.iter_mut().find(|c| c.id == note_id) {
-                    create.title  = title;
-                    create.fields = fields;
-                    return Ok(());
-                }
-
-                // Otherwise queue an update for a pre-existing DB note.
-                // Replace any prior update for the same note (idempotent per note).
-                if let Some(existing) = ctx.updates.iter_mut().find(|u| u.note_id == note_id) {
-                    existing.title  = title;
-                    existing.fields = fields;
-                } else {
-                    ctx.updates.push(hooks::ActionUpdate { note_id, title, fields });
-                }
-
-                Ok(())
-            },
+                let mut map = rhai::Map::new();
+                map.insert("id".into(),        Dynamic::from(note_id));
+                map.insert("parent_id".into(), Dynamic::from(parent_id));
+                map.insert("node_type".into(), Dynamic::from(node_type));
+                map.insert("title".into(),     Dynamic::from(String::new()));
+                map.insert("fields".into(),    Dynamic::from(fields_map));
+                map.insert("tags".into(),      Dynamic::from(rhai::Array::new()));
+                Ok(Dynamic::from_map(map))
+            }
         );
 
         // ── Display helpers for on_view hooks ─────────────────────────────────
@@ -553,6 +508,136 @@ impl ScriptRegistry {
         // ── Date helpers ──────────────────────────────────────────────────────
         engine.register_fn("today", || Local::now().format("%Y-%m-%d").to_string());
 
+        // ── Gated operations API (set_field / set_title / reject / commit) ────
+        // These functions write into the thread-local SaveTransaction set by the
+        // hook runner before calling the Rhai closure.
+        //
+        // set_field is registered via register_raw_fn so that it receives a
+        // NativeCallContext, which allows calling validate FnPtrs without
+        // needing a separate reference to the Engine.
+        let set_field_schemas = schema_registry.schemas_arc();
+        use rhai::NativeCallContext;
+        // register_raw_fn is used so the closure receives a NativeCallContext,
+        // which allows calling validate FnPtrs (closures) without needing a
+        // separate engine reference. TypeId::of::<Dynamic>() for the third
+        // argument means Rhai will dispatch any value type to this function.
+        engine.register_raw_fn(
+            "set_field",
+            &[
+                std::any::TypeId::of::<rhai::ImmutableString>(),
+                std::any::TypeId::of::<rhai::ImmutableString>(),
+                std::any::TypeId::of::<Dynamic>(),
+            ],
+            move |ctx: NativeCallContext, args: &mut [&mut Dynamic]| -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+                let note_id    = args[0].clone().cast::<rhai::ImmutableString>().to_string();
+                let field_name = args[1].clone().cast::<rhai::ImmutableString>().to_string();
+                let value      = args[2].clone();
+
+                // Infer FieldValue from the Dynamic type.
+                let fv = if value.is::<f64>() {
+                    FieldValue::Number(value.cast::<f64>())
+                } else if value.is::<bool>() {
+                    FieldValue::Boolean(value.cast::<bool>())
+                } else if value.is_unit() {
+                    // Use Text empty as a sensible default for unit/nil.
+                    FieldValue::Text(String::new())
+                } else {
+                    let s = value.into_string().map_err(|e| -> Box<EvalAltResult> {
+                        format!("set_field: cannot convert value to string: {e}").into()
+                    })?;
+                    FieldValue::Text(s)
+                };
+
+                // Run the field's validate closure (if any) as a hard error.
+                // Look up the note's schema type from the in-flight SAVE_TX.
+                let node_type_opt: Option<String> = SAVE_TX.with(|cell| {
+                    cell.borrow()
+                        .as_ref()
+                        .and_then(|tx| tx.pending_notes.get(&note_id).map(|p| p.node_type.clone()))
+                });
+                if let Some(node_type) = node_type_opt {
+                    // Clone the data we need before releasing the lock.
+                    let (validate_fn_opt, ast_opt) = {
+                        let schemas = set_field_schemas.lock().unwrap();
+                        if let Some(schema) = schemas.get(&node_type) {
+                            let field_def = schema.all_fields()
+                                .into_iter()
+                                .find(|fd| fd.name == field_name)
+                                .cloned();
+                            if let Some(fd) = field_def {
+                                (fd.validate.clone(), schema.ast.clone())
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    };
+                    // Call validate if both closure and AST are available.
+                    if let (Some(validate_fn), Some(ast)) = (validate_fn_opt, ast_opt) {
+                        let dyn_val = schema::field_value_to_dynamic(&fv);
+                        // Temporarily push the schema AST into the call context.
+                        let validate_result: rhai::Dynamic = validate_fn
+                            .call_within_context::<rhai::Dynamic>(&ctx, (dyn_val,))
+                            .map_err(|e| -> Box<EvalAltResult> {
+                                format!("set_field validate error for field '{}': {e}", field_name).into()
+                            })?;
+                        // Validate returns () for valid, or a String error message.
+                        if let Some(err_msg) = validate_result.try_cast::<String>() {
+                            return Err(err_msg.into());
+                        }
+                        // () or non-string return = valid; proceed normally.
+                        let _ = ast; // ast was used via ctx which carries the active AST
+                    }
+                }
+
+                with_save_tx(|tx| tx.set_field(&note_id, field_name, fv))?;
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        engine.register_fn("set_title",
+            |note_id: String, title: String|
+            -> std::result::Result<Dynamic, Box<EvalAltResult>>
+            {
+                with_save_tx(|tx| tx.set_title(&note_id, title))?;
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        // reject(message) — note-level soft error
+        engine.register_fn("reject",
+            |message: String| -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+                with_save_tx(|tx| { tx.reject_note(message); Ok(()) })?;
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        // reject(field, message) — field-pinned soft error
+        engine.register_fn("reject",
+            |field: String, message: String| -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+                with_save_tx(|tx| { tx.reject_field(field, message); Ok(()) })?;
+                Ok(Dynamic::UNIT)
+            }
+        );
+
+        engine.register_fn("commit",
+            || -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+                with_save_tx(|tx| {
+                    tx.commit().map_err(|errors| {
+                        let msgs: Vec<String> = errors.iter().map(|e| {
+                            match &e.field {
+                                Some(f) => format!("{}: {}", f, e.message),
+                                None => e.message.clone(),
+                            }
+                        }).collect();
+                        format!("Validation failed: {}", msgs.join("; "))
+                    })
+                })?;
+                Ok(Dynamic::UNIT)
+            }
+        );
+
         Ok(Self {
             engine,
             current_loading_ast,
@@ -561,7 +646,6 @@ impl ScriptRegistry {
             schema_registry,
             hook_registry,
             query_context,
-            action_ctx,
             run_context,
         })
     }
@@ -651,7 +735,7 @@ impl ScriptRegistry {
         node_type: &str,
         title: &str,
         fields: &BTreeMap<String, FieldValue>,
-    ) -> Result<Option<(String, BTreeMap<String, FieldValue>)>> {
+    ) -> Result<Option<SaveTransaction>> {
         let schema = self.schema_registry.get(schema_name)?;
         self.schema_registry
             .run_on_save_hook(&self.engine, &schema, note_id, node_type, title, fields)
@@ -803,8 +887,8 @@ impl ScriptRegistry {
     ///
     /// Returns a [`hooks::TreeActionResult`] containing:
     /// - `reorder`: `Some(ids)` if the callback returned an array of strings.
-    /// - `creates`: notes queued via `create_note()` during the action.
-    /// - `updates`: notes queued via `update_note()` during the action.
+    /// - `transaction`: a [`SaveTransaction`] with pending notes queued via
+    ///   `create_child()` / `set_title()` / `set_field()` / `commit()`.
     ///
     /// Returns `Err(...)` if the callback throws a Rhai error.
     pub fn invoke_tree_action_hook(
@@ -830,22 +914,24 @@ impl ScriptRegistry {
         note_map.insert("title".into(),     Dynamic::from(note.title.clone()));
         note_map.insert("fields".into(),    Dynamic::from(fields_map));
 
-        // Install query context and action context, run, then clear both.
+        // Install query context and a SaveTransaction pre-seeded with the acted-upon note,
+        // so that set_title() / set_field() can reference it immediately.
         *self.query_context.lock().unwrap() = Some(context);
-        *self.action_ctx.lock().unwrap() = Some(hooks::ActionTxContext::default());
+        let initial_tx = SaveTransaction::for_existing_note(
+            note.id.clone(),
+            note.node_type.clone(),
+            note.title.clone(),
+            note.fields.clone(),
+        );
+        set_save_tx(initial_tx);
         let raw = fn_ptr
             .call::<Dynamic>(&self.engine, &ast, (Dynamic::from_map(note_map),))
             .map_err(|e| KrillnotesError::Scripting(
                 format!("[{script_name}] tree action {label:?}: {e}")
             ));
         *self.query_context.lock().unwrap() = None;
-        let tx_ctx = self.action_ctx.lock().unwrap().take();
+        let transaction = take_save_tx().unwrap_or_default();
         let raw = raw?;
-
-        // Extract creates and updates from the completed action context.
-        let (creates, updates) = tx_ctx
-            .map(|c| (c.creates, c.updates))
-            .unwrap_or_default();
 
         // If callback returns an Array of Strings, treat as reorder request.
         let reorder = if let Some(arr) = raw.try_cast::<rhai::Array>() {
@@ -857,12 +943,116 @@ impl ScriptRegistry {
             None
         };
 
-        Ok(hooks::TreeActionResult { reorder, creates, updates })
+        Ok(hooks::TreeActionResult { reorder, transaction })
     }
 
     /// Returns `true` if a schema with `name` is registered.
     pub fn schema_exists(&self, name: &str) -> bool {
         self.schema_registry.exists(name)
+    }
+
+    /// Runs the `validate` closure for a single field, if one is registered.
+    ///
+    /// Returns `Ok(None)` when the field is valid or has no validate closure.
+    /// Returns `Ok(Some(msg))` when the closure returns an error message.
+    pub fn validate_field(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        value: &crate::core::note::FieldValue,
+    ) -> crate::Result<Option<String>> {
+        let schema = self.schema_registry.get(schema_name)?;
+        let Some(ast) = schema.ast.as_ref() else { return Ok(None); };
+
+        let field = schema.all_fields().into_iter()
+            .find(|f| f.name == field_name);
+        let Some(field_def) = field else { return Ok(None); };
+        let Some(fn_ptr) = field_def.validate.as_ref() else { return Ok(None); };
+
+        let dyn_value = schema::field_value_to_dynamic(value);
+        let result = fn_ptr
+            .call::<rhai::Dynamic>(&self.engine, ast, (dyn_value,))
+            .map_err(|e| KrillnotesError::Scripting(
+                format!("[{schema_name}] validate {field_name:?}: {e}")
+            ))?;
+
+        // () = valid; String = error message
+        if result.is_unit() {
+            Ok(None)
+        } else if let Some(msg) = result.try_cast::<String>() {
+            Ok(Some(msg))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Runs `validate` closures for all fields that have them and have a value.
+    ///
+    /// Returns a map of `field_name → error_message` for each invalid field.
+    pub fn validate_fields(
+        &self,
+        schema_name: &str,
+        fields: &std::collections::BTreeMap<String, crate::core::note::FieldValue>,
+    ) -> crate::Result<std::collections::BTreeMap<String, String>> {
+        let mut errors = std::collections::BTreeMap::new();
+        let schema = self.schema_registry.get(schema_name)?;
+        let Some(ast) = schema.ast.as_ref() else { return Ok(errors); };
+
+        for field_def in schema.all_fields() {
+            let Some(fn_ptr) = field_def.validate.as_ref() else { continue; };
+            let Some(value) = fields.get(&field_def.name) else { continue; };
+
+            let dyn_value = schema::field_value_to_dynamic(value);
+            let result = fn_ptr
+                .call::<rhai::Dynamic>(&self.engine, ast, (dyn_value,))
+                .map_err(|e| KrillnotesError::Scripting(
+                    format!("[{schema_name}] validate {:?}: {e}", field_def.name)
+                ))?;
+
+            if let Some(msg) = result.try_cast::<String>() {
+                errors.insert(field_def.name.clone(), msg);
+            }
+        }
+        Ok(errors)
+    }
+
+    /// Evaluates the `visible` closure for each `FieldGroup`.
+    ///
+    /// Returns a map of `group_name → bool`.
+    /// Groups with no `visible` closure are always `true`.
+    pub fn evaluate_group_visibility(
+        &self,
+        schema_name: &str,
+        fields: &std::collections::BTreeMap<String, crate::core::note::FieldValue>,
+    ) -> crate::Result<std::collections::BTreeMap<String, bool>> {
+        let schema = self.schema_registry.get(schema_name)?;
+        let Some(ast) = schema.ast.as_ref() else {
+            return Ok(schema.field_groups.iter()
+                .map(|g| (g.name.clone(), true))
+                .collect());
+        };
+
+        let mut fields_map = rhai::Map::new();
+        for (k, v) in fields {
+            fields_map.insert(k.as_str().into(), schema::field_value_to_dynamic(v));
+        }
+
+        let mut result = std::collections::BTreeMap::new();
+        for group in &schema.field_groups {
+            let visible = match group.visible.as_ref() {
+                None => true,
+                Some(fn_ptr) => {
+                    let ret = fn_ptr
+                        .call::<rhai::Dynamic>(&self.engine, ast, (Dynamic::from_map(fields_map.clone()),))
+                        .map_err(|e| KrillnotesError::Scripting(
+                            format!("[{schema_name}] visible {:?}: {e}", group.name)
+                        ))?;
+                    ret.try_cast::<bool>().unwrap_or(true)
+                }
+            };
+            result.insert(group.name.clone(), visible);
+        }
+        Ok(result)
     }
 
     /// Sets the per-run note and attachment context before executing a hook.
@@ -902,8 +1092,8 @@ mod tests {
                     #{ name: "last",  type: "text", required: false },
                 ],
                 on_save: |note| {
-                    note.title = note.fields["last"] + ", " + note.fields["first"];
-                    note
+                    set_title(note.id, note.fields["last"] + ", " + note.fields["first"]);
+                    commit();
                 }
             });
         "#, "test").unwrap();
@@ -912,13 +1102,14 @@ mod tests {
         fields.insert("first".to_string(), FieldValue::Text("John".to_string()));
         fields.insert("last".to_string(), FieldValue::Text("Doe".to_string()));
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("Person", "id-1", "Person", "old title", &fields)
+            .unwrap()
             .unwrap();
 
-        assert!(result.is_some());
-        let (new_title, _) = result.unwrap();
-        assert_eq!(new_title, "Doe, John");
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id-1").unwrap();
+        assert_eq!(pn.effective_title(), "Doe, John");
     }
 
     #[test]
@@ -1071,7 +1262,7 @@ mod tests {
                     max: 0,
                     target_type: None,
                     show_on_hover: false,
-                    allowed_types: vec![],
+                    allowed_types: vec![], validate: None,
                 },
                 FieldDefinition {
                     name: "count".to_string(),
@@ -1083,7 +1274,7 @@ mod tests {
                     max: 0,
                     target_type: None,
                     show_on_hover: false,
-                    allowed_types: vec![],
+                    allowed_types: vec![], validate: None,
                 },
             ],
             title_can_view: true,
@@ -1092,7 +1283,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert_eq!(defaults.len(), 2);
@@ -1132,7 +1323,7 @@ mod tests {
                 max: 0,
                 target_type: None,
                 show_on_hover: false,
-                allowed_types: vec![],
+                allowed_types: vec![], validate: None,
             }],
             title_can_view: true,
             title_can_edit: true,
@@ -1140,7 +1331,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("birthday"), Some(FieldValue::Date(None))));
@@ -1160,7 +1351,7 @@ mod tests {
                 max: 0,
                 target_type: None,
                 show_on_hover: false,
-                allowed_types: vec![],
+                allowed_types: vec![], validate: None,
             }],
             title_can_view: true,
             title_can_edit: true,
@@ -1168,7 +1359,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("email_addr"), Some(FieldValue::Email(s)) if s.is_empty()));
@@ -1211,8 +1402,8 @@ mod tests {
                         #{ name: "last",  type: "text", required: false },
                     ],
                     on_save: |note| {
-                        note.title = note.fields["last"] + ", " + note.fields["first"];
-                        note
+                        set_title(note.id, note.fields["last"] + ", " + note.fields["first"]);
+                        commit();
                     }
                 });
             "#,
@@ -1223,14 +1414,15 @@ mod tests {
         fields.insert("first".to_string(), FieldValue::Text("John".to_string()));
         fields.insert("last".to_string(), FieldValue::Text("Doe".to_string()));
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("Person", "id-1", "Person", "old title", &fields)
+            .unwrap()
             .unwrap();
 
-        assert!(result.is_some());
-        let (new_title, new_fields) = result.unwrap();
-        assert_eq!(new_title, "Doe, John");
-        assert_eq!(new_fields.get("first"), Some(&FieldValue::Text("John".to_string())));
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id-1").unwrap();
+        assert_eq!(pn.effective_title(), "Doe, John");
+        assert_eq!(pn.effective_fields().get("first"), Some(&FieldValue::Text("John".to_string())));
     }
 
     #[test]
@@ -1267,12 +1459,14 @@ mod tests {
         fields.insert("address_country".to_string(), FieldValue::Text("".to_string()));
         fields.insert("is_family".to_string(), FieldValue::Boolean(false));
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("Contact", "id-1", "Contact", "", &fields)
             .unwrap()
             .unwrap();
 
-        assert_eq!(result.0, "Smith, Jane");
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id-1").unwrap();
+        assert_eq!(pn.effective_title(), "Smith, Jane");
     }
 
     // ── Field flags ─────────────────────────────────────────────────────────
@@ -1421,7 +1615,7 @@ mod tests {
     // ── Boolean / default value edge cases ──────────────────────────────────
 
     #[test]
-    fn test_boolean_field_defaults_to_false_when_absent_from_hook_result() {
+    fn test_boolean_field_not_set_by_hook_is_absent_from_effective_fields() {
         let mut registry = ScriptRegistry::new().unwrap();
         registry
             .load_script(
@@ -1431,26 +1625,31 @@ mod tests {
                         #{ name: "flag", type: "boolean", required: false },
                     ],
                     on_save: |note| {
-                        // intentionally does NOT touch note.fields["flag"]
-                        note
+                        // intentionally does NOT set flag
+                        commit();
                     }
                 });
             "#,
             "test")
             .unwrap();
 
-        // Do NOT include "flag" in the submitted fields — it must default to false.
+        // Do NOT include "flag" in the submitted fields.
+        // In the gated model, effective_fields() = original_fields merged with pending_fields.
+        // Since neither contain "flag", it is absent from the output.
         let fields = BTreeMap::new();
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("FlagNote", "id-1", "FlagNote", "title", &fields)
             .unwrap()
             .unwrap();
 
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id-1").unwrap();
+        // Field was not in submitted fields and hook did not set it — absent from output.
         assert_eq!(
-            result.1.get("flag"),
-            Some(&FieldValue::Boolean(false)),
-            "boolean field absent from hook result should default to false"
+            pn.effective_fields().get("flag"),
+            None,
+            "boolean field absent from input and not set by hook should be absent from effective_fields"
         );
     }
 
@@ -1659,8 +1858,8 @@ mod tests {
             schema("S", #{
                 fields: [ #{ name: "status", type: "select", options: ["A", "B"] } ],
                 on_save: |note| {
-                    note.fields.status = "B";
-                    note
+                    set_field(note.id, "status", "B");
+                    commit();
                 }
             });
         "#, "test").unwrap();
@@ -1668,11 +1867,13 @@ mod tests {
         let mut fields = BTreeMap::new();
         fields.insert("status".to_string(), FieldValue::Text("A".to_string()));
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("S", "id1", "S", "title", &fields)
             .unwrap()
             .unwrap();
-        assert_eq!(result.1["status"], FieldValue::Text("B".to_string()));
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id1").unwrap();
+        assert_eq!(pn.effective_fields()["status"], FieldValue::Text("B".to_string()));
     }
 
     #[test]
@@ -1682,8 +1883,8 @@ mod tests {
             schema("R", #{
                 fields: [ #{ name: "stars", type: "rating", max: 5 } ],
                 on_save: |note| {
-                    note.fields.stars = 4.0;
-                    note
+                    set_field(note.id, "stars", 4.0);
+                    commit();
                 }
             });
         "#, "test").unwrap();
@@ -1691,53 +1892,65 @@ mod tests {
         let mut fields = BTreeMap::new();
         fields.insert("stars".to_string(), FieldValue::Number(0.0));
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("R", "id1", "R", "title", &fields)
             .unwrap()
             .unwrap();
-        assert_eq!(result.1["stars"], FieldValue::Number(4.0));
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id1").unwrap();
+        assert_eq!(pn.effective_fields()["stars"], FieldValue::Number(4.0));
     }
 
     #[test]
-    fn test_select_field_defaults_to_empty_text_when_absent_from_hook_result() {
+    fn test_select_field_not_set_by_hook_is_absent_from_effective_fields() {
         let mut registry = ScriptRegistry::new().unwrap();
         registry.load_script(r#"
             schema("S2", #{
                 fields: [ #{ name: "status", type: "select", options: ["A", "B"] } ],
                 on_save: |note| {
-                    // deliberately do NOT set note.fields.status
-                    note
+                    // deliberately do NOT set status
+                    commit();
                 }
             });
         "#, "test").unwrap();
 
+        // In the gated model, effective_fields() = original_fields merged with pending_fields.
+        // Since neither contain "status", it is absent from the output.
         let fields = BTreeMap::new(); // no status field
-        let result = registry
+        let tx = registry
             .run_on_save_hook("S2", "id1", "S2", "title", &fields)
             .unwrap()
             .unwrap();
-        assert_eq!(result.1["status"], FieldValue::Text(String::new()));
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id1").unwrap();
+        // Field was not in submitted fields and hook did not set it — absent from output.
+        assert_eq!(pn.effective_fields().get("status"), None);
     }
 
     #[test]
-    fn test_rating_field_defaults_to_zero_when_absent_from_hook_result() {
+    fn test_rating_field_not_set_by_hook_is_absent_from_effective_fields() {
         let mut registry = ScriptRegistry::new().unwrap();
         registry.load_script(r#"
             schema("R2", #{
                 fields: [ #{ name: "stars", type: "rating", max: 5 } ],
                 on_save: |note| {
-                    // deliberately do NOT set note.fields.stars
-                    note
+                    // deliberately do NOT set stars
+                    commit();
                 }
             });
         "#, "test").unwrap();
 
+        // In the gated model, effective_fields() = original_fields merged with pending_fields.
+        // Since neither contain "stars", it is absent from the output.
         let fields = BTreeMap::new(); // no stars field
-        let result = registry
+        let tx = registry
             .run_on_save_hook("R2", "id1", "R2", "title", &fields)
             .unwrap()
             .unwrap();
-        assert_eq!(result.1["stars"], FieldValue::Number(0.0));
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id1").unwrap();
+        // Field was not in submitted fields and hook did not set it — absent from output.
+        assert_eq!(pn.effective_fields().get("stars"), None);
     }
 
     // ── children_sort ───────────────────────────────────────────────────────
@@ -1803,9 +2016,11 @@ mod tests {
 
         let result = registry.run_on_save_hook("Book", "id1", "Book", "Dune", &fields);
         assert!(result.is_ok(), "book hook should not error with unset dates: {:?}", result);
-        let (title, out_fields) = result.unwrap().unwrap();
-        assert_eq!(title, "Herbert: Dune");
-        assert_eq!(out_fields["read_duration"], crate::FieldValue::Text(String::new()));
+        let tx = result.unwrap().unwrap();
+        assert!(tx.committed);
+        let pn = tx.pending_notes.get("id1").unwrap();
+        assert_eq!(pn.effective_title(), "Herbert: Dune");
+        assert_eq!(pn.effective_fields()["read_duration"], crate::FieldValue::Text(String::new()));
     }
 
     // ── render_default_view on ScriptRegistry ───────────────────────────────
@@ -1934,10 +2149,11 @@ mod tests {
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    parent_note.title = "Folder (" + parent_note.fields["count"].to_int().to_string() + ")";
-                    child_note.title = "Child from hook";
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    set_title(parent_note.id, "Folder (" + new_count.to_int().to_string() + ")");
+                    set_title(child_note.id, "Child from hook");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -2028,8 +2244,8 @@ mod tests {
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = 5.0;
-                    #{ parent: parent_note }
+                    set_field(parent_note.id, "count", 5.0);
+                    commit();
                 }
             });
             schema("Item", #{
@@ -2061,8 +2277,8 @@ mod tests {
             schema("Folder", #{
                 fields: [],
                 on_add_child: |parent_note, child_note| {
-                    child_note.title = "Initialized by hook";
-                    #{ child: child_note }
+                    set_title(child_note.id, "Initialized by hook");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -2110,6 +2326,41 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("my_test_script"), "error should include script name, got: {msg}");
         assert!(msg.contains("on_add_child"), "error should mention hook name, got: {msg}");
+    }
+
+    #[test]
+    fn test_on_add_child_hook_old_style_returns_helpful_error() {
+        // A hook that returns a map (old-style) should be rejected with a migration message.
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Folder", #{
+                fields: [
+                    #{ name: "count", type: "number", required: false },
+                ],
+                on_add_child: |parent_note, child_note| {
+                    parent_note.fields["count"] = 1.0;
+                    #{ parent: parent_note, child: child_note }
+                }
+            });
+            schema("Item", #{
+                fields: [],
+            });
+        "#, "my_script").unwrap();
+
+        let mut parent_fields = BTreeMap::new();
+        parent_fields.insert("count".to_string(), FieldValue::Number(0.0));
+
+        let err = registry
+            .run_on_add_child_hook(
+                "Folder",
+                "p-id", "Folder", "Title", &parent_fields,
+                "c-id", "Item",   "Child", &std::collections::BTreeMap::new(),
+            )
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("my_script"), "error should include script name, got: {msg}");
+        assert!(msg.contains("gated model"), "error should mention migration, got: {msg}");
     }
 
     #[test]
@@ -2279,7 +2530,7 @@ mod tests {
         assert!(err.to_string().contains("my_script"), "error should include script name, got: {err}");
     }
 
-    // ── create_note host function ────────────────────────────────────────────
+    // ── create_child host function ────────────────────────────────────────────
 
     fn make_test_note(id: &str, node_type: &str) -> crate::Note {
         crate::Note {
@@ -2312,22 +2563,25 @@ mod tests {
                 ]
             });
             add_tree_action("Make Task", ["Task"], |note| {
-                let t = create_note(note.id, "Task");
+                let t = create_child(note.id, "Task");
                 if t.node_type != "Task" { throw "node_type must be Task"; }
                 if t.id == ""           { throw "id must not be empty"; }
                 if t.fields.status != "" { throw "status must default to empty string"; }
+                commit();
             });
         "#, "test").unwrap();
 
         let note = make_test_note("parent1", "Task");
         let ctx  = make_empty_ctx();
         let result = registry.invoke_tree_action_hook("Make Task", &note, ctx).unwrap();
-        assert_eq!(result.creates.len(), 1, "one pending create expected");
-        assert_eq!(result.creates[0].node_type, "Task");
-        assert_eq!(result.creates[0].parent_id, "parent1");
+        let new_notes: Vec<_> = result.transaction.pending_notes.values()
+            .filter(|p| p.is_new).collect();
+        assert_eq!(new_notes.len(), 1, "one new pending note expected");
+        assert_eq!(new_notes[0].node_type, "Task");
+        assert_eq!(new_notes[0].parent_id.as_deref(), Some("parent1"));
     }
 
-    // ── update_note host function ────────────────────────────────────────────
+    // ── set_title / set_field on existing notes ──────────────────────────────
 
     #[test]
     fn test_update_note_queues_update_for_existing_note() {
@@ -2339,19 +2593,23 @@ mod tests {
                 ]
             });
             add_tree_action("Mark Done", ["Task"], |note| {
-                note.fields.status = "Done";
-                note.title = "Completed";
-                update_note(note);
+                set_title(note.id, "Completed");
+                set_field(note.id, "status", "Done");
+                commit();
             });
         "#, "test").unwrap();
 
-        let note = make_test_note("n1", "Task");
+        let mut fields = BTreeMap::new();
+        fields.insert("status".to_string(), FieldValue::Text("Open".to_string()));
+        let mut note = make_test_note("n1", "Task");
+        note.fields = fields;
         let result = registry.invoke_tree_action_hook("Mark Done", &note, make_empty_ctx()).unwrap();
-        assert_eq!(result.updates.len(), 1);
-        assert_eq!(result.updates[0].note_id, "n1");
-        assert_eq!(result.updates[0].title, "Completed");
+        assert!(result.transaction.committed, "transaction should be committed");
+        let pending = result.transaction.pending_notes.get("n1").expect("n1 should have a pending note");
+        assert!(!pending.is_new, "should be an update to an existing note");
+        assert_eq!(pending.effective_title(), "Completed");
         assert_eq!(
-            result.updates[0].fields.get("status"),
+            pending.effective_fields().get("status"),
             Some(&crate::core::note::FieldValue::Text("Done".into())),
         );
     }
@@ -2364,21 +2622,25 @@ mod tests {
                 fields: [#{ name: "status", type: "text", required: false }]
             });
             add_tree_action("New Task", ["Task"], |note| {
-                let t = create_note(note.id, "Task");
-                t.title = "My Task";
-                t.fields.status = "Open";
-                update_note(t);
+                let t = create_child(note.id, "Task");
+                set_title(t.id, "My Task");
+                set_field(t.id, "status", "Open");
+                commit();
             });
         "#, "test").unwrap();
 
         let note = make_test_note("parent1", "Task");
         let result = registry.invoke_tree_action_hook("New Task", &note, make_empty_ctx()).unwrap();
 
-        assert_eq!(result.creates.len(), 1, "one create, not a separate update");
-        assert_eq!(result.updates.len(), 0, "no separate update for inflight note");
-        assert_eq!(result.creates[0].title, "My Task");
+        let new_notes: Vec<_> = result.transaction.pending_notes.values()
+            .filter(|p| p.is_new).collect();
+        assert_eq!(new_notes.len(), 1, "one new pending note expected");
+        assert!(result.transaction.committed, "transaction should be committed");
+        let pending = new_notes[0];
+        assert!(pending.is_new, "should be a new note create");
+        assert_eq!(pending.effective_title(), "My Task");
         assert_eq!(
-            result.creates[0].fields.get("status"),
+            pending.effective_fields().get("status"),
             Some(&crate::core::note::FieldValue::Text("Open".into())),
         );
     }
@@ -2389,10 +2651,11 @@ mod tests {
         registry.load_script(r#"
             schema("Task", #{ fields: [] });
             add_tree_action("Verify Children", ["Task"], |note| {
-                let t = create_note(note.id, "Task");
+                let t = create_child(note.id, "Task");
                 let children = get_children(note.id);
                 let found = children.filter(|c| c.id == t.id);
                 if found.len() != 1 { throw "inflight note not visible in get_children"; }
+                commit();
             });
         "#, "test").unwrap();
 
@@ -2406,10 +2669,11 @@ mod tests {
         registry.load_script(r#"
             schema("Task", #{ fields: [] });
             add_tree_action("Verify get_note", ["Task"], |note| {
-                let t = create_note(note.id, "Task");
+                let t = create_child(note.id, "Task");
                 let fetched = get_note(t.id);
                 if fetched == () { throw "inflight note not visible via get_note"; }
                 if fetched.id != t.id { throw "wrong note returned"; }
+                commit();
             });
         "#, "test").unwrap();
 
@@ -2457,17 +2721,18 @@ mod tests {
             schema("DateTest", #{
                 fields: [#{ name: "dummy", type: "text", required: false }],
                 on_save: |note| {
-                    note.title = today();
-                    note
+                    set_title(note.id, today());
+                    commit();
                 }
             });
         "#, "test").unwrap();
 
-        let result = registry
+        let tx = registry
             .run_on_save_hook("DateTest", "id1", "DateTest", "", &BTreeMap::new())
             .unwrap()
             .unwrap();
-        let (title, _) = result;
+        assert!(tx.committed);
+        let title = tx.pending_notes.get("id1").unwrap().effective_title().to_string();
         // Must be exactly 10 chars: YYYY-MM-DD
         assert_eq!(title.len(), 10, "expected YYYY-MM-DD (10 chars), got: {title}");
         assert_eq!(&title[4..5], "-", "missing year-month separator: {title}");
@@ -2495,8 +2760,8 @@ mod tests {
                         s.trim();
                         if words.len() > 6 { s + " …" } else { s }
                     };
-                    note.title = today() + " — " + snippet;
-                    note
+                    set_title(note.id, today() + " — " + snippet);
+                    commit();
                 }
             });
         "#, "test").unwrap();
@@ -2505,9 +2770,11 @@ mod tests {
         fields.insert("body".to_string(),
             FieldValue::Text("Emergence is when simple rules produce complex behaviour".to_string()));
 
-        let (title, _) = registry
+        let tx = registry
             .run_on_save_hook("ZettelTest", "id1", "ZettelTest", "", &fields)
             .unwrap().unwrap();
+        assert!(tx.committed);
+        let title = tx.pending_notes.get("id1").unwrap().effective_title().to_string();
 
         // Title must start with YYYY-MM-DD (10 chars, dashes at [4] and [7])
         assert_eq!(&title[4..5], "-", "missing year-month separator: {title}");
@@ -2538,15 +2805,17 @@ mod tests {
                         s.trim();
                         if words.len() > 6 { s + " …" } else { s }
                     };
-                    note.title = today() + " — " + snippet;
-                    note
+                    set_title(note.id, today() + " — " + snippet);
+                    commit();
                 }
             });
         "#, "test").unwrap();
 
-        let (title, _) = registry
+        let tx = registry
             .run_on_save_hook("ZettelEmpty", "id2", "ZettelEmpty", "", &std::collections::BTreeMap::new())
             .unwrap().unwrap();
+        assert!(tx.committed);
+        let title = tx.pending_notes.get("id2").unwrap().effective_title().to_string();
         assert!(title.contains("Untitled"), "expected Untitled fallback: {title}");
         // Must still have the date prefix
         assert_eq!(&title[4..5], "-", "missing date separator in untitled title: {title}");
@@ -2566,7 +2835,7 @@ mod tests {
                 max: 0,
                 target_type: None,
                 show_on_hover: false,
-                allowed_types: vec![],
+                allowed_types: vec![], validate: None,
             }],
             title_can_view: true,
             title_can_edit: true,
@@ -2574,7 +2843,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("linked_note"), Some(FieldValue::NoteLink(None))));
@@ -2773,6 +3042,188 @@ mod tests {
             .eval::<String>(r#"embed_media("https://example.com")"#)
             .expect("eval failed");
         assert!(result.is_empty(), "got: {result}");
+    }
+
+    // ── validate_field ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_field_returns_error_on_invalid() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Rated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Must be positive" } else { () },
+                    }
+                ]
+            });
+        "#, "validate_test").unwrap();
+
+        let err = registry.validate_field(
+            "Rated", "score",
+            &crate::core::note::FieldValue::Number(-1.0)
+        ).unwrap();
+        assert_eq!(err, Some("Must be positive".into()));
+    }
+
+    #[test]
+    fn test_validate_field_returns_none_on_valid() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Rated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Must be positive" } else { () },
+                    }
+                ]
+            });
+        "#, "validate_test").unwrap();
+
+        let err = registry.validate_field(
+            "Rated", "score",
+            &crate::core::note::FieldValue::Number(5.0)
+        ).unwrap();
+        assert_eq!(err, None);
+    }
+
+    #[test]
+    fn test_validate_field_no_closure_returns_none() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Plain", #{
+                fields: [ #{ name: "title", type: "text", required: false } ]
+            });
+        "#, "validate_test").unwrap();
+
+        let err = registry.validate_field(
+            "Plain", "title",
+            &crate::core::note::FieldValue::Text("anything".into())
+        ).unwrap();
+        assert_eq!(err, None);
+    }
+
+    // ── evaluate_group_visibility ─────────────────────────────────────────────
+
+    #[test]
+    fn test_evaluate_group_visibility_with_closure() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Typed", #{
+                fields: [],
+                field_groups: [
+                    #{
+                        name: "Special Group",
+                        fields: [],
+                        visible: |fields| fields["kind"] == "special",
+                    }
+                ]
+            });
+        "#, "visibility_test").unwrap();
+
+        let mut fields_special = std::collections::BTreeMap::new();
+        fields_special.insert("kind".into(), crate::core::note::FieldValue::Text("special".into()));
+        let vis = registry.evaluate_group_visibility("Typed", &fields_special).unwrap();
+        assert_eq!(vis.get("Special Group"), Some(&true));
+
+        let mut fields_other = std::collections::BTreeMap::new();
+        fields_other.insert("kind".into(), crate::core::note::FieldValue::Text("other".into()));
+        let vis2 = registry.evaluate_group_visibility("Typed", &fields_other).unwrap();
+        assert_eq!(vis2.get("Special Group"), Some(&false));
+    }
+
+    #[test]
+    fn test_evaluate_group_visibility_no_closure_always_true() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Simple", #{
+                fields: [],
+                field_groups: [
+                    #{ name: "Always Visible", fields: [] }
+                ]
+            });
+        "#, "visibility_test").unwrap();
+
+        let vis = registry.evaluate_group_visibility("Simple", &Default::default()).unwrap();
+        assert_eq!(vis.get("Always Visible"), Some(&true));
+    }
+
+    // ── set_field validate hard error ─────────────────────────────────────────
+
+    #[test]
+    fn test_set_field_validate_hard_error() {
+        // When set_field is called from an on_save hook with a value that fails
+        // the field's validate closure, the hook should abort with a hard error
+        // that contains the validation message.
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Validated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Negative!" } else { () },
+                    }
+                ],
+                on_save: |note| {
+                    set_field(note.id, "score", -1.0);
+                    commit();
+                }
+            });
+        "#, "test").unwrap();
+
+        let result = registry.run_on_save_hook(
+            "Validated",
+            "n1",
+            "Validated",
+            "Test Note",
+            &Default::default(),
+        );
+
+        assert!(result.is_err(), "Expected hard error from validate in set_field");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Negative!"),
+            "Expected 'Negative!' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_set_field_validate_passes_when_valid() {
+        // When set_field is called with a value that passes validation, the hook
+        // should succeed normally.
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Validated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Negative!" } else { () },
+                    }
+                ],
+                on_save: |note| {
+                    set_field(note.id, "score", 5.0);
+                    commit();
+                }
+            });
+        "#, "test").unwrap();
+
+        let result = registry.run_on_save_hook(
+            "Validated",
+            "n1",
+            "Validated",
+            "Test Note",
+            &Default::default(),
+        );
+
+        assert!(result.is_ok(), "Expected success with valid value, got: {:?}", result.err());
+        let tx = result.unwrap().expect("hook should return a transaction");
+        assert!(tx.committed, "Transaction should be committed");
+        let pending = tx.pending_notes.get("n1").expect("note should be in tx");
+        assert_eq!(
+            pending.pending_fields.get("score"),
+            Some(&FieldValue::Number(5.0)),
+        );
     }
 
 }
