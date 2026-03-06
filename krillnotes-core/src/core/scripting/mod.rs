@@ -16,7 +16,7 @@ mod schema;
 // Re-exported for API stability; currently a placeholder for future global/lifecycle hooks.
 pub use hooks::HookRegistry;
 pub(crate) use schema::field_value_to_dynamic;
-pub use schema::{AddChildResult, FieldDefinition, Schema};
+pub use schema::{AddChildResult, FieldDefinition, FieldGroup, Schema};
 // StarterScript is defined in this file and re-exported via lib.rs.
 
 use crate::{FieldValue, KrillnotesError, Note, Result};
@@ -1071,7 +1071,7 @@ mod tests {
                     max: 0,
                     target_type: None,
                     show_on_hover: false,
-                    allowed_types: vec![],
+                    allowed_types: vec![], validate: None,
                 },
                 FieldDefinition {
                     name: "count".to_string(),
@@ -1083,7 +1083,7 @@ mod tests {
                     max: 0,
                     target_type: None,
                     show_on_hover: false,
-                    allowed_types: vec![],
+                    allowed_types: vec![], validate: None,
                 },
             ],
             title_can_view: true,
@@ -1092,7 +1092,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![],
         };
         let defaults = schema.default_fields();
         assert_eq!(defaults.len(), 2);
@@ -1132,7 +1132,7 @@ mod tests {
                 max: 0,
                 target_type: None,
                 show_on_hover: false,
-                allowed_types: vec![],
+                allowed_types: vec![], validate: None,
             }],
             title_can_view: true,
             title_can_edit: true,
@@ -1140,7 +1140,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![],
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("birthday"), Some(FieldValue::Date(None))));
@@ -1160,7 +1160,7 @@ mod tests {
                 max: 0,
                 target_type: None,
                 show_on_hover: false,
-                allowed_types: vec![],
+                allowed_types: vec![], validate: None,
             }],
             title_can_view: true,
             title_can_edit: true,
@@ -1168,7 +1168,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![],
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("email_addr"), Some(FieldValue::Email(s)) if s.is_empty()));
@@ -2566,7 +2566,7 @@ mod tests {
                 max: 0,
                 target_type: None,
                 show_on_hover: false,
-                allowed_types: vec![],
+                allowed_types: vec![], validate: None,
             }],
             title_can_view: true,
             title_can_edit: true,
@@ -2574,7 +2574,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![],
+            attachment_types: vec![], field_groups: vec![],
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("linked_note"), Some(FieldValue::NoteLink(None))));

@@ -58,6 +58,21 @@ pub struct FieldDefinition {
     /// Ignored for non-`file` field types.
     #[serde(default)]
     pub allowed_types: Vec<String>,
+    /// Field-level validation closure. Receives the field value, returns `()`
+    /// for valid or a `String` error message for invalid.
+    #[serde(skip)]
+    pub validate: Option<rhai::FnPtr>,
+}
+
+/// A named group of fields with optional conditional visibility.
+#[derive(Debug, Clone)]
+pub struct FieldGroup {
+    pub name: String,
+    pub fields: Vec<FieldDefinition>,
+    /// Visibility closure: `|fields_map| -> bool`. `None` means always visible.
+    pub visible: Option<rhai::FnPtr>,
+    /// Initial collapsed state in the UI.
+    pub collapsed: bool,
 }
 
 /// A parsed note-type schema containing an ordered list of field definitions.
@@ -80,9 +95,18 @@ pub struct Schema {
     /// MIME types accepted by the note-level attachments panel; empty means all types are allowed.
     /// Ignored when `allow_attachments` is `false`.
     pub attachment_types: Vec<String>,
+    /// Named field groups with optional visibility rules.
+    pub field_groups: Vec<FieldGroup>,
 }
 
 impl Schema {
+    /// All fields in declaration order: top-level first, then each group's fields.
+    pub fn all_fields(&self) -> Vec<&FieldDefinition> {
+        self.fields.iter()
+            .chain(self.field_groups.iter().flat_map(|g| g.fields.iter()))
+            .collect()
+    }
+
     /// Checks that all fields marked `required: true` have non-empty values.
     ///
     /// "Empty" means:
@@ -97,7 +121,7 @@ impl Schema {
     /// Returns [`KrillnotesError::ValidationFailed`] for the first required
     /// field that is empty, naming the field in the error message.
     pub fn validate_required_fields(&self, fields: &BTreeMap<String, FieldValue>) -> crate::Result<()> {
-        for field_def in &self.fields {
+        for field_def in self.all_fields() {
             if !field_def.required {
                 continue;
             }
@@ -123,7 +147,7 @@ impl Schema {
     /// Returns a map of field names to their zero-value defaults.
     pub fn default_fields(&self) -> BTreeMap<String, FieldValue> {
         let mut fields = BTreeMap::new();
-        for field_def in &self.fields {
+        for field_def in self.all_fields() {
             let default_value = match field_def.field_type.as_str() {
                 "text" | "textarea" => FieldValue::Text(String::new()),
                 "number" => FieldValue::Number(0.0),
@@ -142,6 +166,91 @@ impl Schema {
         fields
     }
 
+    /// Parses a single `FieldDefinition` from a Rhai Dynamic (must be a map).
+    pub(super) fn parse_field_def(field_item: &Dynamic) -> Result<FieldDefinition> {
+        let field_map = field_item
+            .clone()
+            .try_cast::<Map>()
+            .ok_or_else(|| KrillnotesError::Scripting("Field must be a map".to_string()))?;
+
+        let field_name = field_map
+            .get("name")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .ok_or_else(|| KrillnotesError::Scripting("Field missing 'name'".to_string()))?;
+
+        let field_type = field_map
+            .get("type")
+            .and_then(|v| v.clone().try_cast::<String>())
+            .ok_or_else(|| KrillnotesError::Scripting("Field missing 'type'".to_string()))?;
+
+        let required = field_map
+            .get("required")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(false);
+
+        let can_view = field_map
+            .get("can_view")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(true);
+
+        let can_edit = field_map
+            .get("can_edit")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(true);
+
+        let mut options: Vec<String> = Vec::new();
+        if let Some(arr) = field_map
+            .get("options")
+            .and_then(|v| v.clone().try_cast::<rhai::Array>())
+        {
+            for item in arr {
+                let s = item.try_cast::<String>().ok_or_else(|| {
+                    KrillnotesError::Scripting("options array must contain only strings".into())
+                })?;
+                options.push(s);
+            }
+        }
+
+        let max: i64 = field_map
+            .get("max")
+            .and_then(|v| v.clone().try_cast::<i64>())
+            .unwrap_or(0);
+
+        if max < 0 {
+            return Err(KrillnotesError::Scripting(
+                format!("field '{}': max must be >= 0, got {}", field_name, max)
+            ));
+        }
+
+        let target_type: Option<String> = field_map
+            .get("target_type")
+            .and_then(|v| v.clone().try_cast::<String>());
+
+        let show_on_hover = field_map
+            .get("show_on_hover")
+            .and_then(|v| v.clone().try_cast::<bool>())
+            .unwrap_or(false);
+
+        let mut allowed_types: Vec<String> = Vec::new();
+        if let Some(arr) = field_map
+            .get("allowed_types")
+            .and_then(|v| v.clone().try_cast::<rhai::Array>())
+        {
+            for item in arr {
+                let s = item.try_cast::<String>().ok_or_else(|| {
+                    KrillnotesError::Scripting("allowed_types array must contain only strings".into())
+                })?;
+                allowed_types.push(s);
+            }
+        }
+
+        let validate: Option<rhai::FnPtr> = field_map
+            .get("validate")
+            .and_then(|v| v.clone().try_cast::<rhai::FnPtr>());
+
+        Ok(FieldDefinition { name: field_name, field_type, required, can_view, can_edit, options, max, target_type, show_on_hover, allowed_types, validate })
+    }
+
     /// Parses a `Schema` from a Rhai object map produced by a `schema(...)` call.
     ///
     /// # Errors
@@ -154,83 +263,15 @@ impl Schema {
             .ok_or_else(|| KrillnotesError::Scripting("Missing 'fields' array".to_string()))?;
 
         let mut fields = Vec::new();
+        let mut all_field_names = std::collections::HashSet::new();
         for field_item in fields_array {
-            let field_map = field_item
-                .try_cast::<Map>()
-                .ok_or_else(|| KrillnotesError::Scripting("Field must be a map".to_string()))?;
-
-            let field_name = field_map
-                .get("name")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("Field missing 'name'".to_string()))?;
-
-            let field_type = field_map
-                .get("type")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("Field missing 'type'".to_string()))?;
-
-            let required = field_map
-                .get("required")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(false);
-
-            let can_view = field_map
-                .get("can_view")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(true);
-
-            let can_edit = field_map
-                .get("can_edit")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(true);
-
-            let mut options: Vec<String> = Vec::new();
-            if let Some(arr) = field_map
-                .get("options")
-                .and_then(|v| v.clone().try_cast::<rhai::Array>())
-            {
-                for item in arr {
-                    let s = item.try_cast::<String>().ok_or_else(|| {
-                        KrillnotesError::Scripting("options array must contain only strings".into())
-                    })?;
-                    options.push(s);
-                }
+            let field = Self::parse_field_def(&field_item)?;
+            if !all_field_names.insert(field.name.clone()) {
+                return Err(KrillnotesError::Scripting(format!(
+                    "Duplicate field name '{}' in schema '{}'", field.name, name
+                )));
             }
-
-            let max: i64 = field_map
-                .get("max")
-                .and_then(|v| v.clone().try_cast::<i64>())
-                .unwrap_or(0);
-
-            if max < 0 {
-                return Err(KrillnotesError::Scripting(
-                    format!("field '{}': max must be >= 0, got {}", field_name, max)
-                ));
-            }
-
-            let target_type: Option<String> = field_map
-                .get("target_type")
-                .and_then(|v| v.clone().try_cast::<String>());
-
-            let show_on_hover = field_map
-                .get("show_on_hover")
-                .and_then(|v| v.clone().try_cast::<bool>())
-                .unwrap_or(false);
-
-            let mut allowed_types: Vec<String> = Vec::new();
-            if let Some(arr) = field_map
-                .get("allowed_types")
-                .and_then(|v| v.clone().try_cast::<rhai::Array>())
-            {
-                for item in arr {
-                    let s = item.try_cast::<String>().ok_or_else(|| {
-                        KrillnotesError::Scripting("allowed_types array must contain only strings".into())
-                    })?;
-                    allowed_types.push(s);
-                }
-            }
-
-            fields.push(FieldDefinition { name: field_name, field_type, required, can_view, can_edit, options, max, target_type, show_on_hover, allowed_types });
+            fields.push(field);
         }
 
         let title_can_view = def
@@ -292,7 +333,53 @@ impl Schema {
             }
         }
 
-        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types })
+        let mut field_groups: Vec<FieldGroup> = Vec::new();
+        if let Some(groups_array) = def
+            .get("field_groups")
+            .and_then(|v| v.clone().try_cast::<rhai::Array>())
+        {
+            for group_item in groups_array {
+                let group_map = group_item
+                    .try_cast::<Map>()
+                    .ok_or_else(|| KrillnotesError::Scripting("field_groups entry must be a map".to_string()))?;
+
+                let group_name = group_map
+                    .get("name")
+                    .and_then(|v| v.clone().try_cast::<String>())
+                    .ok_or_else(|| KrillnotesError::Scripting("field group missing 'name'".to_string()))?;
+
+                let collapsed = group_map
+                    .get("collapsed")
+                    .and_then(|v| v.clone().try_cast::<bool>())
+                    .unwrap_or(false);
+
+                let visible: Option<rhai::FnPtr> = group_map
+                    .get("visible")
+                    .and_then(|v| v.clone().try_cast::<rhai::FnPtr>());
+
+                let group_fields_array = group_map
+                    .get("fields")
+                    .and_then(|v| v.clone().try_cast::<rhai::Array>())
+                    .ok_or_else(|| KrillnotesError::Scripting(
+                        format!("field group '{}' missing 'fields' array", group_name)
+                    ))?;
+
+                let mut group_fields = Vec::new();
+                for field_item in group_fields_array {
+                    let field = Self::parse_field_def(&field_item)?;
+                    if !all_field_names.insert(field.name.clone()) {
+                        return Err(KrillnotesError::Scripting(format!(
+                            "Duplicate field name '{}' in schema '{}'", field.name, name
+                        )));
+                    }
+                    group_fields.push(field);
+                }
+
+                field_groups.push(FieldGroup { name: group_name, fields: group_fields, visible, collapsed });
+            }
+        }
+
+        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types, field_groups })
     }
 }
 
