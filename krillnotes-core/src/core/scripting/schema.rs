@@ -147,6 +147,11 @@ pub struct Schema {
     /// AST of the script that defined this schema. Required to call `validate`
     /// and `visible` closures stored on individual fields and groups.
     pub ast: Option<rhai::AST>,
+    /// Schema version number — must be >= 1 and must not decrease on re-registration.
+    pub version: u32,
+    /// Migration closures keyed by target version (2..=version).
+    /// Each closure receives `#{ title, fields }` and returns the mutated map.
+    pub migrations: std::collections::BTreeMap<u32, rhai::FnPtr>,
 }
 
 impl Schema {
@@ -429,7 +434,50 @@ impl Schema {
             }
         }
 
-        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types, field_groups, ast: None })
+        // version is required — hard error if missing or < 1
+        let version = def
+            .get("version")
+            .and_then(|v| v.clone().try_cast::<i64>())
+            .ok_or_else(|| KrillnotesError::Scripting(
+                format!("Schema '{}' missing required 'version' key", name)
+            ))?;
+        if version < 1 {
+            return Err(KrillnotesError::Scripting(
+                format!("Schema '{}' version must be >= 1, got {}", name, version)
+            ));
+        }
+        let version = version as u32;
+
+        // migrate map is optional — keyed by target version, values are closures
+        let mut migrations = std::collections::BTreeMap::new();
+        if let Some(migrate_map) = def
+            .get("migrate")
+            .and_then(|v| v.clone().try_cast::<rhai::Map>())
+        {
+            for (key, val) in migrate_map.iter() {
+                let target_ver = key.to_string().parse::<u32>().map_err(|_| {
+                    KrillnotesError::Scripting(
+                        format!("Schema '{}' migrate key '{}' must be an integer", name, key)
+                    )
+                })?;
+                if target_ver < 2 || target_ver > version {
+                    return Err(KrillnotesError::Scripting(
+                        format!(
+                            "Schema '{}' migrate key {} out of range (must be 2..={})",
+                            name, target_ver, version
+                        )
+                    ));
+                }
+                let fn_ptr = val.clone().try_cast::<rhai::FnPtr>().ok_or_else(|| {
+                    KrillnotesError::Scripting(
+                        format!("Schema '{}' migrate[{}] must be a closure", name, target_ver)
+                    )
+                })?;
+                migrations.insert(target_ver, fn_ptr);
+            }
+        }
+
+        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types, field_groups, ast: None, version, migrations })
     }
 }
 

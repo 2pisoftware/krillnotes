@@ -887,7 +887,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![], ast: None,
+            attachment_types: vec![], field_groups: vec![], ast: None, version: 1, migrations: std::collections::BTreeMap::new(),
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -919,7 +919,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![], ast: None,
+            attachment_types: vec![], field_groups: vec![], ast: None, version: 1, migrations: std::collections::BTreeMap::new(),
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -951,7 +951,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![], ast: None,
+            attachment_types: vec![], field_groups: vec![], ast: None, version: 1, migrations: std::collections::BTreeMap::new(),
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -986,7 +986,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![], ast: None,
+            attachment_types: vec![], field_groups: vec![], ast: None, version: 1, migrations: std::collections::BTreeMap::new(),
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -1045,7 +1045,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![], ast: None,
+            attachment_types: vec![], field_groups: vec![], ast: None, version: 1, migrations: std::collections::BTreeMap::new(),
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -1381,7 +1381,7 @@ mod tests {
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
-            allow_attachments: false, attachment_types: vec![], field_groups: vec![], ast: None,
+            allow_attachments: false, attachment_types: vec![], field_groups: vec![], ast: None, version: 1, migrations: std::collections::BTreeMap::new(),
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);

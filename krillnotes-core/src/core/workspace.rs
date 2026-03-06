@@ -4785,7 +4785,7 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
         let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let starter_count = workspace.list_user_scripts().unwrap().len();
-        let source = "// @name: Test Script\n// @description: A test\nschema(\"TestType\", #{ fields: [] });";
+        let source = "// @name: Test Script\n// @description: A test\nschema(\"TestType\", #{ version: 1, fields: [] });";
         let (script, errors) = workspace.create_user_script(source).unwrap();
         assert!(errors.is_empty());
         assert_eq!(script.name, "Test Script");
@@ -4798,7 +4798,7 @@ mod tests {
     fn test_create_user_script_missing_name_fails() {
         let temp = NamedTempFile::new().unwrap();
         let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
-        let source = "// no name here\nschema(\"X\", #{ fields: [] });";
+        let source = "// no name here\nschema(\"X\", #{ version: 1, fields: [] });";
         let result = workspace.create_user_script(source);
         assert!(result.is_err());
     }
@@ -4807,10 +4807,10 @@ mod tests {
     fn test_update_user_script() {
         let temp = NamedTempFile::new().unwrap();
         let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
-        let source = "// @name: Original\nschema(\"Orig\", #{ fields: [] });";
+        let source = "// @name: Original\nschema(\"Orig\", #{ version: 1, fields: [] });";
         let (script, _) = workspace.create_user_script(source).unwrap();
 
-        let new_source = "// @name: Updated\nschema(\"Updated\", #{ fields: [] });";
+        let new_source = "// @name: Updated\nschema(\"Updated\", #{ version: 1, fields: [] });";
         let (updated, errors) = workspace.update_user_script(&script.id, new_source).unwrap();
         assert!(errors.is_empty());
         assert_eq!(updated.name, "Updated");
@@ -4821,7 +4821,7 @@ mod tests {
         let temp = NamedTempFile::new().unwrap();
         let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let initial_count = workspace.list_user_scripts().unwrap().len();
-        let source = "// @name: ToDelete\nschema(\"Del\", #{ fields: [] });";
+        let source = "// @name: ToDelete\nschema(\"Del\", #{ version: 1, fields: [] });";
         let (script, _) = workspace.create_user_script(source).unwrap();
         assert_eq!(workspace.list_user_scripts().unwrap().len(), initial_count + 1);
 
@@ -4833,7 +4833,7 @@ mod tests {
     fn test_toggle_user_script() {
         let temp = NamedTempFile::new().unwrap();
         let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
-        let source = "// @name: Toggle\nschema(\"Tog\", #{ fields: [] });";
+        let source = "// @name: Toggle\nschema(\"Tog\", #{ version: 1, fields: [] });";
         let (script, _) = workspace.create_user_script(source).unwrap();
         assert!(script.enabled);
 
@@ -4848,8 +4848,8 @@ mod tests {
         let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
         let starter_count = workspace.list_user_scripts().unwrap().len();
 
-        let s1 = "// @name: Second\nschema(\"S2\", #{ fields: [] });";
-        let s2 = "// @name: First\nschema(\"S1\", #{ fields: [] });";
+        let s1 = "// @name: Second\nschema(\"S2\", #{ version: 1, fields: [] });";
+        let s2 = "// @name: First\nschema(\"S1\", #{ version: 1, fields: [] });";
         workspace.create_user_script(s1).unwrap();
         let (second, _) = workspace.create_user_script(s2).unwrap();
         // Move "First" before all starters
@@ -4868,7 +4868,7 @@ mod tests {
         {
             let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
             workspace.create_user_script(
-                "// @name: TestOpen\nschema(\"OpenType\", #{ fields: [#{ name: \"x\", type: \"text\" }] });"
+                "// @name: TestOpen\nschema(\"OpenType\", #{ version: 1, fields: [#{ name: \"x\", type: \"text\" }] });"
             ).unwrap(); // (UserScript, Vec<ScriptError>) — result not inspected here
         }
 
@@ -4883,7 +4883,7 @@ mod tests {
         {
             let mut workspace = Workspace::create(temp.path(), "", None).unwrap();
             let (script, _) = workspace.create_user_script(
-                "// @name: Disabled\nschema(\"DisType\", #{ fields: [#{ name: \"x\", type: \"text\" }] });"
+                "// @name: Disabled\nschema(\"DisType\", #{ version: 1, fields: [#{ name: \"x\", type: \"text\" }] });"
             ).unwrap();
             workspace.toggle_user_script(&script.id, false).unwrap();
         }
@@ -5031,7 +5031,7 @@ mod tests {
         // Load a schema with a textarea field but no on_view hook.
         ws.create_user_script(
             r#"// @name: Memo
-schema("Memo", #{
+schema("Memo", #{ version: 1,
     fields: [
         #{ name: "body", type: "textarea", required: false }
     ]
@@ -5210,7 +5210,7 @@ schema("Memo", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.script_registry_mut().load_script(r#"
-            schema("Folder", #{
+            schema("Folder", #{ version: 1,
                 fields: [
                     #{ name: "count", type: "number", required: false },
                 ],
@@ -5221,7 +5221,7 @@ schema("Memo", #{
                     commit();
                 }
             });
-            schema("Item", #{
+            schema("Item", #{ version: 1,
                 fields: [],
             });
         "#, "test").unwrap();
@@ -5243,7 +5243,7 @@ schema("Memo", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.script_registry_mut().load_script(r#"
-            schema("Folder", #{
+            schema("Folder", #{ version: 1,
                 fields: [
                     #{ name: "count", type: "number", required: false },
                 ],
@@ -5253,7 +5253,7 @@ schema("Memo", #{
                     commit();
                 }
             });
-            schema("Item", #{
+            schema("Item", #{ version: 1,
                 fields: [],
             });
         "#, "test").unwrap();
@@ -5287,7 +5287,7 @@ schema("Memo", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
 
         ws.script_registry_mut().load_script(r#"
-            schema("Folder", #{
+            schema("Folder", #{ version: 1,
                 fields: [
                     #{ name: "count", type: "number", required: false },
                 ],
@@ -5298,7 +5298,7 @@ schema("Memo", #{
                     commit();
                 }
             });
-            schema("Item", #{
+            schema("Item", #{ version: 1,
                 fields: [],
             });
         "#, "test").unwrap();
@@ -5365,8 +5365,8 @@ register_menu("Sort A→Z", ["TextNote"], |note| {
 
         ws.create_user_script(r#"
 // @name: CreateAction
-schema("TaFolder", #{ fields: [] });
-schema("TaItem", #{ fields: [#{ name: "tag", type: "text", required: false }] });
+schema("TaFolder", #{ version: 1, fields: [] });
+schema("TaItem", #{ version: 1, fields: [#{ name: "tag", type: "text", required: false }] });
 register_menu("Add Item", ["TaFolder"], |folder| {
     let item = create_child(folder.id, "TaItem");
     set_title(item.id, "My Item");
@@ -5396,7 +5396,7 @@ register_menu("Add Item", ["TaFolder"], |folder| {
 
         ws.create_user_script(r#"
 // @name: UpdateAction
-schema("TaTask", #{ fields: [#{ name: "status", type: "text", required: false }] });
+schema("TaTask", #{ version: 1, fields: [#{ name: "status", type: "text", required: false }] });
 register_menu("Mark Done", ["TaTask"], |note| {
     set_title(note.id, "Done Task");
     set_field(note.id, "status", "done");
@@ -5424,8 +5424,8 @@ register_menu("Mark Done", ["TaTask"], |note| {
 
         ws.create_user_script(r#"
 // @name: NestedCreate
-schema("TaSprint", #{ fields: [] });
-schema("TaSubTask", #{ fields: [] });
+schema("TaSprint", #{ version: 1, fields: [] });
+schema("TaSubTask", #{ version: 1, fields: [] });
 register_menu("Add Sprint With Task", ["TaSprint"], |sprint| {
     let child_sprint = create_child(sprint.id, "TaSprint");
     set_title(child_sprint.id, "Child Sprint");
@@ -5458,8 +5458,8 @@ register_menu("Add Sprint With Task", ["TaSprint"], |sprint| {
 
         ws.create_user_script(r#"
 // @name: ErrorAction
-schema("TaErrFolder", #{ fields: [] });
-schema("TaErrItem", #{ fields: [] });
+schema("TaErrFolder", #{ version: 1, fields: [] });
+schema("TaErrItem", #{ version: 1, fields: [] });
 register_menu("Create Then Fail", ["TaErrFolder"], |folder| {
     let item = create_child(folder.id, "TaErrItem");
     set_title(item.id, "Orphan");
@@ -5484,8 +5484,8 @@ register_menu("Create Then Fail", ["TaErrFolder"], |folder| {
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         ws.create_user_script(r#"
 // @name: TAGated
-schema("TAFolder", #{ fields: [] });
-schema("TAItem", #{
+schema("TAFolder", #{ version: 1, fields: [] });
+schema("TAItem", #{ version: 1,
     fields: [
         #{ name: "value", type: "text", required: false },
     ],
@@ -5610,7 +5610,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_sync_note_links_inserts_row() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let target = create_note_with_type(&mut ws, "LinkTestType");
         let source = create_note_with_type(&mut ws, "LinkTestType");
@@ -5631,7 +5631,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_sync_note_links_removes_row_when_cleared() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let target = create_note_with_type(&mut ws, "LinkTestType");
         let source = create_note_with_type(&mut ws, "LinkTestType");
@@ -5656,7 +5656,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_clear_links_to_nulls_field_in_source_note() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let target = create_note_with_type(&mut ws, "LinkTestType");
         let source = create_note_with_type(&mut ws, "LinkTestType");
@@ -5685,7 +5685,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_delete_note_nulls_links_in_other_notes() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let target = create_note_with_type(&mut ws, "LinkTestType");
         let source = create_note_with_type(&mut ws, "LinkTestType");
@@ -5706,7 +5706,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_delete_note_recursive_clears_links_for_entire_subtree() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let parent = create_note_with_type(&mut ws, "LinkTestType");
         let child_id = ws.create_note(&parent.id, AddPosition::AsChild, "LinkTestType").unwrap();
@@ -5731,7 +5731,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_get_notes_with_link_returns_linking_notes() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let target = create_note_with_type(&mut ws, "LinkTestType");
         let source1 = create_note_with_type(&mut ws, "LinkTestType");
@@ -5753,7 +5753,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_get_notes_with_link_returns_empty_for_unlinked_note() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let note = create_note_with_type(&mut ws, "LinkTestType");
         let results = ws.get_notes_with_link(&note.id).unwrap();
@@ -5765,7 +5765,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_search_notes_matches_title() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [] })"#
         );
         let note = create_note_with_type(&mut ws, "LinkTestType");
         ws.update_note(&note.id, "Fix login bug".into(), BTreeMap::new()).unwrap();
@@ -5778,7 +5778,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_search_notes_filters_by_target_type() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("TaskNote", #{ fields: [] }); schema("OtherNote", #{ fields: [] })"#
+            r#"schema("TaskNote", #{ version: 1, fields: [] }); schema("OtherNote", #{ version: 1, fields: [] })"#
         );
         let task = create_note_with_type(&mut ws, "TaskNote");
         ws.update_note(&task.id, "login task".into(), BTreeMap::new()).unwrap();
@@ -5793,7 +5793,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_search_notes_matches_text_fields() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("ContactNote", #{ fields: [#{ name: "email", type: "email" }] })"#
+            r#"schema("ContactNote", #{ version: 1, fields: [#{ name: "email", type: "email" }] })"#
         );
         let c = create_note_with_type(&mut ws, "ContactNote");
         let mut fields = BTreeMap::new();
@@ -5810,7 +5810,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_rebuild_note_links_index_repopulates_from_fields_json() {
         let mut ws = create_test_workspace_with_schema(
-            r#"schema("LinkTestType", #{ fields: [#{ name: "link", type: "note_link" }] })"#
+            r#"schema("LinkTestType", #{ version: 1, fields: [#{ name: "link", type: "note_link" }] })"#
         );
         let target = create_note_with_type(&mut ws, "LinkTestType");
         let source = create_note_with_type(&mut ws, "LinkTestType");
@@ -6485,7 +6485,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_on_save_gated_model() {
         let mut ws = create_test_workspace_with_schema(r#"
-            schema("GatedTest", #{
+            schema("GatedTest", #{ version: 1,
                 fields: [
                     #{ name: "body", type: "text", required: false },
                 ],
@@ -6506,7 +6506,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
     #[test]
     fn test_old_style_on_save_raises_error() {
         let mut ws = create_test_workspace_with_schema(r#"
-            schema("OldStyle", #{
+            schema("OldStyle", #{ version: 1,
                 fields: [
                     #{ name: "body", type: "text", required: false },
                 ],
@@ -6535,7 +6535,7 @@ register_menu("Add Item", ["TAFolder"], |note| {
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         ws.create_user_script(r#"
 // @name: PipelineOk
-schema("PipeItem", #{
+schema("PipeItem", #{ version: 1,
     fields: [
         #{ name: "value", type: "text", required: false },
     ],
@@ -6556,7 +6556,7 @@ schema("PipeItem", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         ws.create_user_script(r#"
 // @name: PipelineValidate
-schema("RatedItem", #{
+schema("RatedItem", #{ version: 1,
     fields: [
         #{
             name: "score", type: "number", required: false,
@@ -6584,7 +6584,7 @@ schema("RatedItem", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         ws.create_user_script(r#"
 // @name: PipelineReject
-schema("RejectItem", #{
+schema("RejectItem", #{ version: 1,
     fields: [],
     on_save: |note| {
         reject("Always rejected");
@@ -6623,7 +6623,7 @@ schema("RejectItem", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         ws.create_user_script(r#"
 // @name: PipelineGrouped
-schema("Grouped", #{
+schema("Grouped", #{ version: 1,
     fields: [
         #{ name: "category", type: "select", options: ["A", "B"] }
     ],
@@ -6705,7 +6705,7 @@ schema("Grouped", #{
         let mut ws = Workspace::create(temp.path(), "", None).unwrap();
         ws.create_user_script(r#"
 // @name: RequiredField
-schema("RequiredItem", #{
+schema("RequiredItem", #{ version: 1,
     fields: [
         #{ name: "sku", type: "text", required: true }
     ],
