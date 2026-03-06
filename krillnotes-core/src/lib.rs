@@ -31,6 +31,7 @@ pub use core::{
     scripting::{FieldDefinition, HookRegistry, QueryContext, Schema, ScriptError, ScriptRegistry, StarterScript},
     hlc::{HlcClock, HlcTimestamp},
     identity::{IdentityFile, IdentityManager, IdentitySettings, IdentityRef, WorkspaceBinding, UnlockedIdentity, SwarmIdFile},
+    save_transaction::{SaveResult, SaveTransaction, SoftError},
     storage::Storage,
     undo::{RetractInverse, UndoResult},
     user_script::UserScript,

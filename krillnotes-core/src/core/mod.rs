@@ -19,6 +19,7 @@ pub mod error;
 pub mod note;
 pub mod operation;
 pub mod operation_log;
+pub mod save_transaction;
 pub mod scripting;
 pub mod storage;
 pub mod user_script;
