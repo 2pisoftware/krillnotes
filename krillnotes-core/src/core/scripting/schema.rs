@@ -658,6 +658,9 @@ impl SchemaRegistry {
     ///
     /// Returns `Ok(None)` when no hook is registered for the parent schema.
     /// Returns `Ok(Some(AddChildResult))` with optional parent/child updates on success.
+    ///
+    /// The hook must use the gated SaveTransaction API (`set_field`, `set_title`, `commit`).
+    /// Hooks that return a map (old-style direct mutation) are rejected with a migration error.
     pub(super) fn run_on_add_child_hook(
         &self,
         engine: &Engine,
@@ -706,66 +709,89 @@ impl SchemaRegistry {
         child_map.insert("title".into(),     Dynamic::from(child_title.to_string()));
         child_map.insert("fields".into(),    Dynamic::from(c_fields_map));
 
+        // Pre-seed the SaveTransaction with both parent and child so that
+        // set_field / set_title calls inside the hook can target either note.
+        let mut tx = SaveTransaction::new();
+        tx.register_existing_note(
+            parent_id.to_string(),
+            parent_type.to_string(),
+            parent_title.to_string(),
+            parent_fields.clone(),
+        );
+        tx.register_existing_note(
+            child_id.to_string(),
+            child_type.to_string(),
+            child_title.to_string(),
+            child_fields.clone(),
+        );
+        super::set_save_tx(tx);
+
         let result = entry
             .fn_ptr
-            .call::<Dynamic>(engine, &entry.ast, (Dynamic::from(parent_map), Dynamic::from(child_map)))
-            .map_err(|e| KrillnotesError::Scripting(
-                format!("on_add_child hook error in '{}': {e}", entry.script_name)
-            ))?;
+            .call::<Dynamic>(engine, &entry.ast, (Dynamic::from(parent_map), Dynamic::from(child_map)));
 
-        // If the hook returned unit (no-op), treat as no modification
-        if result.is_unit() {
-            return Ok(Some(AddChildResult { parent: None, child: None }));
+        // Always take the SaveTransaction back before inspecting errors.
+        let tx = super::take_save_tx().unwrap_or_default();
+
+        let result = match result {
+            Err(e) => return Err(KrillnotesError::Scripting(
+                format!("on_add_child hook error in '{}': {e}", entry.script_name)
+            )),
+            Ok(v) => v,
+        };
+
+        // Old-style hooks return a map #{ parent: ..., child: ... }.
+        // Detect and reject with a clear migration message.
+        if result.is::<Map>() {
+            return Err(KrillnotesError::Scripting(
+                format!(
+                    "on_add_child hook in '{}' uses the old direct-mutation style (returns a map). \
+                     Migrate to the gated model: use set_field(id, \"field\", value), \
+                     set_title(id, \"title\"), and commit() instead.",
+                    entry.script_name
+                )
+            ));
         }
 
-        let result_map = result.try_cast::<Map>().ok_or_else(|| {
-            KrillnotesError::Scripting(
-                "on_add_child hook must return a map #{ parent: ..., child: ... } or ()".to_string()
-            )
-        })?;
-
-        // Extract optional parent modifications
-        let parent_update = if let Some(pm) = result_map.get("parent").and_then(|v| v.clone().try_cast::<Map>()) {
-            let new_title = pm.get("title")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result parent 'title' must be a string".to_string()))?;
-            let new_fields_dyn = pm.get("fields")
-                .and_then(|v| v.clone().try_cast::<Map>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result parent 'fields' must be a map".to_string()))?;
-            let mut new_fields = BTreeMap::new();
-            for field_def in &parent_schema.fields {
-                let dyn_val = new_fields_dyn.get(field_def.name.as_str()).cloned().unwrap_or(Dynamic::UNIT);
-                let fv = dynamic_to_field_value(dyn_val, &field_def.field_type)
-                    .map_err(|e| KrillnotesError::Scripting(format!("parent field '{}': {e}", field_def.name)))?;
-                new_fields.insert(field_def.name.clone(), fv);
-            }
-            Some((new_title, new_fields))
-        } else {
-            None
-        };
-
-        // Extract optional child modifications
-        let child_update = if let Some(cm) = result_map.get("child").and_then(|v| v.clone().try_cast::<Map>()) {
-            let new_title = cm.get("title")
-                .and_then(|v| v.clone().try_cast::<String>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result child 'title' must be a string".to_string()))?;
-            let new_fields_dyn = cm.get("fields")
-                .and_then(|v| v.clone().try_cast::<Map>())
-                .ok_or_else(|| KrillnotesError::Scripting("hook result child 'fields' must be a map".to_string()))?;
-            let mut new_fields = BTreeMap::new();
-            for field_def in &child_schema.fields {
-                let dyn_val = new_fields_dyn.get(field_def.name.as_str()).cloned().unwrap_or(Dynamic::UNIT);
-                let fv = dynamic_to_field_value(dyn_val, &field_def.field_type)
-                    .map_err(|e| KrillnotesError::Scripting(format!("child field '{}': {e}", field_def.name)))?;
-                new_fields.insert(field_def.name.clone(), fv);
-            }
-            Some((new_title, new_fields))
-        } else {
-            None
-        };
+        // Extract modifications from the transaction's pending notes.
+        let parent_update = extract_note_update(&tx, parent_id, parent_schema);
+        let child_update  = extract_note_update(&tx, child_id,  child_schema);
 
         Ok(Some(AddChildResult { parent: parent_update, child: child_update }))
     }
+}
+
+/// Extracts title and fields updates from a completed [`SaveTransaction`] for one note.
+///
+/// Returns `Some((title, fields))` if the note has any pending changes, or `None`
+/// if the hook left it unmodified.
+fn extract_note_update(
+    tx: &SaveTransaction,
+    note_id: &str,
+    schema: &Schema,
+) -> Option<(String, BTreeMap<String, FieldValue>)> {
+    let pending = tx.pending_notes.get(note_id)?;
+
+    // Only return Some if the hook actually changed something.
+    let title_changed  = pending.pending_title.is_some();
+    let fields_changed = !pending.pending_fields.is_empty();
+
+    if !title_changed && !fields_changed {
+        return None;
+    }
+
+    let new_title = pending.effective_title().to_string();
+
+    // Build the effective fields map restricted to schema-defined fields.
+    let effective = pending.effective_fields();
+    let mut new_fields = BTreeMap::new();
+    for field_def in schema.all_fields() {
+        if let Some(fv) = effective.get(&field_def.name) {
+            new_fields.insert(field_def.name.clone(), fv.clone());
+        }
+    }
+
+    Some((new_title, new_fields))
 }
 
 /// Converts a [`FieldValue`] to a Rhai [`Dynamic`] for passing into hook closures.

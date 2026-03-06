@@ -2699,8 +2699,20 @@ impl Workspace {
             });
         }
 
+        // Build final_fields: start from schema defaults, overlay existing note values,
+        // then apply user-provided visible-field values. Hidden-group required fields
+        // retain their existing/default values so update_note's validate_required_fields
+        // doesn't reject them (that check is visibility-unaware).
+        let mut final_fields = schema.default_fields();
+        for (k, v) in &note.fields {
+            final_fields.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &fields {
+            final_fields.insert(k.clone(), v.clone());
+        }
+
         // Steps 4-7: update_note (runs on_save hook + writes to DB).
-        match self.update_note(note_id, title, fields) {
+        match self.update_note(note_id, title, final_fields) {
             Ok(updated) => Ok(SaveResult::Ok(updated)),
             Err(KrillnotesError::ValidationFailed(msg)) => {
                 Ok(SaveResult::ValidationErrors {
@@ -5089,9 +5101,10 @@ schema("Memo", #{
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    parent_note.title = "Folder (1)";
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    set_title(parent_note.id, "Folder (1)");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -5121,8 +5134,9 @@ schema("Memo", #{
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    commit();
                 }
             });
             schema("Item", #{
@@ -5164,9 +5178,10 @@ schema("Memo", #{
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    parent_note.title = "Folder (1)";
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    set_title(parent_note.id, "Folder (1)");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -6471,6 +6486,133 @@ schema("RejectItem", #{
                 assert!(!note_errors.is_empty(), "expected note_errors from reject()");
             }
             other => panic!("expected ValidationErrors, got: {:?}", other),
+        }
+    }
+
+    /// Integration test: full pipeline with field groups, conditional visibility, validate
+    /// closure, and note-level reject.
+    ///
+    /// Schema:
+    ///   - top-level field "type" (select: ["A", "B"])
+    ///   - field_group "B Details" visible only when type == "B"
+    ///     - field "b_value" (number, required, validate: must be > 0)
+    ///   - on_save: reject if type == "B" and b_value > 100
+    ///
+    /// Tests:
+    ///   1. type="A" → success (B Details hidden, b_value not required)
+    ///   2. type="B", b_value=-1 → validate error on b_value
+    ///   3. type="B", b_value=200 → note-level reject error
+    ///   4. type="B", b_value=50 → success
+    #[test]
+    fn test_full_pipeline_groups_validation_reject() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: PipelineGrouped
+schema("Grouped", #{
+    fields: [
+        #{ name: "category", type: "select", options: ["A", "B"] }
+    ],
+    field_groups: [
+        #{
+            name: "B Details",
+            collapsed: false,
+            visible: |fields| fields["category"] == "B",
+            fields: [
+                #{
+                    name: "b_value",
+                    type: "number",
+                    required: true,
+                    validate: |v| if v <= 0.0 { "Must be positive" } else { () }
+                }
+            ]
+        }
+    ],
+    on_save: |note| {
+        if note.fields.category == "B" && note.fields.b_value > 100.0 {
+            reject("b_value must be <= 100 for category B");
+        }
+        commit();
+    }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "Grouped").unwrap();
+
+        // Test 1: category="A" — succeeds; b_value is in a hidden group, not required
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("A".to_string()));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        assert!(matches!(result, SaveResult::Ok(_)), "test 1 failed: {:?}", result);
+
+        // Test 2: category="B", b_value=-1 — validate closure error on b_value
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("B".to_string()));
+        fields.insert("b_value".to_string(), FieldValue::Number(-1.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        match result {
+            SaveResult::ValidationErrors { field_errors, .. } => {
+                assert!(field_errors.contains_key("b_value"), "expected b_value error, got: {:?}", field_errors);
+            }
+            other => panic!("test 2 failed: expected ValidationErrors, got: {:?}", other),
+        }
+
+        // Test 3: category="B", b_value=200 — note-level reject
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("B".to_string()));
+        fields.insert("b_value".to_string(), FieldValue::Number(200.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        match result {
+            SaveResult::ValidationErrors { note_errors, .. } => {
+                assert!(!note_errors.is_empty(), "test 3 failed: expected note_errors");
+            }
+            other => panic!("test 3 failed: expected ValidationErrors, got: {:?}", other),
+        }
+
+        // Test 4: category="B", b_value=50 — success
+        let mut fields = BTreeMap::new();
+        fields.insert("category".to_string(), FieldValue::Text("B".to_string()));
+        fields.insert("b_value".to_string(), FieldValue::Number(50.0));
+        let result = ws.save_note_with_pipeline(&note_id, "Note".to_string(), fields).unwrap();
+        assert!(matches!(result, SaveResult::Ok(_)), "test 4 failed: {:?}", result);
+    }
+
+    /// Integration test: tree action that creates a child; the required field is left empty.
+    /// The save pipeline should detect the required field and return a ValidationErrors result
+    /// (no note is persisted).
+    ///
+    /// NOTE: tree actions use SaveTransaction internally but do NOT run the full
+    /// save_note_with_pipeline (they commit the transaction directly). Required-field
+    /// checking via save_note_with_pipeline is the frontend save path. This test verifies
+    /// that save_note_with_pipeline catches the missing required field.
+    #[test]
+    fn test_tree_action_validates_created_notes() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(temp.path(), "", None).unwrap();
+        ws.create_user_script(r#"
+// @name: RequiredField
+schema("RequiredItem", #{
+    fields: [
+        #{ name: "sku", type: "text", required: true }
+    ],
+    on_save: |note| { commit(); }
+});
+        "#).unwrap();
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        let note_id = ws.create_note(&root.id, AddPosition::AsChild, "RequiredItem").unwrap();
+
+        // Save without providing the required "sku" field → should return ValidationErrors
+        let result = ws.save_note_with_pipeline(
+            &note_id,
+            "Item".to_string(),
+            BTreeMap::new(), // no fields provided
+        ).unwrap();
+
+        match result {
+            SaveResult::ValidationErrors { field_errors, .. } => {
+                assert!(field_errors.contains_key("sku"), "expected sku required error, got: {:?}", field_errors);
+            }
+            other => panic!("expected ValidationErrors for missing required field, got: {:?}", other),
         }
     }
 }

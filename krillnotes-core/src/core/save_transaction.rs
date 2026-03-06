@@ -94,6 +94,29 @@ impl SaveTransaction {
         tx
     }
 
+    /// Registers an existing note in this transaction (for multi-note hooks such as on_add_child).
+    ///
+    /// Unlike [`for_existing_note`](Self::for_existing_note), this method adds a note to an
+    /// already-created transaction so that multiple existing notes can be pre-seeded at once.
+    pub fn register_existing_note(
+        &mut self,
+        note_id: String,
+        node_type: String,
+        title: String,
+        fields: BTreeMap<String, FieldValue>,
+    ) {
+        self.pending_notes.insert(note_id.clone(), PendingNote {
+            note_id,
+            is_new: false,
+            parent_id: None,
+            node_type,
+            original_fields: fields,
+            pending_fields: BTreeMap::new(),
+            original_title: title,
+            pending_title: None,
+        });
+    }
+
     /// Registers a newly created child note in the transaction.
     pub fn add_new_note(
         &mut self,

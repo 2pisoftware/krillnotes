@@ -511,10 +511,28 @@ impl ScriptRegistry {
         // ── Gated operations API (set_field / set_title / reject / commit) ────
         // These functions write into the thread-local SaveTransaction set by the
         // hook runner before calling the Rhai closure.
-        engine.register_fn("set_field",
-            |note_id: String, field_name: String, value: Dynamic|
-            -> std::result::Result<Dynamic, Box<EvalAltResult>>
-            {
+        //
+        // set_field is registered via register_raw_fn so that it receives a
+        // NativeCallContext, which allows calling validate FnPtrs without
+        // needing a separate reference to the Engine.
+        let set_field_schemas = schema_registry.schemas_arc();
+        use rhai::NativeCallContext;
+        // register_raw_fn is used so the closure receives a NativeCallContext,
+        // which allows calling validate FnPtrs (closures) without needing a
+        // separate engine reference. TypeId::of::<Dynamic>() for the third
+        // argument means Rhai will dispatch any value type to this function.
+        engine.register_raw_fn(
+            "set_field",
+            &[
+                std::any::TypeId::of::<rhai::ImmutableString>(),
+                std::any::TypeId::of::<rhai::ImmutableString>(),
+                std::any::TypeId::of::<Dynamic>(),
+            ],
+            move |ctx: NativeCallContext, args: &mut [&mut Dynamic]| -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+                let note_id    = args[0].clone().cast::<rhai::ImmutableString>().to_string();
+                let field_name = args[1].clone().cast::<rhai::ImmutableString>().to_string();
+                let value      = args[2].clone();
+
                 // Infer FieldValue from the Dynamic type.
                 let fv = if value.is::<f64>() {
                     FieldValue::Number(value.cast::<f64>())
@@ -529,6 +547,50 @@ impl ScriptRegistry {
                     })?;
                     FieldValue::Text(s)
                 };
+
+                // Run the field's validate closure (if any) as a hard error.
+                // Look up the note's schema type from the in-flight SAVE_TX.
+                let node_type_opt: Option<String> = SAVE_TX.with(|cell| {
+                    cell.borrow()
+                        .as_ref()
+                        .and_then(|tx| tx.pending_notes.get(&note_id).map(|p| p.node_type.clone()))
+                });
+                if let Some(node_type) = node_type_opt {
+                    // Clone the data we need before releasing the lock.
+                    let (validate_fn_opt, ast_opt) = {
+                        let schemas = set_field_schemas.lock().unwrap();
+                        if let Some(schema) = schemas.get(&node_type) {
+                            let field_def = schema.all_fields()
+                                .into_iter()
+                                .find(|fd| fd.name == field_name)
+                                .cloned();
+                            if let Some(fd) = field_def {
+                                (fd.validate.clone(), schema.ast.clone())
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    };
+                    // Call validate if both closure and AST are available.
+                    if let (Some(validate_fn), Some(ast)) = (validate_fn_opt, ast_opt) {
+                        let dyn_val = schema::field_value_to_dynamic(&fv);
+                        // Temporarily push the schema AST into the call context.
+                        let validate_result: rhai::Dynamic = validate_fn
+                            .call_within_context::<rhai::Dynamic>(&ctx, (dyn_val,))
+                            .map_err(|e| -> Box<EvalAltResult> {
+                                format!("set_field validate error for field '{}': {e}", field_name).into()
+                            })?;
+                        // Validate returns () for valid, or a String error message.
+                        if let Some(err_msg) = validate_result.try_cast::<String>() {
+                            return Err(err_msg.into());
+                        }
+                        // () or non-string return = valid; proceed normally.
+                        let _ = ast; // ast was used via ctx which carries the active AST
+                    }
+                }
+
                 with_save_tx(|tx| tx.set_field(&note_id, field_name, fv))?;
                 Ok(Dynamic::UNIT)
             }
@@ -2087,10 +2149,11 @@ mod tests {
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = parent_note.fields["count"] + 1.0;
-                    parent_note.title = "Folder (" + parent_note.fields["count"].to_int().to_string() + ")";
-                    child_note.title = "Child from hook";
-                    #{ parent: parent_note, child: child_note }
+                    let new_count = parent_note.fields["count"] + 1.0;
+                    set_field(parent_note.id, "count", new_count);
+                    set_title(parent_note.id, "Folder (" + new_count.to_int().to_string() + ")");
+                    set_title(child_note.id, "Child from hook");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -2181,8 +2244,8 @@ mod tests {
                     #{ name: "count", type: "number", required: false },
                 ],
                 on_add_child: |parent_note, child_note| {
-                    parent_note.fields["count"] = 5.0;
-                    #{ parent: parent_note }
+                    set_field(parent_note.id, "count", 5.0);
+                    commit();
                 }
             });
             schema("Item", #{
@@ -2214,8 +2277,8 @@ mod tests {
             schema("Folder", #{
                 fields: [],
                 on_add_child: |parent_note, child_note| {
-                    child_note.title = "Initialized by hook";
-                    #{ child: child_note }
+                    set_title(child_note.id, "Initialized by hook");
+                    commit();
                 }
             });
             schema("Item", #{
@@ -2263,6 +2326,41 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("my_test_script"), "error should include script name, got: {msg}");
         assert!(msg.contains("on_add_child"), "error should mention hook name, got: {msg}");
+    }
+
+    #[test]
+    fn test_on_add_child_hook_old_style_returns_helpful_error() {
+        // A hook that returns a map (old-style) should be rejected with a migration message.
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Folder", #{
+                fields: [
+                    #{ name: "count", type: "number", required: false },
+                ],
+                on_add_child: |parent_note, child_note| {
+                    parent_note.fields["count"] = 1.0;
+                    #{ parent: parent_note, child: child_note }
+                }
+            });
+            schema("Item", #{
+                fields: [],
+            });
+        "#, "my_script").unwrap();
+
+        let mut parent_fields = BTreeMap::new();
+        parent_fields.insert("count".to_string(), FieldValue::Number(0.0));
+
+        let err = registry
+            .run_on_add_child_hook(
+                "Folder",
+                "p-id", "Folder", "Title", &parent_fields,
+                "c-id", "Item",   "Child", &std::collections::BTreeMap::new(),
+            )
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("my_script"), "error should include script name, got: {msg}");
+        assert!(msg.contains("gated model"), "error should mention migration, got: {msg}");
     }
 
     #[test]
@@ -3049,6 +3147,83 @@ mod tests {
 
         let vis = registry.evaluate_group_visibility("Simple", &Default::default()).unwrap();
         assert_eq!(vis.get("Always Visible"), Some(&true));
+    }
+
+    // ── set_field validate hard error ─────────────────────────────────────────
+
+    #[test]
+    fn test_set_field_validate_hard_error() {
+        // When set_field is called from an on_save hook with a value that fails
+        // the field's validate closure, the hook should abort with a hard error
+        // that contains the validation message.
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Validated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Negative!" } else { () },
+                    }
+                ],
+                on_save: |note| {
+                    set_field(note.id, "score", -1.0);
+                    commit();
+                }
+            });
+        "#, "test").unwrap();
+
+        let result = registry.run_on_save_hook(
+            "Validated",
+            "n1",
+            "Validated",
+            "Test Note",
+            &Default::default(),
+        );
+
+        assert!(result.is_err(), "Expected hard error from validate in set_field");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Negative!"),
+            "Expected 'Negative!' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_set_field_validate_passes_when_valid() {
+        // When set_field is called with a value that passes validation, the hook
+        // should succeed normally.
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Validated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Negative!" } else { () },
+                    }
+                ],
+                on_save: |note| {
+                    set_field(note.id, "score", 5.0);
+                    commit();
+                }
+            });
+        "#, "test").unwrap();
+
+        let result = registry.run_on_save_hook(
+            "Validated",
+            "n1",
+            "Validated",
+            "Test Note",
+            &Default::default(),
+        );
+
+        assert!(result.is_ok(), "Expected success with valid value, got: {:?}", result.err());
+        let tx = result.unwrap().expect("hook should return a transaction");
+        assert!(tx.committed, "Transaction should be committed");
+        let pending = tx.pending_notes.get("n1").expect("note should be in tx");
+        assert_eq!(
+            pending.pending_fields.get("score"),
+            Some(&FieldValue::Number(5.0)),
+        );
     }
 
 }
