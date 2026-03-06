@@ -224,8 +224,10 @@ impl ScriptRegistry {
             }
             schema_owners_arc.lock().unwrap().insert(name.clone(), script_name.clone());
 
-            let s = Schema::parse_from_rhai(&name, &def)
+            let mut s = Schema::parse_from_rhai(&name, &def)
                 .map_err(|e| -> Box<EvalAltResult> { e.to_string().into() })?;
+            // Store the script AST so validate/visible closures can be called later.
+            s.ast = schema_ast_arc.lock().unwrap().clone();
             schemas_arc.lock().unwrap().insert(name.clone(), s);
 
             // Extract optional on_save closure.
@@ -887,6 +889,110 @@ impl ScriptRegistry {
         self.schema_registry.exists(name)
     }
 
+    /// Runs the `validate` closure for a single field, if one is registered.
+    ///
+    /// Returns `Ok(None)` when the field is valid or has no validate closure.
+    /// Returns `Ok(Some(msg))` when the closure returns an error message.
+    pub fn validate_field(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        value: &crate::core::note::FieldValue,
+    ) -> crate::Result<Option<String>> {
+        let schema = self.schema_registry.get(schema_name)?;
+        let Some(ast) = schema.ast.as_ref() else { return Ok(None); };
+
+        let field = schema.all_fields().into_iter()
+            .find(|f| f.name == field_name);
+        let Some(field_def) = field else { return Ok(None); };
+        let Some(fn_ptr) = field_def.validate.as_ref() else { return Ok(None); };
+
+        let dyn_value = schema::field_value_to_dynamic(value);
+        let result = fn_ptr
+            .call::<rhai::Dynamic>(&self.engine, ast, (dyn_value,))
+            .map_err(|e| KrillnotesError::Scripting(
+                format!("[{schema_name}] validate {field_name:?}: {e}")
+            ))?;
+
+        // () = valid; String = error message
+        if result.is_unit() {
+            Ok(None)
+        } else if let Some(msg) = result.try_cast::<String>() {
+            Ok(Some(msg))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Runs `validate` closures for all fields that have them and have a value.
+    ///
+    /// Returns a map of `field_name → error_message` for each invalid field.
+    pub fn validate_fields(
+        &self,
+        schema_name: &str,
+        fields: &std::collections::BTreeMap<String, crate::core::note::FieldValue>,
+    ) -> crate::Result<std::collections::BTreeMap<String, String>> {
+        let mut errors = std::collections::BTreeMap::new();
+        let schema = self.schema_registry.get(schema_name)?;
+        let Some(ast) = schema.ast.as_ref() else { return Ok(errors); };
+
+        for field_def in schema.all_fields() {
+            let Some(fn_ptr) = field_def.validate.as_ref() else { continue; };
+            let Some(value) = fields.get(&field_def.name) else { continue; };
+
+            let dyn_value = schema::field_value_to_dynamic(value);
+            let result = fn_ptr
+                .call::<rhai::Dynamic>(&self.engine, ast, (dyn_value,))
+                .map_err(|e| KrillnotesError::Scripting(
+                    format!("[{schema_name}] validate {:?}: {e}", field_def.name)
+                ))?;
+
+            if let Some(msg) = result.try_cast::<String>() {
+                errors.insert(field_def.name.clone(), msg);
+            }
+        }
+        Ok(errors)
+    }
+
+    /// Evaluates the `visible` closure for each `FieldGroup`.
+    ///
+    /// Returns a map of `group_name → bool`.
+    /// Groups with no `visible` closure are always `true`.
+    pub fn evaluate_group_visibility(
+        &self,
+        schema_name: &str,
+        fields: &std::collections::BTreeMap<String, crate::core::note::FieldValue>,
+    ) -> crate::Result<std::collections::BTreeMap<String, bool>> {
+        let schema = self.schema_registry.get(schema_name)?;
+        let Some(ast) = schema.ast.as_ref() else {
+            return Ok(schema.field_groups.iter()
+                .map(|g| (g.name.clone(), true))
+                .collect());
+        };
+
+        let mut fields_map = rhai::Map::new();
+        for (k, v) in fields {
+            fields_map.insert(k.as_str().into(), schema::field_value_to_dynamic(v));
+        }
+
+        let mut result = std::collections::BTreeMap::new();
+        for group in &schema.field_groups {
+            let visible = match group.visible.as_ref() {
+                None => true,
+                Some(fn_ptr) => {
+                    let ret = fn_ptr
+                        .call::<rhai::Dynamic>(&self.engine, ast, (Dynamic::from_map(fields_map.clone()),))
+                        .map_err(|e| KrillnotesError::Scripting(
+                            format!("[{schema_name}] visible {:?}: {e}", group.name)
+                        ))?;
+                    ret.try_cast::<bool>().unwrap_or(true)
+                }
+            };
+            result.insert(group.name.clone(), visible);
+        }
+        Ok(result)
+    }
+
     /// Sets the per-run note and attachment context before executing a hook.
     pub fn set_run_context(&self, note: crate::core::note::Note, attachments: Vec<AttachmentMeta>) {
         *self.run_context.lock().expect("run_context poisoned") =
@@ -1115,7 +1221,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert_eq!(defaults.len(), 2);
@@ -1163,7 +1269,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("birthday"), Some(FieldValue::Date(None))));
@@ -1191,7 +1297,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("email_addr"), Some(FieldValue::Email(s)) if s.is_empty()));
@@ -2639,7 +2745,7 @@ mod tests {
             allowed_parent_types: vec![],
             allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
         let defaults = schema.default_fields();
         assert!(matches!(defaults.get("linked_note"), Some(FieldValue::NoteLink(None))));
@@ -2838,6 +2944,111 @@ mod tests {
             .eval::<String>(r#"embed_media("https://example.com")"#)
             .expect("eval failed");
         assert!(result.is_empty(), "got: {result}");
+    }
+
+    // ── validate_field ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_field_returns_error_on_invalid() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Rated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Must be positive" } else { () },
+                    }
+                ]
+            });
+        "#, "validate_test").unwrap();
+
+        let err = registry.validate_field(
+            "Rated", "score",
+            &crate::core::note::FieldValue::Number(-1.0)
+        ).unwrap();
+        assert_eq!(err, Some("Must be positive".into()));
+    }
+
+    #[test]
+    fn test_validate_field_returns_none_on_valid() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Rated", #{
+                fields: [
+                    #{
+                        name: "score", type: "number", required: false,
+                        validate: |v| if v < 0.0 { "Must be positive" } else { () },
+                    }
+                ]
+            });
+        "#, "validate_test").unwrap();
+
+        let err = registry.validate_field(
+            "Rated", "score",
+            &crate::core::note::FieldValue::Number(5.0)
+        ).unwrap();
+        assert_eq!(err, None);
+    }
+
+    #[test]
+    fn test_validate_field_no_closure_returns_none() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Plain", #{
+                fields: [ #{ name: "title", type: "text", required: false } ]
+            });
+        "#, "validate_test").unwrap();
+
+        let err = registry.validate_field(
+            "Plain", "title",
+            &crate::core::note::FieldValue::Text("anything".into())
+        ).unwrap();
+        assert_eq!(err, None);
+    }
+
+    // ── evaluate_group_visibility ─────────────────────────────────────────────
+
+    #[test]
+    fn test_evaluate_group_visibility_with_closure() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Typed", #{
+                fields: [],
+                field_groups: [
+                    #{
+                        name: "Special Group",
+                        fields: [],
+                        visible: |fields| fields["kind"] == "special",
+                    }
+                ]
+            });
+        "#, "visibility_test").unwrap();
+
+        let mut fields_special = std::collections::BTreeMap::new();
+        fields_special.insert("kind".into(), crate::core::note::FieldValue::Text("special".into()));
+        let vis = registry.evaluate_group_visibility("Typed", &fields_special).unwrap();
+        assert_eq!(vis.get("Special Group"), Some(&true));
+
+        let mut fields_other = std::collections::BTreeMap::new();
+        fields_other.insert("kind".into(), crate::core::note::FieldValue::Text("other".into()));
+        let vis2 = registry.evaluate_group_visibility("Typed", &fields_other).unwrap();
+        assert_eq!(vis2.get("Special Group"), Some(&false));
+    }
+
+    #[test]
+    fn test_evaluate_group_visibility_no_closure_always_true() {
+        let mut registry = ScriptRegistry::new().unwrap();
+        registry.load_script(r#"
+            schema("Simple", #{
+                fields: [],
+                field_groups: [
+                    #{ name: "Always Visible", fields: [] }
+                ]
+            });
+        "#, "visibility_test").unwrap();
+
+        let vis = registry.evaluate_group_visibility("Simple", &Default::default()).unwrap();
+        assert_eq!(vis.get("Always Visible"), Some(&true));
     }
 
 }

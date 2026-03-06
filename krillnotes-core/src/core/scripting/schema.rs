@@ -98,6 +98,9 @@ pub struct Schema {
     pub attachment_types: Vec<String>,
     /// Named field groups with optional visibility rules.
     pub field_groups: Vec<FieldGroup>,
+    /// AST of the script that defined this schema. Required to call `validate`
+    /// and `visible` closures stored on individual fields and groups.
+    pub ast: Option<rhai::AST>,
 }
 
 impl Schema {
@@ -380,7 +383,7 @@ impl Schema {
             }
         }
 
-        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types, field_groups })
+        Ok(Schema { name: name.to_string(), fields, title_can_view, title_can_edit, children_sort, allowed_parent_types, allowed_children_types, allow_attachments, attachment_types, field_groups, ast: None })
     }
 }
 

@@ -852,7 +852,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -884,7 +884,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -916,7 +916,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -951,7 +951,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -1010,7 +1010,7 @@ mod tests {
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
             allow_attachments: false,
-            attachment_types: vec![], field_groups: vec![],
+            attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
@@ -1346,7 +1346,7 @@ mod tests {
             title_can_view: true, title_can_edit: true,
             children_sort: "none".into(),
             allowed_parent_types: vec![], allowed_children_types: vec![],
-            allow_attachments: false, attachment_types: vec![], field_groups: vec![],
+            allow_attachments: false, attachment_types: vec![], field_groups: vec![], ast: None,
         };
 
         let html = render_default_view(&note, Some(&schema), &HashMap::new(), &[]);
