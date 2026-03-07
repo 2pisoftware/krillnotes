@@ -36,6 +36,9 @@ function formatKey(key: string): string {
 // Fields shown in the "metadata" section at the top of the detail panel.
 const METADATA_KEYS = new Set(['type', 'operation_id', 'device_id', 'timestamp']);
 
+// Operation fields that hold a public key identifying the author.
+const AUTHOR_KEY_FIELDS = new Set(['created_by', 'modified_by', 'deleted_by', 'moved_by', 'updated_by']);
+
 function DetailValue({ fieldKey, value }: { fieldKey: string; value: unknown }) {
   if (value === null || value === undefined) {
     return <span className="text-muted-foreground italic">—</span>;
@@ -87,9 +90,11 @@ function DetailValue({ fieldKey, value }: { fieldKey: string; value: unknown }) 
 
 function OperationDetailPanel({
   detail,
+  resolvedAuthor,
   onClose,
 }: {
   detail: Record<string, unknown>;
+  resolvedAuthor: string;
   onClose: () => void;
 }) {
   const opType = detail['type'] as string | undefined;
@@ -135,7 +140,14 @@ function OperationDetailPanel({
               {dataEntries.map(([k, v]) => (
                 <div key={k}>
                   <dt className="text-xs text-muted-foreground">{formatKey(k)}</dt>
-                  <dd className="mt-0.5"><DetailValue fieldKey={k} value={v} /></dd>
+                  <dd className="mt-0.5">
+                    <DetailValue fieldKey={k} value={v} />
+                    {AUTHOR_KEY_FIELDS.has(k) && resolvedAuthor && (
+                      <span className="block text-xs text-muted-foreground mt-0.5">
+                        {resolvedAuthor}
+                      </span>
+                    )}
+                  </dd>
                 </div>
               ))}
             </dl>
@@ -341,6 +353,7 @@ function OperationsLogDialog({ isOpen, onClose }: OperationsLogDialogProps) {
           {opDetail && (
             <OperationDetailPanel
               detail={opDetail}
+              resolvedAuthor={operations.find((op) => op.operationId === selectedOpId)?.authorKey ?? ''}
               onClose={() => { setSelectedOpId(null); setOpDetail(null); }}
             />
           )}
