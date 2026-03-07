@@ -11,8 +11,11 @@ Krillnotes/
 ├── Cargo.toml                     # Workspace manifest (two Rust crates)
 ├── user_scripts/                  # Example Rhai scripts (Task, Book, Contact, etc.)
 ├── templates/                     # Template gallery — copy into Script Manager to activate
-│   ├── book_collection.rhai       # Library organiser with on_view table and sort actions
-│   └── zettelkasten.rhai          # Zettelkasten atomic-note system with related-note discovery
+│   ├── book_collection.schema.rhai  # BookCollection + Book schemas
+│   ├── book_collection.rhai         # Book register_view table + register_menu sort actions
+│   ├── photo_note.schema.rhai       # PhotoNote schema
+│   ├── zettelkasten.schema.rhai     # Zettel + Kasten schemas
+│   └── zettelkasten.rhai            # Zettel/Kasten register_view, register_hover, register_menu
 ├── krillnotes-core/               # Pure Rust library — no UI, no Tauri
 │   └── src/
 │       ├── lib.rs                 # Crate root, public re-exports
@@ -37,7 +40,13 @@ Krillnotes/
 │           ├── error.rs           # KrillnotesError enum
 │           ├── schema.sql         # Database DDL
 │           └── system_scripts/
-│               └── text_note.rhai # Built-in TextNote schema
+│               ├── 00_text_note.schema.rhai   # TextNote schema
+│               ├── 01_contact.schema.rhai     # ContactsFolder + Contact schemas
+│               ├── 01_contact.rhai            # ContactsFolder register_view
+│               ├── 02_task.schema.rhai        # Task schema
+│               ├── 03_project.schema.rhai     # Project schema
+│               ├── 05_recipe.schema.rhai      # Recipe schema
+│               └── 06_product.schema.rhai     # Product schema
 └── krillnotes-desktop/
     ├── src-tauri/                 # Tauri v2 Rust backend
     │   ├── build.rs               # Compile-time locale embedding (generates locales_generated.rs)
@@ -135,6 +144,11 @@ pub enum Operation {
     DeleteUserScript { operation_id, timestamp: HlcTimestamp, device_id,
                        script_id, signature },
 
+    // Schema migration
+    UpdateSchema { operation_id, timestamp: HlcTimestamp, device_id, signature,
+                   updated_by, schema_name, from_version: u32, to_version: u32,
+                   notes_migrated: u32 },
+
     // Undo/redo
     RetractOperation { operation_id, timestamp: HlcTimestamp, device_id,
                        retracted_ids: Vec<String>, inverse: RetractInverse,
@@ -159,68 +173,99 @@ This makes the log replayable, mergeable, and cryptographically attributable. Th
 | `LocalOnly { keep_last: N }` | Keep the N most recent operations; delete the rest. Default: 1000. |
 | `WithSync { retention_days: D }` | Keep unsynced operations indefinitely; delete synced ones older than D days. For future use. |
 
-### 3. Scripting Architecture (Schema Registry, Hook Registry, User Scripts)
+### 3. Scripting Architecture
 
 Note types are not hard-coded. Each type is a *schema* defined by a [Rhai](https://rhai.rs/) script. Rhai is a lightweight, embeddable scripting language with Rust-native types.
 
-The scripting system is split into three registries:
+#### Script categories
 
-- **Schema Registry** ([scripting/schema.rs](krillnotes-core/src/core/scripting/schema.rs)) — Holds field definitions, per-schema flags, and schema-bound hooks (`on_save`, `on_view`). Scripts call `schema("TypeName", #{ ... })` to register types and their hooks together.
-- **Hook Registry** ([scripting/hooks.rs](krillnotes-core/src/core/scripting/hooks.rs)) — Placeholder for future global/lifecycle hooks (`on_load`, `on_export`, menu hooks). Currently empty.
-- **User Script storage** ([user_script.rs](krillnotes-core/src/core/user_script.rs)) — CRUD for per-workspace scripts stored in the `user_scripts` database table.
+Scripts are divided into two categories:
 
-**How it works:**
+| Category | Extension | Allowed top-level calls |
+|----------|-----------|------------------------|
+| **Schema** | `.schema.rhai` | `schema()` and optionally `register_view/hover/menu()` |
+| **Library/Presentation** | `.rhai` | `register_view()`, `register_hover()`, `register_menu()`, helper functions — **not** `schema()` |
 
-1. On workspace open, the `rhai::Engine` is created and the built-in `text_note.rhai` system script is evaluated.
-2. All enabled user scripts (from the `user_scripts` table, ordered by `load_order`) are evaluated next.
-3. Each script calls `schema()` to register a type. Hooks (`on_save`, `on_view`) are defined as keys inside the `schema()` map — there are no standalone hook functions.
+User scripts stored in the `user_scripts` database table carry a `category` column (`"schema"` or `"presentation"`).
 
-**Defining a schema with hooks:**
+#### Four-phase loading
+
+When a workspace opens, scripts execute in four phases:
+
+| Phase | What runs | Purpose |
+|-------|-----------|---------|
+| A — Presentation | `.rhai` scripts (by `load_order`) | Define helper functions; queue deferred `register_*` calls |
+| B — Schema | `.schema.rhai` scripts (by `load_order`) | Register note types via `schema()` |
+| C — Resolve | — | Match deferred bindings to registered schemas; unresolved entries become Script Manager warnings |
+| D — Migrate | — | Find notes with `schema_version < current`, run `migrate` closures, write back in one transaction per type |
+
+Library-first ordering (Phase A before B) ensures helper functions are available when schema `on_save` hooks execute.
+
+#### Schema Registry ([scripting/schema.rs](krillnotes-core/src/core/scripting/schema.rs))
+
+Holds field definitions, per-schema flags, `on_save`/`on_add_child` hooks, migration closures, and resolved presentation bindings:
+
+- `view_registrations: HashMap<String, Vec<ViewRegistration>>` — schema name → ordered view tabs
+- `hover_registrations: HashMap<String, HookEntry>` — schema name → single hover renderer (last wins)
+- `menu_registrations: HashMap<String, Vec<MenuRegistration>>` — schema name → context-menu actions
+- `deferred_bindings: Vec<DeferredBinding>` — populated during Phase A; consumed by Phase C
+- `warnings: Vec<ScriptWarning>` — unresolved bindings surfaced in Script Manager
+
+#### Hook Registry ([scripting/hooks.rs](krillnotes-core/src/core/scripting/hooks.rs))
+
+Placeholder for future global/lifecycle hooks. Currently empty.
+
+#### User Script storage ([user_script.rs](krillnotes-core/src/core/user_script.rs))
+
+CRUD for per-workspace scripts stored in the `user_scripts` table. Includes `category`, `load_order`, and `enabled` columns.
+
+#### SaveTransaction API
+
+The `on_save` hook no longer mutates the note directly. All writes go through a transactional API:
+
+| Function | Description |
+|----------|-------------|
+| `set_field(note_id, field, value)` | Queue a field write; runs `validate` closure immediately |
+| `set_title(note_id, title)` | Queue a title write |
+| `reject(message)` | Accumulate a note-level error |
+| `reject(field, message)` | Accumulate a field-pinned error |
+| `commit()` | Check required fields; abort on any rejects; otherwise apply all writes atomically |
+| `create_child(parent_id, type)` | Create a new note pre-seeded into the transaction (available in `register_menu` and `on_add_child`) |
 
 ```rhai
 schema("Task", #{
+    version: 1,
     fields: [
-        #{ name: "name",     type: "text",    required: true },
-        #{ name: "status",   type: "select",  required: false,
+        #{ name: "name",   type: "text",   required: true },
+        #{ name: "status", type: "select", required: true,
            options: ["TODO", "WIP", "DONE"] },
-        #{ name: "priority", type: "number",  required: false },
-        #{ name: "due_date", type: "date",    required: false },
-        #{ name: "notes",    type: "textarea", required: false },
     ],
-    title_can_edit: false,   // title is computed by the on_save hook
-    children_sort: "asc",    // sort child notes alphabetically
+    title_can_edit: false,
     on_save: |note| {
-        let name   = note.fields["name"];
-        let status = note.fields["status"];
-        note.title = "[" + status + "] " + name;
-        note
+        let symbol = if note.fields["status"] == "DONE" { "✓" } else { " " };
+        set_title(note.id, "[" + symbol + "] " + (note.fields["name"] ?? ""));
+        commit();
     }
 });
 ```
 
-**Field types:** `"text"`, `"textarea"`, `"number"`, `"boolean"`, `"date"`, `"email"`, `"select"`, `"rating"`, `"file"` (encrypted attachment reference), `"note_link"` (reference to another note by UUID).
+#### Schema versioning
 
-**Schema flags:**
+`schema()` requires a `version: N` key (integer ≥ 1). Schemas can also carry a `migrate` map of target-version → closure. Phase D runs these closures against stale notes and logs one `UpdateSchema` operation per migrated type.
 
-| Flag | Type | Default | Purpose |
-|------|------|---------|---------|
-| `title_can_edit` | bool | `true` | Whether the title field is shown in edit mode |
-| `title_can_view` | bool | `true` | Whether the title field is shown in view mode |
-| `children_sort` | string | `"none"` | Sort children: `"asc"`, `"desc"`, or `"none"` (use position) |
+#### Registration functions (presentation scripts)
 
-**Per-field flags:**
+```rhai
+register_view("TypeName", "Tab Label", #{ display_first: true }, |note| { … });
+register_hover("TypeName", |note| { … });
+register_menu("Sort A→Z", ["Folder"], |note| { … });
+```
 
-| Flag | Type | Default | Purpose |
-|------|------|---------|---------|
-| `can_view` | bool | `true` | Show this field in view mode |
-| `can_edit` | bool | `true` | Show this field in edit mode |
-| `options` | array | — | Choice list for `select` fields |
+#### Why keep the Engine alive?
 
-**Why keep the Engine alive?**
+The `rhai::Engine` is a long-lived field, not reconstructed per request. This avoids re-parsing overhead and allows hooks to be called efficiently on every save.
 
-The `rhai::Engine` is a long-lived field, not reconstructed per request. This avoids the overhead of re-parsing scripts on every invocation and allows hooks to be called efficiently on each save.
-
-The `rhai/sync` Cargo feature is enabled, which replaces `Rc`/`RefCell` internals with `Arc`/`Mutex`, making `Engine: Send + Sync` without any `unsafe` code.
+The `rhai/sync` Cargo feature is enabled, replacing `Rc`/`RefCell` internals with `Arc`/`Mutex` so `Engine: Send + Sync` without any `unsafe` code.
 
 ### 4. Tags
 
@@ -366,17 +411,18 @@ The database enforces referential integrity: deleting a note cascades to all its
 
 **From the UI (recommended):**
 
-1. Open the Script Manager (View menu).
-2. Click "New Script" and write a Rhai script that calls `schema("MyType", #{ fields: [...] })`.
-3. Optionally add an `on_save: |note| { ... }` hook key inside the `schema()` map.
+1. Open the Script Manager (View menu → Scripts).
+2. Click "New Script", choose category **Schema**, and write a `.schema.rhai` script that calls `schema("MyType", #{ version: 1, fields: [...] })`.
+3. Optionally create a second **Library** script with `register_view("MyType", ...)`, `register_hover("MyType", ...)`, or `register_menu(...)`.
 4. Save — the registries reload automatically and the new type appears in the Add Note dialog.
 
 **From code (system scripts):**
 
-1. Add a `.rhai` file to [krillnotes-core/src/core/system_scripts/](krillnotes-core/src/core/system_scripts/).
-2. It will be included via `include_dir!` and evaluated on every workspace open.
+1. Add a `.schema.rhai` file to [krillnotes-core/src/core/system_scripts/](krillnotes-core/src/core/system_scripts/).
+2. Optionally add a matching `.rhai` file for presentation logic.
+3. Both are included via `include_dir!` and evaluated on every workspace open.
 
-No Rust changes are needed for a purely additive new type. Six example scripts are provided in the [user_scripts/](user_scripts/) folder for reference.
+No Rust changes are needed for a purely additive new type.
 
 ---
 
@@ -528,7 +574,8 @@ Tests live alongside the code they test in `#[cfg(test)]` modules at the bottom 
 | 10 — Undo / redo | Done | `RetractOperation` log entries; undo groups; per-workspace history limit |
 | 11 — Identity model | Done | Ed25519 + Argon2id; workspace binding; `.swarmid` portable export |
 | 12 — HLC + signed operations | Done | `HlcTimestamp` per-operation; Ed25519 `signature` on every op; `hlc_state` table; fractional `f64` positions; `SetTags` + `UpdateNote` variants |
-| 13 — Sync infrastructure | Planned | CRDT merge, conflict resolution, `synced` flag, swarm discovery |
+| 13 — Schema extensions | Done | SaveTransaction gated saves; field groups + validation; two-phase script loading; `register_view/hover/menu`; tabbed views; schema versioning + batch migration; `UpdateSchema` op |
+| 14 — Sync infrastructure | Planned | CRDT merge, conflict resolution, `synced` flag, swarm discovery |
 
 ---
 
@@ -539,8 +586,8 @@ Tests live alongside the code they test in `#[cfg(test)]` modules at the bottom 
 | [krillnotes-core/src/core/workspace.rs](krillnotes-core/src/core/workspace.rs) | Primary API — all document mutations go here |
 | [krillnotes-core/src/core/operation.rs](krillnotes-core/src/core/operation.rs) | Operation enum definition (notes + user scripts) |
 | [krillnotes-core/src/core/operation_log.rs](krillnotes-core/src/core/operation_log.rs) | Log append + purge strategies |
-| [krillnotes-core/src/core/scripting/schema.rs](krillnotes-core/src/core/scripting/schema.rs) | Schema registry (field types, flags) |
-| [krillnotes-core/src/core/scripting/hooks.rs](krillnotes-core/src/core/scripting/hooks.rs) | Hook registry (placeholder for future global/lifecycle hooks) |
+| [krillnotes-core/src/core/scripting/schema.rs](krillnotes-core/src/core/scripting/schema.rs) | Schema registry — field types, flags, `on_save` hooks, view/hover/menu registrations, deferred binding queue, migration closures |
+| [krillnotes-core/src/core/scripting/hooks.rs](krillnotes-core/src/core/scripting/hooks.rs) | Hook registry (placeholder for future global/lifecycle hooks; currently empty) |
 | [krillnotes-core/src/core/user_script.rs](krillnotes-core/src/core/user_script.rs) | UserScript type + CRUD |
 | [krillnotes-core/src/core/export.rs](krillnotes-core/src/core/export.rs) | Workspace export/import (zip) |
 | [krillnotes-core/src/core/delete.rs](krillnotes-core/src/core/delete.rs) | Delete strategies (DeleteAll, PromoteChildren) |

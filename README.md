@@ -12,10 +12,12 @@ Built with Rust, Tauri v2, React, and SQLCipher (encrypted SQLite).
 
 - **Hierarchical notes** — Organize notes in an infinite tree. Each note can have children, with configurable sort order (alphabetical ascending/descending, or manual positioning).
 - **Typed note schemas** — Note types are defined as [Rhai](https://rhai.rs/) scripts. The built-in `TextNote` type ships out of the box; custom types support fields of type `text`, `textarea`, `number`, `boolean`, `date`, `email`, `select`, `rating`, `file`, and `note_link`.
-- **User scripts** — Each workspace stores its own Rhai scripts in the database. Create, edit, enable/disable, reorder, and delete scripts from a built-in script manager — no file system access required.
+- **User scripts** — Each workspace stores its own Rhai scripts in the database. Scripts come in two categories: **Schema** (`.schema.rhai`) define note types via `schema()`, and **Library/Presentation** (`.rhai`) define views, hover tooltips, and context-menu actions via `register_view()`, `register_hover()`, and `register_menu()`. Create, edit, enable/disable, reorder, and delete scripts from a built-in script manager — no file system access required.
 - **Template gallery** — Ready-to-use templates live in the `templates/` folder: a book collection organiser and a Zettelkasten atomic-note system. Copy the Rhai source into the Script Manager to activate a template in any workspace.
-- **Tags** — Attach free-form tags to any note. Tags are displayed as colour-coded pills in the note view, shown in the tree's tag cloud panel, and matched by the search bar. Scripts can read `note.tags` in `on_view` hooks and query all notes carrying a given tag with `get_notes_for_tag()`.
-- **On-save hooks** — Rhai scripts can register `on_save` hooks that compute derived fields (e.g. auto-generating a note title from first name + last name, calculating a read duration, or setting a status badge).
+- **Tags** — Attach free-form tags to any note. Tags are displayed as colour-coded pills in the note view, shown in the tree's tag cloud panel, and matched by the search bar. Scripts can read `note.tags` in view closures and query all notes carrying a given tag with `get_notes_for_tag()`.
+- **On-save hooks** — Rhai `on_save` hooks use a transactional API (`set_field`, `set_title`, `reject`, `commit`) to compute derived fields safely. Field-level `validate` closures run on every keystroke. Field groups with optional `visible` closures keep complex schemas organised.
+- **Tabbed note views** — Schemas with `register_view()` registrations show a tab bar in the detail panel. Custom view tabs appear in registration order; `display_first: true` moves a tab to the leftmost position. The Fields tab is always present. Types with no registered views show the plain field grid.
+- **Schema versioning and migrations** — Schemas declare a `version` number and optional `migrate` closures. When the workspace opens, stale notes (those at an older `schema_version`) are migrated automatically in a single transaction per schema type. A toast notification reports how many notes were updated.
 - **Search** — A live search bar with debounced fuzzy matching across note titles and all text fields. Keyboard-navigable results; selecting a match expands collapsed ancestors and scrolls the note into view.
 - **Export / Import** — Export an entire workspace as a `.krillnotes` archive (notes + attachments + user scripts), with an optional AES-256 password. Import an archive into a new workspace; the app detects encrypted archives and prompts for the password before importing.
 - **File attachments** — Attach any file to a note. Attachments are encrypted at rest alongside the database. Images render as thumbnails; all file types can be downloaded or opened. Attachment size limit is configurable per workspace.
@@ -86,15 +88,15 @@ Each workspace is a **folder** on disk containing:
 - `attachments/` — per-attachment encrypted files (ChaCha20-Poly1305)
 - `info.json` — unencrypted metadata sidecar (name, note count, size, workspace UUID) readable without a password
 
-The database contains five tables:
+The database contains six tables:
 
 | Table | Purpose |
 |-------|---------|
-| `notes` | The note tree (id, title, type, parent, position, fields) |
+| `notes` | The note tree (id, title, type, parent, position, fields, `schema_version`) |
 | `note_tags` | Many-to-many junction between notes and tags |
-| `operations` | Append-only mutation log (CRDT-style) |
+| `operations` | Append-only mutation log (CRDT-style, includes `UpdateSchema` migration entries) |
 | `workspace_meta` | Per-device metadata (device ID, selection state, undo limit) |
-| `user_scripts` | Per-workspace Rhai scripts (id, name, source code, load order, enabled flag) |
+| `user_scripts` | Per-workspace Rhai scripts (id, name, source code, load order, enabled flag, `category`) |
 | `attachments` | Attachment metadata (id, note_id, filename, MIME type, size, hash) |
 
 The database uses AES-256-CBC encryption (SQLCipher v4 defaults: PBKDF2-HMAC-SHA512, 256,000 iterations). Workspace passwords are randomly generated and stored encrypted under your identity key — you need SQLCipher-aware tooling **and** the correct randomly-generated password to open the file outside of Krillnotes.
