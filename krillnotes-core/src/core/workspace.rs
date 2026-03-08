@@ -41,6 +41,14 @@ pub struct NoteSearchResult {
     pub title: String,
 }
 
+/// Serializable snapshot of a workspace's notes and scripts for peer sync.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceSnapshot {
+    pub version: u32,
+    pub notes: Vec<Note>,
+    pub user_scripts: Vec<UserScript>,
+}
+
 /// Controls where a new note is inserted relative to the currently selected note.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AddPosition {
@@ -4236,6 +4244,93 @@ impl Workspace {
         }
     }
 
+    // ── Snapshot (peer sync) ───────────────────────────────────────
+
+    /// Serialise all notes and user scripts to JSON bytes for a snapshot bundle.
+    pub fn to_snapshot_json(&self) -> Result<Vec<u8>> {
+        let notes = self.list_all_notes()?;
+        let user_scripts = self.list_user_scripts()?;
+        let snapshot = WorkspaceSnapshot {
+            version: 1,
+            notes,
+            user_scripts,
+        };
+        Ok(serde_json::to_vec(&snapshot)?)
+    }
+
+    /// Populate a workspace from snapshot JSON bytes.
+    ///
+    /// Notes and user scripts are inserted. Returns the number of notes imported.
+    /// Designed for freshly created workspaces — duplicates will be skipped via INSERT OR IGNORE.
+    pub fn import_snapshot_json(&mut self, data: &[u8]) -> Result<usize> {
+        let snapshot: WorkspaceSnapshot = serde_json::from_slice(data)
+            .map_err(|e| KrillnotesError::Json(e))?;
+
+        let note_count = snapshot.notes.len();
+
+        // Bulk-insert notes preserving original IDs.
+        // Defer foreign-key checks so children can be inserted before parents.
+        {
+            self.storage
+                .connection_mut()
+                .execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+            let tx = self.storage.connection_mut().transaction()?;
+            for note in &snapshot.notes {
+                let fields_json = serde_json::to_string(&note.fields)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO notes (id, title, node_type, parent_id, position, created_at, modified_at, created_by, modified_by, fields_json, is_expanded, schema_version)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        note.id,
+                        note.title,
+                        note.node_type,
+                        note.parent_id,
+                        note.position,
+                        note.created_at,
+                        note.modified_at,
+                        note.created_by,
+                        note.modified_by,
+                        fields_json,
+                        note.is_expanded,
+                        note.schema_version,
+                    ],
+                )?;
+                for tag in &note.tags {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO note_tags (note_id, tag) VALUES (?, ?)",
+                        rusqlite::params![note.id, tag],
+                    )?;
+                }
+            }
+            tx.commit()?;
+        }
+
+        // Insert user scripts (preserve original IDs via INSERT OR IGNORE).
+        if !snapshot.user_scripts.is_empty() {
+            let tx = self.storage.connection_mut().transaction()?;
+            for script in &snapshot.user_scripts {
+                tx.execute(
+                    "INSERT OR IGNORE INTO user_scripts (id, name, description, source_code, load_order, enabled, created_at, modified_at, category)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        script.id,
+                        script.name,
+                        script.description,
+                        script.source_code,
+                        script.load_order,
+                        script.enabled,
+                        script.created_at,
+                        script.modified_at,
+                        script.category,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        Ok(note_count)
+    }
+
 }
 
 /// Keeps the `note_links` junction table in sync with the current field values of a note.
@@ -7155,5 +7250,61 @@ schema("SameVerType", #{
         let schema = ws.script_registry.get_schema("SameVerType").unwrap();
         assert_eq!(schema.version, 1);
         assert_eq!(schema.fields.len(), 2, "expected 2 fields after same-version re-registration");
+    }
+
+    #[test]
+    fn test_to_snapshot_json_roundtrip() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(
+            temp.path(),
+            "",
+            "test-identity",
+            ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]),
+        ).unwrap();
+        // Add a note so the snapshot has more than just the root.
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
+        let json = ws.to_snapshot_json().unwrap();
+        assert!(!json.is_empty());
+        let snap: WorkspaceSnapshot = serde_json::from_slice(&json).unwrap();
+        // Workspace::create inserts a root note, so we have 2 notes total.
+        assert_eq!(snap.notes.len(), 2);
+    }
+
+    #[test]
+    fn test_import_snapshot_json_round_trip() {
+        let src_temp = NamedTempFile::new().unwrap();
+        let mut src = Workspace::create(
+            src_temp.path(),
+            "",
+            "src-identity",
+            ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]),
+        ).unwrap();
+        // Replace the default root note title and add two children.
+        let root = src.list_all_notes().unwrap()[0].clone();
+        src.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
+        src.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
+        let json = src.to_snapshot_json().unwrap();
+
+        // Destination workspace.
+        let dst_temp = NamedTempFile::new().unwrap();
+        let mut dst = Workspace::create(
+            dst_temp.path(),
+            "",
+            "dst-identity",
+            ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]),
+        ).unwrap();
+        // Remove the auto-created root so we start from a clean slate.
+        let dst_root = dst.list_all_notes().unwrap()[0].clone();
+        dst.storage.connection_mut().execute(
+            "DELETE FROM notes WHERE id = ?",
+            [&dst_root.id],
+        ).unwrap();
+
+        let count = dst.import_snapshot_json(&json).unwrap();
+        // src had: 1 original root + 2 children = 3 notes.
+        assert_eq!(count, 3);
+        let notes = dst.list_all_notes().unwrap();
+        assert_eq!(notes.len(), 3);
     }
 }
