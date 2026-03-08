@@ -8,6 +8,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
+import UnlockIdentityDialog from './UnlockIdentityDialog';
 
 interface InviteInfo {
   mode: 'invite';
@@ -34,6 +35,8 @@ interface SnapshotInfo {
   senderDisplayName: string;
   senderFingerprint: string;
   asOfOperationId: string;
+  targetIdentityUuid: string | null;
+  targetIdentityName: string | null;
 }
 
 type SwarmFileInfo = InviteInfo | AcceptInfo | SnapshotInfo;
@@ -57,6 +60,7 @@ export default function SwarmOpenDialog({
   const [success, setSuccess] = useState('');
   const [workspaceName, setWorkspaceName] = useState('');
   const [declaredName, setDeclaredName] = useState('');
+  const [unlockTarget, setUnlockTarget] = useState<{ uuid: string; name: string } | null>(null);
 
   useEffect(() => {
     if (!isOpen || !swarmFilePath) return;
@@ -64,7 +68,13 @@ export default function SwarmOpenDialog({
     invoke<SwarmFileInfo>('open_swarm_file_cmd', { path: swarmFilePath })
       .then(info => {
         setFileInfo(info);
-        if (info.mode === 'snapshot') setWorkspaceName(info.workspaceName);
+        if (info.mode === 'snapshot') {
+          setWorkspaceName(info.workspaceName);
+          // If we know which identity is required and it isn't already unlocked, prompt now.
+          if (info.targetIdentityUuid && info.targetIdentityUuid !== unlockedIdentityUuid && info.targetIdentityName) {
+            setUnlockTarget({ uuid: info.targetIdentityUuid, name: info.targetIdentityName });
+          }
+        }
       })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false));
@@ -73,7 +83,7 @@ export default function SwarmOpenDialog({
   useEffect(() => {
     if (!isOpen) {
       setFileInfo(null); setError(''); setSuccess('');
-      setWorkspaceName(''); setDeclaredName('');
+      setWorkspaceName(''); setDeclaredName(''); setUnlockTarget(null);
     }
   }, [isOpen]);
 
@@ -133,20 +143,33 @@ export default function SwarmOpenDialog({
     } finally { setProcessing(false); }
   };
 
-  const handleCreateWorkspace = async () => {
+  const handleCreateWorkspace = async (identityUuid?: string) => {
     if (!fileInfo || fileInfo.mode !== 'snapshot' || !swarmFilePath) return;
-    if (!unlockedIdentityUuid) { setError(t('swarm.identityLocked')); return; }
+    const uuid = identityUuid ?? unlockedIdentityUuid;
+    if (!uuid) {
+      // If we know which identity is needed, prompt to unlock it.
+      if (fileInfo.targetIdentityUuid && fileInfo.targetIdentityName) {
+        setUnlockTarget({ uuid: fileInfo.targetIdentityUuid, name: fileInfo.targetIdentityName });
+      } else {
+        setError(t('swarm.identityLocked'));
+      }
+      return;
+    }
     setProcessing(true); setError('');
     try {
       await invoke('create_workspace_from_snapshot_cmd', {
         snapshotPath: swarmFilePath,
         workspaceName: workspaceName.trim() || fileInfo.workspaceName,
-        identityUuid: unlockedIdentityUuid,
+        identityUuid: uuid,
       });
       onClose();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setError(msg === 'IDENTITY_LOCKED' ? t('swarm.identityLocked') : msg);
+      if (msg === 'IDENTITY_LOCKED' && fileInfo.targetIdentityUuid && fileInfo.targetIdentityName) {
+        setUnlockTarget({ uuid: fileInfo.targetIdentityUuid, name: fileInfo.targetIdentityName });
+      } else {
+        setError(msg);
+      }
     } finally { setProcessing(false); }
   };
 
@@ -226,7 +249,7 @@ export default function SwarmOpenDialog({
         </div>
         <button
           className="w-full px-4 py-2 rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
-          onClick={handleCreateWorkspace}
+          onClick={() => handleCreateWorkspace()}
           disabled={processing || !workspaceName.trim()}
         >
           {processing ? '…' : t('swarm.createWorkspaceButton')}
@@ -238,25 +261,41 @@ export default function SwarmOpenDialog({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-background border border-secondary rounded-lg shadow-xl p-6 w-full max-w-md">
-        <h2 className="text-lg font-semibold mb-4">{t('swarm.openDialogTitle')}</h2>
+    <>
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div className="bg-background border border-secondary rounded-lg shadow-xl p-6 w-full max-w-md">
+          <h2 className="text-lg font-semibold mb-4">{t('swarm.openDialogTitle')}</h2>
 
-        {renderContent()}
+          {renderContent()}
 
-        {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
-        {success && <p className="mt-3 text-sm text-green-600">{success}</p>}
+          {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
+          {success && <p className="mt-3 text-sm text-green-600">{success}</p>}
 
-        <div className="flex justify-end mt-4">
-          <button
-            className="px-4 py-2 rounded border border-secondary hover:bg-secondary"
-            onClick={onClose}
-            disabled={processing}
-          >
-            {t('common.close', 'Close')}
-          </button>
+          <div className="flex justify-end mt-4">
+            <button
+              className="px-4 py-2 rounded border border-secondary hover:bg-secondary"
+              onClick={onClose}
+              disabled={processing}
+            >
+              {t('common.close', 'Close')}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+
+      {unlockTarget && (
+        <UnlockIdentityDialog
+          isOpen={true}
+          identityUuid={unlockTarget.uuid}
+          identityName={unlockTarget.name}
+          onUnlocked={() => {
+            const uuid = unlockTarget.uuid;
+            setUnlockTarget(null);
+            handleCreateWorkspace(uuid);
+          }}
+          onCancel={() => setUnlockTarget(null)}
+        />
+      )}
+    </>
   );
 }

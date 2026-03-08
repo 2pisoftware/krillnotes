@@ -2732,6 +2732,10 @@ pub enum SwarmFileInfo {
         sender_fingerprint: String,
         #[serde(rename = "asOfOperationId")]
         as_of_operation_id: String,
+        #[serde(rename = "targetIdentityUuid")]
+        target_identity_uuid: Option<String>,
+        #[serde(rename = "targetIdentityName")]
+        target_identity_name: Option<String>,
     },
 }
 
@@ -2755,7 +2759,10 @@ fn peek_swarm_header(data: &[u8]) -> std::result::Result<krillnotes_core::core::
 
 /// Peek at a .swarm file and return its type + display metadata.
 #[tauri::command]
-fn open_swarm_file_cmd(path: String) -> std::result::Result<SwarmFileInfo, String> {
+fn open_swarm_file_cmd(
+    state: State<'_, AppState>,
+    path: String,
+) -> std::result::Result<SwarmFileInfo, String> {
     use krillnotes_core::core::swarm::header::SwarmMode;
     let data = std::fs::read(&path).map_err(|e| format!("Cannot read file: {e}"))?;
     let header = peek_swarm_header(&data)?;
@@ -2779,12 +2786,40 @@ fn open_swarm_file_cmd(path: String) -> std::result::Result<SwarmFileInfo, Strin
             acceptor_public_key: header.source_identity,
             pairing_token: header.pairing_token.unwrap_or_default(),
         }),
-        SwarmMode::Snapshot => Ok(SwarmFileInfo::Snapshot {
-            workspace_name: header.workspace_name,
-            sender_display_name: header.source_display_name,
-            sender_fingerprint: fingerprint,
-            as_of_operation_id: header.as_of_operation_id.unwrap_or_default(),
-        }),
+        SwarmMode::Snapshot => {
+            // Try to identify which local identity this snapshot is for.
+            let (target_identity_uuid, target_identity_name) = {
+                let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+                let identities = mgr.list_identities().unwrap_or_default();
+                // Read each identity's public key and match against recipient peer_ids.
+                let peer_ids: Vec<String> = header.recipients.as_ref()
+                    .map(|r| r.iter().map(|e| e.peer_id.clone()).collect())
+                    .unwrap_or_default();
+                let mut found_uuid = None;
+                let mut found_name = None;
+                for identity_ref in &identities {
+                    let full_path = crate::settings::config_dir().join(&identity_ref.file);
+                    if let Ok(data) = std::fs::read_to_string(&full_path) {
+                        if let Ok(file) = serde_json::from_str::<krillnotes_core::core::identity::IdentityFile>(&data) {
+                            if peer_ids.contains(&file.public_key) {
+                                found_uuid = Some(identity_ref.uuid.to_string());
+                                found_name = Some(identity_ref.display_name.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+                (found_uuid, found_name)
+            };
+            Ok(SwarmFileInfo::Snapshot {
+                workspace_name: header.workspace_name,
+                sender_display_name: header.source_display_name,
+                sender_fingerprint: fingerprint,
+                as_of_operation_id: header.as_of_operation_id.unwrap_or_default(),
+                target_identity_uuid,
+                target_identity_name,
+            })
+        }
         SwarmMode::Delta => Err("Delta bundles are not yet supported in this version.".to_string()),
     }
 }
@@ -2935,7 +2970,7 @@ fn create_snapshot_bundle_cmd(
         workspace_json,
         sender_key: &signing_key,
         recipient_keys: vec![&acceptor_vk],
-        recipient_peer_ids: vec![parsed_accept.workspace_id.clone()],
+        recipient_peer_ids: vec![parsed_accept.acceptor_public_key.clone()],
     })
     .map_err(|e| e.to_string())?;
 
