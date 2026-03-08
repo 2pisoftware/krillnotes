@@ -1897,6 +1897,27 @@ fn export_swarmid_cmd(
     Ok(())
 }
 
+/// Return the Base64-encoded Ed25519 public key for the given identity.
+/// No passphrase required — the public key is stored unencrypted on disk.
+#[tauri::command]
+fn get_identity_public_key(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+) -> std::result::Result<String, String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    let identities = mgr.list_identities().map_err(|e| e.to_string())?;
+    let identity_ref = identities
+        .into_iter()
+        .find(|i| i.uuid == uuid)
+        .ok_or("Identity not found")?;
+    let data = std::fs::read_to_string(&identity_ref.file)
+        .map_err(|e| format!("Cannot read identity file: {e}"))?;
+    let file: krillnotes_core::core::identity::IdentityFile =
+        serde_json::from_str(&data).map_err(|e| format!("Invalid identity file: {e}"))?;
+    Ok(file.public_key)
+}
+
 /// Import a `.swarmid` file from the given path.
 /// Returns the `IdentityRef` on success.
 /// Returns `"IDENTITY_EXISTS:<uuid>"` if the same UUID is already registered —
@@ -3256,6 +3277,7 @@ pub fn run() {
             is_identity_unlocked,
             get_workspaces_for_identity,
             export_swarmid_cmd,
+            get_identity_public_key,
             import_swarmid_cmd,
             import_swarmid_overwrite_cmd,
             open_swarm_file_cmd,

@@ -38,7 +38,9 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
 
   // New state for selection-based UX
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null);
-  const [activeForm, setActiveForm] = useState<'rename' | 'passphrase' | 'export' | null>(null);
+  const [activeForm, setActiveForm] = useState<'rename' | 'passphrase' | 'export' | 'publickey' | null>(null);
+  const [publicKey, setPublicKey] = useState('');
+  const [publicKeyCopied, setPublicKeyCopied] = useState(false);
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [exportError, setExportError] = useState('');
   const [exporting, setExporting] = useState(false);
@@ -85,7 +87,7 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
     setSelectedUuid(uuid);
   };
 
-  const toggleForm = (form: 'rename' | 'passphrase' | 'export') => {
+  const toggleForm = (form: 'rename' | 'passphrase' | 'export' | 'publickey') => {
     if (activeForm === form) {
       setActiveForm(null);
       return;
@@ -106,6 +108,13 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
     if (form === 'export') {
       setExportPassphrase('');
       setExportError('');
+    }
+    if (form === 'publickey') {
+      setPublicKey('');
+      setPublicKeyCopied(false);
+      invoke<string>('get_identity_public_key', { identityUuid: selectedUuid })
+        .then(pk => setPublicKey(pk))
+        .catch(e => setError(String(e)));
     }
   };
 
@@ -464,6 +473,30 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
                   {exportError && <p className="text-xs text-red-500">{exportError}</p>}
                 </div>
               )}
+
+              {/* Public key panel */}
+              {activeForm === 'publickey' && (
+                <div className="px-4 pb-3 pt-2 bg-secondary/30 space-y-2">
+                  <p className="text-xs text-muted-foreground">{t('identity.publicKeyPrompt', 'Share this with anyone who wants to invite you to their workspace.')}</p>
+                  <code className="block text-xs font-mono bg-background border border-border rounded px-2 py-2 break-all select-all">
+                    {publicKey || '…'}
+                  </code>
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(publicKey).then(() => {
+                          setPublicKeyCopied(true);
+                          setTimeout(() => setPublicKeyCopied(false), 2000);
+                        });
+                      }}
+                      disabled={!publicKey}
+                      className="px-3 py-1 bg-primary text-primary-foreground rounded text-sm hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      {publicKeyCopied ? t('identity.publicKeyCopied', 'Copied!') : t('identity.copyPublicKey', 'Copy')}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -507,6 +540,13 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
                 className={['px-2 py-1 text-xs border border-border rounded hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed', activeForm === 'export' ? 'bg-secondary' : ''].join(' ')}
               >
                 {t('identity.export')}
+              </button>
+              <button
+                onClick={() => selectedUuid && toggleForm('publickey')}
+                disabled={!selectedUuid}
+                className={['px-2 py-1 text-xs border border-border rounded hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed', activeForm === 'publickey' ? 'bg-secondary' : ''].join(' ')}
+              >
+                {t('identity.publicKey', 'Public Key')}
               </button>
               <button
                 onClick={() => {
