@@ -2797,16 +2797,24 @@ fn create_invite_bundle_cmd(
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
     let signing_key = {
         let identities = state.unlocked_identities.lock().expect("Mutex poisoned");
-        let unlocked = identities
-            .get(&uuid)
-            .ok_or("IDENTITY_LOCKED")?;
+        let unlocked = identities.get(&uuid).ok_or("IDENTITY_LOCKED")?;
         Ed25519SigningKey::from_bytes(&unlocked.signing_key.to_bytes())
+    };
+    let source_display_name = {
+        let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+        mgr.list_identities()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|i| i.uuid == uuid)
+            .map(|i| i.display_name)
+            .unwrap_or_default()
     };
 
     let bundle = create_invite_bundle(InviteParams {
         workspace_id,
         workspace_name,
         source_device_id,
+        source_display_name,
         offered_role,
         offered_scope,
         inviter_key: &signing_key,
