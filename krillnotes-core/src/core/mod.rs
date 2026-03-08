@@ -10,6 +10,7 @@
 //! with `#[doc(inline)]`; import from there in preference to this module.
 
 pub mod attachment;
+pub mod contact;
 pub mod delete;
 pub mod hlc;
 pub mod identity;
@@ -28,6 +29,8 @@ pub mod workspace;
 
 #[doc(inline)]
 pub use attachment::AttachmentMeta;
+#[doc(inline)]
+pub use contact::{Contact, ContactManager, TrustLevel, generate_fingerprint};
 #[doc(inline)]
 pub use delete::{DeleteResult, DeleteStrategy};
 #[doc(inline)]
