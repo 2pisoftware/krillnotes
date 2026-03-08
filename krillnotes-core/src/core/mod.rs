@@ -23,6 +23,7 @@ pub mod operation_log;
 pub mod peer_registry;
 pub mod save_transaction;
 pub mod scripting;
+pub mod swarm;
 pub mod storage;
 pub mod user_script;
 pub mod undo;
@@ -55,6 +56,8 @@ pub use operation_log::{OperationLog, OperationSummary, PurgeStrategy};
 pub use scripting::{FieldDefinition, Schema, ScriptRegistry};
 #[doc(inline)]
 pub use storage::Storage;
+#[doc(inline)]
+pub use swarm::header::{RecipientEntry, SwarmHeader, SwarmMode};
 #[doc(inline)]
 pub use undo::{RetractInverse, UndoResult};
 #[doc(inline)]
