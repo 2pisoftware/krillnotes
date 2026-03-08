@@ -3008,7 +3008,7 @@ async fn create_workspace_from_snapshot_cmd(
         Ed25519SigningKey::from_bytes(&unlocked.signing_key.to_bytes())
     };
 
-    let mut workspace = Workspace::create(&db_path, &password, &uuid.to_string(), signing_key_for_create)
+    let mut workspace = Workspace::create_empty(&db_path, &password, &uuid.to_string(), signing_key_for_create)
         .map_err(|e| format!("Failed to create workspace: {e}"))?;
 
     // Import the snapshot content.
