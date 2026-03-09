@@ -178,6 +178,9 @@ function TreeNode({
     setDropIndicator(null);
   }, [draggedNoteId, node, notes, schemas, dragDescendants, isExpanded, hasChildren, onToggleExpand, onMoveNote, setDraggedNoteId, setDropIndicator]);
 
+  const schema = schemas[node.note.nodeType];
+  const hasHoverContent = (schema?.hasHover ?? false) || (schema?.fields.some(f => f.showOnHover) ?? false);
+
   const indentPx = level * 20 + 8;
 
   return (
@@ -224,7 +227,8 @@ function TreeNode({
           </button>
         )}
         {!hasChildren && <span className="w-4 mr-1" />}
-        <span className="text-sm truncate">{node.note.title}</span>
+        <span className="text-sm truncate flex-1 min-w-0">{node.note.title}</span>
+        {hasHoverContent && <span className="ml-1 text-xs text-muted-foreground/40 select-none">›</span>}
       </div>
 
       {isDropTarget && dropIndicator?.position === 'after' && (
