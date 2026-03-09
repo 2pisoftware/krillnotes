@@ -211,7 +211,8 @@
     "backTo": "← 返回\"{{title}}\"",
     "selectNote": "选择一条笔记以查看详情",
     "legacySuffix": "（旧版）",
-    "saveFailed": "保存失败：{{error}}"
+    "saveFailed": "保存失败：{{error}}",
+    "by": "由 {{name}}"
   },
   "fields": {
     "notRated": "未评分",
@@ -366,7 +367,6 @@
     "roleReader": "Reader",
     "createInviteButton": "Create invite file…",
     "inviteSaved": "Invite saved. Send this file to {{name}}.",
-
     "openDialogTitle": "Open .swarm File",
     "loading": "Reading bundle…",
     "inviteModeHeading": "Workspace Invitation",
@@ -376,16 +376,13 @@
     "inviteFingerprint": "Their fingerprint",
     "acceptButton": "Accept — save reply…",
     "acceptSaved": "Reply saved. Send this file back to {{name}}.",
-
     "acceptModeHeading": "{{name}} has accepted your invitation",
     "acceptorFingerprint": "Verify their fingerprint before sending:",
     "sendSnapshotButton": "Send snapshot…",
     "snapshotSaved": "Snapshot saved. Send this file to {{name}}.",
-
     "snapshotModeHeading": "Workspace snapshot from {{name}}",
     "snapshotWorkspaceNameLabel": "Workspace name",
     "createWorkspaceButton": "Create workspace",
-
     "deltaNotSupported": "Delta sync bundles are not yet supported in this version.",
     "invalidBundle": "This file could not be read — it may be corrupt or from an incompatible version.",
     "signatureInvalid": "Bundle signature verification failed. Do not proceed.",

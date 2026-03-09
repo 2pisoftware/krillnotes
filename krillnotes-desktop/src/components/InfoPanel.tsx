@@ -83,6 +83,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   const [groupVisible, setGroupVisible] = useState<Record<string, boolean>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [noteErrors, setNoteErrors] = useState<string[]>([]);
+  const [authorNames, setAuthorNames] = useState<{ createdBy: string | null; modifiedBy: string | null }>({ createdBy: null, modifiedBy: null });
   const titleInputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const viewHtmlRef = useRef<HTMLDivElement>(null);
@@ -296,6 +297,18 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     });
     return () => cancelAnimationFrame(rafId);
   }, [isEditing]);
+
+  useEffect(() => {
+    if (!selectedNote) {
+      setAuthorNames({ createdBy: null, modifiedBy: null });
+      return;
+    }
+    const { createdBy, modifiedBy } = selectedNote;
+    Promise.all([
+      createdBy ? invoke<string | null>('resolve_identity_name', { publicKey: createdBy }) : Promise.resolve(null),
+      modifiedBy ? invoke<string | null>('resolve_identity_name', { publicKey: modifiedBy }) : Promise.resolve(null),
+    ]).then(([cb, mb]) => setAuthorNames({ createdBy: cb, modifiedBy: mb }));
+  }, [selectedNote?.createdBy, selectedNote?.modifiedBy]);
 
   const handleFormKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!isEditing) return;
@@ -887,10 +900,12 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
           <div>
             <p className="text-sm text-muted-foreground">{t('notes.created')}</p>
             <p className="text-sm">{formatTimestamp(selectedNote.createdAt)}</p>
+            {authorNames.createdBy && <p className="text-xs text-muted-foreground">{t('notes.by', { name: authorNames.createdBy })}</p>}
           </div>
           <div>
             <p className="text-sm text-muted-foreground">{t('notes.modified')}</p>
             <p className="text-sm">{formatTimestamp(selectedNote.modifiedAt)}</p>
+            {authorNames.modifiedBy && <p className="text-xs text-muted-foreground">{t('notes.by', { name: authorNames.modifiedBy })}</p>}
           </div>
           <div>
             <p className="text-sm text-muted-foreground">{t('notes.id')}</p>

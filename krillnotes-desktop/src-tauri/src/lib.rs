@@ -1705,6 +1705,22 @@ fn list_identities(
     mgr.list_identities().map_err(|e| e.to_string())
 }
 
+/// Resolves a public key to an identity display name.
+/// Returns the display name if the key belongs to a known local identity,
+/// a truncated fingerprint (first 8 chars) if unknown, or None if the key is empty.
+#[tauri::command]
+fn resolve_identity_name(
+    state: State<'_, AppState>,
+    public_key: String,
+) -> Option<String> {
+    if public_key.is_empty() {
+        return None;
+    }
+    let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+    mgr.lookup_display_name(&public_key)
+        .or_else(|| Some(public_key.chars().take(8).collect()))
+}
+
 /// Creates a new identity and auto-unlocks it in memory.
 #[tauri::command]
 fn create_identity(
@@ -3351,6 +3367,7 @@ pub fn run() {
             delete_workspace,
             duplicate_workspace,
             list_identities,
+            resolve_identity_name,
             create_identity,
             unlock_identity,
             lock_identity,
