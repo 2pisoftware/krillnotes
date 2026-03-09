@@ -916,6 +916,8 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
         const note = notes.find(n => n.id === hoveredNoteId);
         const schema = note ? (schemas[note.nodeType] ?? null) : null;
         if (!note) return null;
+        const hasHoverFields = schema?.fields.some(f => f.showOnHover) ?? false;
+        if (hoverHtml === null && !hasHoverFields) return null;
         return (
           <HoverTooltip
             note={note}

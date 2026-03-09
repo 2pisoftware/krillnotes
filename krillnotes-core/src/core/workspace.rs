@@ -3479,6 +3479,12 @@ impl Workspace {
         // Pre-validation: try to compile and evaluate the new source code.
         // The collision check allows same-script re-registration, so updating a script that
         // already owns some schemas will not falsely fire a collision error.
+        // We must set the loading category so schema scripts get library sources prepended.
+        let existing_category = self
+            .get_user_script(script_id)
+            .map(|s| s.category)
+            .unwrap_or_else(|_| "presentation".to_string());
+        self.script_registry.set_loading_category(Some(existing_category));
         if let Err(e) = self.script_registry.load_script(source_code, &fm.name) {
             let _ = self.reload_scripts(); // restore registry; ignore restoration errors
             return Err(e);
