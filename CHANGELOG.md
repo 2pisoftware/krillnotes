@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Library script functions are now visible to schema scripts and their hooks — library source is prepended when compiling schema scripts so functions defined in `.rhai` library scripts are available at both load time and hook call time
+- `register_view` and `register_menu` no longer produce duplicate tabs/entries when a library script is loaded alongside multiple schema scripts (deduplication by type + label in `resolve_bindings`)
+- Documented that top-level `const`/variable declarations in library scripts are not available inside hook closures — use `fn` returning a value instead; SCRIPTING.md updated with examples
+
 ## [0.3.0] — 2026-03-07
 
 > **Breaking changes:** This release introduces an identity-based authentication system (workspaces from v0.2.x must be exported and re-imported), a new scripting API (`save_note` replaces `update_note`, `register_view`/`register_hover`/`register_menu` replace inline hooks, schema versioning is now required), and HLC-based operation timestamps that update the database schema. Additionally, the project is now licensed under MPL-2.0 (previously MIT).
