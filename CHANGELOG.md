@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-prompt to unlock required identity when opening an invite or snapshot file
 - i18n strings for all swarm dialogs (invite, accept, snapshot modes)
 
+### Added
+- **Hover indicator caret on tree nodes** — a subtle `›` is shown on the right of tree node rows when the note type has an `on_hover` hook or `showOnHover` fields defined
+- **Identity/contact name in note Info panel** — Created and Modified timestamps now show the author's display name inline (local identity first, then contact address book, then 8-char fingerprint for unknown keys)
+- **`resolve_identity_name` Tauri command** — resolves a public key to a display name; used by both the info panel and the operations log
+- **`ContactManager` wired into `AppState`** — enables contact address book lookups from any Tauri command
+
 ### Fixed
 - Library script functions are now visible to schema scripts and their hooks — library source is prepended when compiling schema scripts so functions defined in `.rhai` library scripts are available at both load time and hook call time
 - `register_view` and `register_menu` no longer produce duplicate tabs/entries when a library script is loaded alongside multiple schema scripts (deduplication by type + label in `resolve_bindings`)
@@ -34,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `source_display_name` correctly populated in invite bundles
 - Unlocked identity UUID refreshes when Identity Manager closes or Swarm dialog opens
 - Documented that top-level `const`/variable declarations in library scripts are not available inside hook closures — use `fn` returning a value instead; SCRIPTING.md updated with examples
+- Schema script pre-validation in `update_user_script` now sets the loading category so library functions are available during validation — previously caused false "function not found" errors when saving a schema script that calls a library function
+- Hover tooltip no longer appears for notes whose type has no `on_hover` hook and no `showOnHover` fields
+- Operations log now checks the contact address book when resolving author names, in addition to local identities
+- Note Info panel metadata now uses the same `dl/dt/dd` grid layout as the fields view
+- Note Info panel metadata section is hidden on custom view tabs and only shown on the Fields tab
 
 ## [0.3.0] — 2026-03-07
 
