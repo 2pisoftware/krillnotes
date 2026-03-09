@@ -7,9 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Swarm contacts address book** — store and manage trusted peer identities (A1)
+- **Sync peers table and PeerRegistry** — tracks known peers and their sync state per workspace (A2)
+- **SwarmHeader codec and bundle-level signatures** — all `.swarm` file payloads are signed with Ed25519 and verified on open (A3, A4)
+- **Hybrid encryption for `.swarm` payloads** — X25519 key exchange + AES-256-GCM payload encryption (A5)
+- **Invite and accept bundle codec** — generate and parse peer invite bundles (A6, A7)
+- **Snapshot bundle generation and parsing** — full workspace snapshot serialised to `.swarm` file (A10, A11)
+- **Delta bundle generation and ingest stub** — incremental sync payload codec (A12, A13)
+- **`SetPermission`, `RevokePermission`, `JoinWorkspace` operation variants** — CRDT operations for future RBAC sync
+- **`.swarm` file association** — OS registers `.swarm` files with Krillnotes; double-click opens the correct dialog
+- **File > Invite Peer and Open .swarm File menu items**
+- **SwarmInviteDialog** — UI for generating and sharing a peer invite bundle
+- **SwarmOpenDialog** — UI for accepting an invite, opening a snapshot, or ingesting a delta bundle
+- **`create_snapshot_bundle_cmd` and `open_swarm_file_cmd` Tauri commands**
+- **`WorkspaceSnapshot` struct and `to_snapshot_json` / `import_snapshot_json`** — serialise/deserialise full workspace state for peer handoff
+- **Show and copy public key and fingerprint in Identity Manager** — for sharing with peers
+- Auto-prompt to unlock required identity when opening an invite or snapshot file
+- i18n strings for all swarm dialogs (invite, accept, snapshot modes)
+
 ### Fixed
 - Library script functions are now visible to schema scripts and their hooks — library source is prepended when compiling schema scripts so functions defined in `.rhai` library scripts are available at both load time and hook call time
 - `register_view` and `register_menu` no longer produce duplicate tabs/entries when a library script is loaded alongside multiple schema scripts (deduplication by type + label in `resolve_bindings`)
+- Snapshot import no longer seeds a default root note, preserving the imported workspace structure
+- Identity file path resolved relative to `config_dir` in `get_identity_public_key`
+- `source_display_name` correctly populated in invite bundles
+- Unlocked identity UUID refreshes when Identity Manager closes or Swarm dialog opens
 - Documented that top-level `const`/variable declarations in library scripts are not available inside hook closures — use `fn` returning a value instead; SCRIPTING.md updated with examples
 
 ## [0.3.0] — 2026-03-07
