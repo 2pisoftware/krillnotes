@@ -892,26 +892,25 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
           <ChevronRight size={16} className="[details[open]_&]:rotate-90 transition-transform" />
           {t('notes.info')}
         </summary>
-        <div className="px-6 pb-6 space-y-4">
-          <div>
-            <p className="text-sm text-muted-foreground">{t('notes.type')}</p>
-            <p className="text-lg">{selectedNote.nodeType}</p>
-          </div>
-          <div>
-            <p className="text-sm text-muted-foreground">{t('notes.created')}</p>
-            <p className="text-sm">{formatTimestamp(selectedNote.createdAt)}</p>
-            {authorNames.createdBy && <p className="text-xs text-muted-foreground">{t('notes.by', { name: authorNames.createdBy })}</p>}
-          </div>
-          <div>
-            <p className="text-sm text-muted-foreground">{t('notes.modified')}</p>
-            <p className="text-sm">{formatTimestamp(selectedNote.modifiedAt)}</p>
-            {authorNames.modifiedBy && <p className="text-xs text-muted-foreground">{t('notes.by', { name: authorNames.modifiedBy })}</p>}
-          </div>
-          <div>
-            <p className="text-sm text-muted-foreground">{t('notes.id')}</p>
-            <p className="text-xs font-mono">{selectedNote.id}</p>
-          </div>
-        </div>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 px-6 pb-6">
+          <dt className="text-sm font-medium text-muted-foreground self-start pt-0.5 whitespace-nowrap">{t('notes.type')}</dt>
+          <dd className="m-0 text-foreground text-sm">{selectedNote.nodeType}</dd>
+
+          <dt className="text-sm font-medium text-muted-foreground self-start pt-0.5 whitespace-nowrap">{t('notes.created')}</dt>
+          <dd className="m-0 text-foreground text-sm">
+            {formatTimestamp(selectedNote.createdAt)}
+            {authorNames.createdBy && <span className="text-muted-foreground"> · {authorNames.createdBy}</span>}
+          </dd>
+
+          <dt className="text-sm font-medium text-muted-foreground self-start pt-0.5 whitespace-nowrap">{t('notes.modified')}</dt>
+          <dd className="m-0 text-foreground text-sm">
+            {formatTimestamp(selectedNote.modifiedAt)}
+            {authorNames.modifiedBy && <span className="text-muted-foreground"> · {authorNames.modifiedBy}</span>}
+          </dd>
+
+          <dt className="text-sm font-medium text-muted-foreground self-start pt-0.5 whitespace-nowrap">{t('notes.id')}</dt>
+          <dd className="m-0 text-foreground text-xs font-mono break-all">{selectedNote.id}</dd>
+        </dl>
       </details>
     </div>
   );
