@@ -54,8 +54,12 @@ When a workspace opens, scripts run in four phases:
 3. **Phase C — Resolve bindings**: match deferred `register_*` calls to registered schemas. Unresolved entries show a warning badge in the Script Manager.
 4. **Phase D — Migrations**: for each schema, find notes with `schema_version < current version`, run `migrate` closures, and write back in one transaction per type.
 
-Library-first ordering (Phase A before B) means helper functions defined in `.rhai` files are
-available when schema `on_save` hooks run.
+Library-first ordering (Phase A before B) means **functions** defined in `.rhai` files are
+available when schema scripts load and when hooks run.
+
+> **Important:** top-level `const` and variable declarations in library scripts are **not**
+> available inside hook closures. Only function definitions cross the boundary. If you need
+> shared constants, wrap them in a function — see [§17 Tips and patterns](#17-tips-and-patterns).
 
 ### Minimal examples
 
@@ -1198,6 +1202,37 @@ schema("Project", #{
     fields: [ /* … */ ],
     on_save: |note| { commit(); }
 });
+```
+
+### Sharing constants between library and schema scripts
+
+Top-level `const` declarations in a library script are **not** visible inside schema hook
+closures. Wrap shared values in a function instead — function definitions are fully available
+across scripts:
+
+```rhai
+// ❌ will cause "Variable not found: PREFIXES" inside hooks
+const PREFIXES = #{ mr: "Mr.", mrs: "Mrs.", dr: "Dr." };
+
+// ✓ works — call prefixes() anywhere, including field definitions and hook closures
+fn prefixes() {
+    #{ mr: "Mr.", mrs: "Mrs.", dr: "Dr." }
+}
+```
+
+Call it in a field `semantic` map, inside a hook, or anywhere else:
+
+```rhai
+// in a field definition (evaluated at schema-load time)
+#{ name: "salutation", type: "select",
+   semantic: #{ property: prefixes().mr } }
+
+// inside an on_save hook
+on_save: |note| {
+    let p = prefixes();
+    if note.fields["salutation"] == p.mr { /* … */ }
+    commit();
+}
 ```
 
 ### Avoiding accidental schema collisions
