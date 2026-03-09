@@ -623,14 +623,20 @@ impl SchemaRegistry {
             match binding.kind {
                 BindingKind::View => {
                     if schemas.contains_key(&binding.target_type) {
-                        let entry = ViewRegistration {
-                            label: binding.label.unwrap_or_else(|| binding.target_type.clone()),
-                            display_first: binding.display_first,
-                            fn_ptr: binding.fn_ptr,
-                            ast: binding.ast,
-                            script_name: binding.script_name,
-                        };
-                        views.entry(binding.target_type).or_default().push(entry);
+                        let label = binding.label.unwrap_or_else(|| binding.target_type.clone());
+                        let slot = views.entry(binding.target_type).or_default();
+                        // Deduplicate: library source is prepended to each schema compilation,
+                        // so register_view() in a library script fires once per schema loaded.
+                        // Keep only the first registration for each (type, label) pair.
+                        if !slot.iter().any(|v| v.label == label) {
+                            slot.push(ViewRegistration {
+                                label,
+                                display_first: binding.display_first,
+                                fn_ptr: binding.fn_ptr,
+                                ast: binding.ast,
+                                script_name: binding.script_name,
+                            });
+                        }
                     } else {
                         warnings.push(ScriptWarning {
                             script_name: binding.script_name,
@@ -663,13 +669,16 @@ impl SchemaRegistry {
                 BindingKind::Menu => {
                     for target_type in &binding.applies_to {
                         if schemas.contains_key(target_type) {
-                            let entry = MenuRegistration {
-                                label: binding.label.clone().unwrap_or_default(),
-                                fn_ptr: binding.fn_ptr.clone(),
-                                ast: Arc::clone(&binding.ast),
-                                script_name: binding.script_name.clone(),
-                            };
-                            menus.entry(target_type.clone()).or_default().push(entry);
+                            let label = binding.label.clone().unwrap_or_default();
+                            let slot = menus.entry(target_type.clone()).or_default();
+                            if !slot.iter().any(|m| m.label == label) {
+                                slot.push(MenuRegistration {
+                                    label,
+                                    fn_ptr: binding.fn_ptr.clone(),
+                                    ast: Arc::clone(&binding.ast),
+                                    script_name: binding.script_name.clone(),
+                                });
+                            }
                         } else {
                             warnings.push(ScriptWarning {
                                 script_name: binding.script_name.clone(),

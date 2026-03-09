@@ -41,6 +41,14 @@ pub struct NoteSearchResult {
     pub title: String,
 }
 
+/// Serializable snapshot of a workspace's notes and scripts for peer sync.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceSnapshot {
+    pub version: u32,
+    pub notes: Vec<Note>,
+    pub user_scripts: Vec<UserScript>,
+}
+
 /// Controls where a new note is inserted relative to the currently selected note.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AddPosition {
@@ -298,6 +306,138 @@ impl Workspace {
             pending_migration_results: Vec::new(),
         };
         let _ = workspace.write_info_json(); // best-effort; non-fatal
+        Ok(workspace)
+    }
+
+    /// Like [`create`] but does **not** insert a default root note.
+    ///
+    /// Use this when the workspace content will immediately be populated from an
+    /// external source (e.g. a snapshot import), so the seed note would only create
+    /// unwanted noise alongside the imported tree.
+    pub fn create_empty<P: AsRef<Path>>(path: P, password: &str, identity_uuid: &str, signing_key: ed25519_dalek::SigningKey) -> Result<Self> {
+        let mut storage = Storage::create(&path, password)?;
+        let mut script_registry = ScriptRegistry::new()?;
+        let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
+
+        let device_id = get_device_id()?;
+
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            ["device_id", &device_id],
+        )?;
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            ["identity_uuid", identity_uuid],
+        )?;
+
+        let workspace_root = path.as_ref()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let _ = std::fs::create_dir_all(workspace_root.join("attachments"));
+
+        let workspace_id = uuid::Uuid::new_v4().to_string();
+        storage.connection().execute(
+            "INSERT OR IGNORE INTO workspace_meta (key, value) VALUES (?, ?)",
+            rusqlite::params!["workspace_id", &workspace_id],
+        )?;
+
+        let attachment_key = if !password.is_empty() {
+            Some(crate::core::attachment::derive_attachment_key(password, &workspace_id))
+        } else {
+            None
+        };
+
+        // Seed starter scripts (same as create).
+        let now = chrono::Utc::now().timestamp();
+        let starters = ScriptRegistry::starter_scripts();
+        {
+            let tx = storage.connection_mut().transaction()?;
+            for (load_order, starter) in starters.iter().enumerate() {
+                let fm = user_script::parse_front_matter(&starter.source_code);
+                let id = Uuid::new_v4().to_string();
+                let category = if starter.filename.ends_with(".schema.rhai") { "schema" } else { "presentation" };
+                tx.execute(
+                    "INSERT INTO user_scripts (id, name, description, source_code, load_order, enabled, created_at, modified_at, category)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![id, fm.name, fm.description, &starter.source_code, load_order as i32, true, now, now, category],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        let scripts = {
+            let mut stmt = storage.connection().prepare(
+                "SELECT id, name, description, source_code, load_order, enabled, created_at, modified_at, category
+                 FROM user_scripts ORDER BY load_order ASC, created_at ASC",
+            )?;
+            let results: Vec<UserScript> = stmt.query_map([], |row| {
+                Ok(UserScript {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    source_code: row.get(3)?,
+                    load_order: row.get(4)?,
+                    enabled: row.get::<_, i64>(5).map(|v| v != 0)?,
+                    created_at: row.get(6)?,
+                    modified_at: row.get(7)?,
+                    category: row.get::<_, String>(8).unwrap_or_else(|_| "presentation".to_string()),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+            results
+        };
+        for script in scripts.iter().filter(|s| s.enabled && s.category == "presentation") {
+            script_registry.set_loading_category(Some("presentation".to_string()));
+            let _ = script_registry.load_script(&script.source_code, &script.name);
+        }
+        for script in scripts.iter().filter(|s| s.enabled && s.category == "schema") {
+            script_registry.set_loading_category(Some("schema".to_string()));
+            let _ = script_registry.load_script(&script.source_code, &script.name);
+        }
+        script_registry.resolve_bindings();
+
+        let identity_pubkey_b64 = {
+            use base64::Engine as _;
+            let pubkey = ed25519_dalek::VerifyingKey::from(&signing_key);
+            base64::engine::general_purpose::STANDARD.encode(pubkey.as_bytes())
+        };
+
+        // No default root note — content will come from the imported snapshot.
+
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            ["undo_limit", "50"],
+        )?;
+        let undo_limit: usize = 50;
+
+        let node_id = crate::core::hlc::node_id_from_device(
+            &uuid::Uuid::parse_str(&device_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        );
+        let hlc = HlcClock::new(node_id);
+
+        let workspace = Self {
+            storage,
+            script_registry,
+            operation_log,
+            device_id,
+            identity_uuid: identity_uuid.to_string(),
+            current_identity_pubkey: identity_pubkey_b64,
+            workspace_root,
+            workspace_id,
+            attachment_key,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_limit,
+            script_undo_stack: Vec::new(),
+            script_redo_stack: Vec::new(),
+            undo_group_buffer: None,
+            inside_undo: false,
+            hlc,
+            signing_key,
+            pending_migration_results: Vec::new(),
+        };
+        let _ = workspace.write_info_json();
         Ok(workspace)
     }
 
@@ -4236,6 +4376,93 @@ impl Workspace {
         }
     }
 
+    // ── Snapshot (peer sync) ───────────────────────────────────────
+
+    /// Serialise all notes and user scripts to JSON bytes for a snapshot bundle.
+    pub fn to_snapshot_json(&self) -> Result<Vec<u8>> {
+        let notes = self.list_all_notes()?;
+        let user_scripts = self.list_user_scripts()?;
+        let snapshot = WorkspaceSnapshot {
+            version: 1,
+            notes,
+            user_scripts,
+        };
+        Ok(serde_json::to_vec(&snapshot)?)
+    }
+
+    /// Populate a workspace from snapshot JSON bytes.
+    ///
+    /// Notes and user scripts are inserted. Returns the number of notes imported.
+    /// Designed for freshly created workspaces — duplicates will be skipped via INSERT OR IGNORE.
+    pub fn import_snapshot_json(&mut self, data: &[u8]) -> Result<usize> {
+        let snapshot: WorkspaceSnapshot = serde_json::from_slice(data)
+            .map_err(|e| KrillnotesError::Json(e))?;
+
+        let note_count = snapshot.notes.len();
+
+        // Bulk-insert notes preserving original IDs.
+        // Defer foreign-key checks so children can be inserted before parents.
+        {
+            self.storage
+                .connection_mut()
+                .execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+            let tx = self.storage.connection_mut().transaction()?;
+            for note in &snapshot.notes {
+                let fields_json = serde_json::to_string(&note.fields)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO notes (id, title, node_type, parent_id, position, created_at, modified_at, created_by, modified_by, fields_json, is_expanded, schema_version)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        note.id,
+                        note.title,
+                        note.node_type,
+                        note.parent_id,
+                        note.position,
+                        note.created_at,
+                        note.modified_at,
+                        note.created_by,
+                        note.modified_by,
+                        fields_json,
+                        note.is_expanded,
+                        note.schema_version,
+                    ],
+                )?;
+                for tag in &note.tags {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO note_tags (note_id, tag) VALUES (?, ?)",
+                        rusqlite::params![note.id, tag],
+                    )?;
+                }
+            }
+            tx.commit()?;
+        }
+
+        // Insert user scripts (preserve original IDs via INSERT OR IGNORE).
+        if !snapshot.user_scripts.is_empty() {
+            let tx = self.storage.connection_mut().transaction()?;
+            for script in &snapshot.user_scripts {
+                tx.execute(
+                    "INSERT OR IGNORE INTO user_scripts (id, name, description, source_code, load_order, enabled, created_at, modified_at, category)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![
+                        script.id,
+                        script.name,
+                        script.description,
+                        script.source_code,
+                        script.load_order,
+                        script.enabled,
+                        script.created_at,
+                        script.modified_at,
+                        script.category,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        Ok(note_count)
+    }
+
 }
 
 /// Keeps the `note_links` junction table in sync with the current field values of a note.
@@ -7155,5 +7382,61 @@ schema("SameVerType", #{
         let schema = ws.script_registry.get_schema("SameVerType").unwrap();
         assert_eq!(schema.version, 1);
         assert_eq!(schema.fields.len(), 2, "expected 2 fields after same-version re-registration");
+    }
+
+    #[test]
+    fn test_to_snapshot_json_roundtrip() {
+        let temp = NamedTempFile::new().unwrap();
+        let mut ws = Workspace::create(
+            temp.path(),
+            "",
+            "test-identity",
+            ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]),
+        ).unwrap();
+        // Add a note so the snapshot has more than just the root.
+        let root = ws.list_all_notes().unwrap()[0].clone();
+        ws.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
+        let json = ws.to_snapshot_json().unwrap();
+        assert!(!json.is_empty());
+        let snap: WorkspaceSnapshot = serde_json::from_slice(&json).unwrap();
+        // Workspace::create inserts a root note, so we have 2 notes total.
+        assert_eq!(snap.notes.len(), 2);
+    }
+
+    #[test]
+    fn test_import_snapshot_json_round_trip() {
+        let src_temp = NamedTempFile::new().unwrap();
+        let mut src = Workspace::create(
+            src_temp.path(),
+            "",
+            "src-identity",
+            ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]),
+        ).unwrap();
+        // Replace the default root note title and add two children.
+        let root = src.list_all_notes().unwrap()[0].clone();
+        src.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
+        src.create_note(&root.id, AddPosition::AsChild, "TextNote").unwrap();
+        let json = src.to_snapshot_json().unwrap();
+
+        // Destination workspace.
+        let dst_temp = NamedTempFile::new().unwrap();
+        let mut dst = Workspace::create(
+            dst_temp.path(),
+            "",
+            "dst-identity",
+            ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]),
+        ).unwrap();
+        // Remove the auto-created root so we start from a clean slate.
+        let dst_root = dst.list_all_notes().unwrap()[0].clone();
+        dst.storage.connection_mut().execute(
+            "DELETE FROM notes WHERE id = ?",
+            [&dst_root.id],
+        ).unwrap();
+
+        let count = dst.import_snapshot_json(&json).unwrap();
+        // src had: 1 original root + 2 children = 3 notes.
+        assert_eq!(count, 3);
+        let notes = dst.list_all_notes().unwrap();
+        assert_eq!(notes.len(), 3);
     }
 }

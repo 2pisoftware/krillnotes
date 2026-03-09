@@ -86,6 +86,14 @@ pub enum KrillnotesError {
 
     #[error("Unsupported .swarmid version: {0}")]
     SwarmIdVersionUnsupported(u32),
+
+    /// A `.swarm` bundle operation failed.
+    #[error("swarm: {0}")]
+    Swarm(String),
+
+    /// A zip archive operation failed (bundle encoding/decoding).
+    #[error("zip error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 #[cfg(test)]
@@ -159,6 +167,8 @@ impl KrillnotesError {
             Self::SwarmIdVersionUnsupported(v) => {
                 format!("This .swarmid file uses version {v}, which is not supported by this version of Krillnotes.")
             }
+            Self::Swarm(msg) => format!("Swarm bundle error: {msg}"),
+            Self::Zip(e) => format!("Bundle archive error: {e}"),
         }
     }
 }

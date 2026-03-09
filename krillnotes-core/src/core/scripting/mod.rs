@@ -139,6 +139,10 @@ pub struct ScriptRegistry {
     current_loading_ast: Arc<Mutex<Option<AST>>>,
     current_loading_script_name: Arc<Mutex<Option<String>>>,
     current_loading_category: Arc<Mutex<Option<String>>>,
+    /// Source code of all successfully loaded library/presentation scripts.
+    /// Schema scripts are compiled together with this library source so they can call library
+    /// helpers at both load time and at runtime (the merged AST is stored in every hook entry).
+    library_sources: Arc<Mutex<Vec<String>>>,
     /// Tracks which script name registered each schema name, for collision detection.
     schema_owners: Arc<Mutex<HashMap<String, String>>>,
     schema_registry: schema::SchemaRegistry,
@@ -725,11 +729,14 @@ impl ScriptRegistry {
             }
         );
 
+        let library_sources: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
         Ok(Self {
             engine,
             current_loading_ast,
             current_loading_script_name,
             current_loading_category,
+            library_sources,
             schema_owners,
             schema_registry,
             query_context,
@@ -767,9 +774,26 @@ impl ScriptRegistry {
     }
 
     pub fn load_script(&mut self, script: &str, name: &str) -> Result<()> {
+        // Schema scripts get all library source prepended so they can call library helpers.
+        // The resulting AST (library + schema) is stored in every hook entry so runtime
+        // calls also resolve library functions correctly.
+        let category = self.current_loading_category.lock().unwrap().clone();
+        let is_schema = category.as_deref() == Some("schema");
+
+        let source_to_compile: String = if is_schema {
+            let lib = self.library_sources.lock().unwrap();
+            if lib.is_empty() {
+                script.to_string()
+            } else {
+                format!("{}\n\n{}", lib.join("\n\n"), script)
+            }
+        } else {
+            script.to_string()
+        };
+
         let ast = self
             .engine
-            .compile(script)
+            .compile(&source_to_compile)
             .map_err(|e| KrillnotesError::Scripting(e.to_string()))?;
 
         // SAFETY: mutex poisoning would require a panic while the lock is held,
@@ -781,6 +805,11 @@ impl ScriptRegistry {
             .engine
             .eval_ast::<()>(&ast)
             .map_err(|e| KrillnotesError::Scripting(e.to_string()));
+
+        // Accumulate successful library/presentation scripts so later schema scripts can use them.
+        if result.is_ok() && !is_schema {
+            self.library_sources.lock().unwrap().push(script.to_string());
+        }
 
         // Always clear: a failed script may have partially registered hooks;
         // leave no stale AST for the next load.
@@ -1004,6 +1033,7 @@ impl ScriptRegistry {
     pub fn clear_all(&self) {
         self.schema_registry.clear();
         self.schema_owners.lock().unwrap().clear();
+        self.library_sources.lock().unwrap().clear();
         *self.query_context.lock().unwrap() = None;
         *self.run_context.lock().unwrap() = None;
     }
@@ -1840,6 +1870,76 @@ mod tests {
 
         let types = registry.list_types().unwrap();
         assert!(types.is_empty(), "clear_all should remove all schemas");
+    }
+
+    /// Regression: library scripts (presentation category) define functions that schema scripts
+    /// should be able to call.  Before the fix, function definitions from a separately-eval'd
+    /// library AST were not visible when the schema AST was compiled and executed.
+    #[test]
+    fn test_schema_script_can_call_library_script_functions() {
+        let mut registry = ScriptRegistry::new().unwrap();
+
+        // Load a library/presentation script that defines a helper function.
+        registry.set_loading_category(Some("presentation".to_string()));
+        registry.load_script(r#"
+            fn format_greeting(name) {
+                "Hello, " + name
+            }
+        "#, "my_library").unwrap();
+
+        // Load a schema script that calls the library function inside on_save.
+        registry.set_loading_category(Some("schema".to_string()));
+        registry.load_script(r#"
+            schema("Greeted", #{
+                version: 1,
+                fields: [#{ name: "name", type: "text" }],
+                on_save: |note| {
+                    let greeting = format_greeting(note.fields["name"]);
+                    set_title(note.id, greeting);
+                    commit();
+                }
+            });
+        "#, "my_schema").unwrap();
+
+        let fields = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("name".to_string(), crate::core::note::FieldValue::Text("World".to_string()));
+            m
+        };
+        let tx = registry
+            .run_on_save_hook("Greeted", "id-1", "Greeted", "", &fields)
+            .unwrap()
+            .unwrap();
+
+        let pn = tx.pending_notes.get("id-1").unwrap();
+        assert_eq!(pn.title, Some("Hello, World".to_string()));
+    }
+
+    /// Regression: clear_all must reset library_sources so a reload doesn't carry over
+    /// functions from a previous load cycle.
+    #[test]
+    fn test_clear_all_resets_library_sources() {
+        let mut registry = ScriptRegistry::new().unwrap();
+
+        registry.set_loading_category(Some("presentation".to_string()));
+        registry.load_script("fn lib_fn() { 42 }", "lib").unwrap();
+
+        registry.clear_all();
+
+        // After clear_all, loading a schema that calls lib_fn should fail.
+        registry.set_loading_category(Some("schema".to_string()));
+        let result = registry.load_script(r#"
+            schema("X", #{
+                version: 1,
+                fields: [],
+                on_save: |note| { lib_fn(); commit(); }
+            });
+        "#, "schema_using_lib");
+        // on_save is a closure — the error surfaces at call time, not load time, so schema loads OK.
+        // What matters is that library_sources is empty after clear_all.
+        let _ = result;
+        assert!(registry.library_sources.lock().unwrap().is_empty(),
+            "library_sources should be empty after clear_all");
     }
 
     // ── Host functions ──────────────────────────────────────────────────────

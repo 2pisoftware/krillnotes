@@ -351,5 +351,46 @@
     "importSuccess": "Identity imported successfully",
     "importOverwrite": "This identity already exists on this device. Replace it?",
     "invalidSwarmid": "Invalid .swarmid file"
+  },
+  "swarm": {
+    "inviteDialogTitle": "Invite Peer to Workspace",
+    "contactModeExisting": "Choose from contacts",
+    "contactModeNew": "New contact",
+    "contactNameLabel": "Their name",
+    "contactNamePlaceholder": "Display name",
+    "publicKeyLabel": "Their public key",
+    "publicKeyPlaceholder": "Base64 Ed25519 public key",
+    "roleLabel": "Offer role",
+    "roleOwner": "Owner",
+    "roleWriter": "Writer",
+    "roleReader": "Reader",
+    "createInviteButton": "Create invite file…",
+    "inviteSaved": "Invite saved. Send this file to {{name}}.",
+
+    "openDialogTitle": "Open .swarm File",
+    "loading": "Reading bundle…",
+    "inviteModeHeading": "Workspace Invitation",
+    "inviteFrom": "From",
+    "inviteWorkspace": "Workspace",
+    "inviteOfferedRole": "Offered role",
+    "inviteFingerprint": "Their fingerprint",
+    "acceptButton": "Accept — save reply…",
+    "acceptSaved": "Reply saved. Send this file back to {{name}}.",
+
+    "acceptModeHeading": "{{name}} has accepted your invitation",
+    "acceptorFingerprint": "Verify their fingerprint before sending:",
+    "sendSnapshotButton": "Send snapshot…",
+    "snapshotSaved": "Snapshot saved. Send this file to {{name}}.",
+
+    "snapshotModeHeading": "Workspace snapshot from {{name}}",
+    "snapshotWorkspaceNameLabel": "Workspace name",
+    "createWorkspaceButton": "Create workspace",
+
+    "deltaNotSupported": "Delta sync bundles are not yet supported in this version.",
+    "invalidBundle": "This file could not be read — it may be corrupt or from an incompatible version.",
+    "signatureInvalid": "Bundle signature verification failed. Do not proceed.",
+    "identityLocked": "Unlock your identity first.",
+    "noIdentity": "You need to create an identity before using sync features.",
+    "saveCancelled": "Save cancelled."
   }
 }
