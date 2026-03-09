@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Swarm contacts address book** — store and manage trusted peer identities (A1)
+- **Swarm contacts data model** — `Contact` struct and core CRUD in `krillnotes-core`; UI not yet wired (A1)
 - **Sync peers table and PeerRegistry** — tracks known peers and their sync state per workspace (A2)
 - **SwarmHeader codec and bundle-level signatures** — all `.swarm` file payloads are signed with Ed25519 and verified on open (A3, A4)
 - **Hybrid encryption for `.swarm` payloads** — X25519 key exchange + AES-256-GCM payload encryption (A5)
