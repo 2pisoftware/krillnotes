@@ -94,7 +94,7 @@ Krillnotes/
 
 ### Use LSP Instead of Reading Files
 
-The VSCode LSP tool is available and MUST be the first choice for code navigation in Rust files. It returns only the information you need, not entire files.
+The rust-analyzer LSP tool is available and MUST be the first choice for code navigation in Rust files. It returns only the information you need, not entire files.
 
 | Need | LSP operation | Instead of |
 |------|--------------|------------|
