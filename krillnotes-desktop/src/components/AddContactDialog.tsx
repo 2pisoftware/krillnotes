@@ -71,7 +71,7 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
-              placeholder="Display name"
+              placeholder={t('contacts.namePlaceholder')}
               className="w-full px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm"
             />
           </div>
@@ -81,13 +81,13 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
             <textarea
               value={publicKey}
               onChange={e => setPublicKey(e.target.value)}
-              placeholder="Paste base64-encoded Ed25519 public key"
+              placeholder={t('contacts.publicKeyPlaceholder')}
               rows={3}
               className="w-full px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm font-mono"
             />
             {fingerprint && (
               <p className="mt-1 text-xs text-[var(--color-text-muted)] font-mono">
-                Fingerprint: <span className="font-semibold">{fingerprint}</span>
+                {t('contacts.fingerprintLabel')} <span className="font-semibold">{fingerprint}</span>
               </p>
             )}
           </div>
@@ -100,7 +100,7 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
               className="w-full px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm"
             >
               {TRUST_LEVELS.map(tl => (
-                <option key={tl.value} value={tl.value}>{tl.label}</option>
+                <option key={tl.value} value={tl.value}>{t(tl.labelKey)}</option>
               ))}
             </select>
           </div>

@@ -110,7 +110,7 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
         {/* Contact list */}
         <div className="overflow-y-auto flex-1">
           {loading && (
-            <p className="text-sm text-center text-[var(--color-text-muted)] py-8">Loading…</p>
+            <p className="text-sm text-center text-[var(--color-text-muted)] py-8">{t('common.loading')}</p>
           )}
           {!loading && error && (
             <p className="text-sm text-center text-red-500 py-8">{error}</p>
@@ -143,7 +143,7 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
 
         {/* Footer count */}
         <div className="px-4 py-2 border-t border-[var(--color-border)] text-xs text-[var(--color-text-muted)]">
-          {contacts.length} contact{contacts.length !== 1 ? 's' : ''}
+          {t('contacts.contactCount', { count: contacts.length })}
         </div>
       </div>
 

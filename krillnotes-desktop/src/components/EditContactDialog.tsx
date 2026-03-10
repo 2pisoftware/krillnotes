@@ -79,13 +79,13 @@ export default function EditContactDialog({
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-6 w-full max-w-md shadow-xl">
         <h2 className="text-lg font-semibold mb-1">{t('contacts.editContact')}</h2>
         <p className="text-sm text-[var(--color-text-muted)] mb-4">
-          Declared name: <span className="font-medium">{contact.declaredName}</span>
+          {t('contacts.declaredNameLabel')} <span className="font-medium">{contact.declaredName}</span>
         </p>
 
         <div className="space-y-4">
           {/* Read-only: fingerprint + public key */}
           <div className="rounded border border-[var(--color-border)] p-3 space-y-1">
-            <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">Fingerprint</p>
+            <p className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">{t('contacts.fingerprintHeading')}</p>
             <p className="font-mono font-semibold">{contact.fingerprint}</p>
             <p className="text-xs font-mono text-[var(--color-text-muted)] break-all">{contact.publicKey}</p>
           </div>
@@ -112,7 +112,7 @@ export default function EditContactDialog({
               className="w-full px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm"
             >
               {TRUST_LEVELS.map(tl => (
-                <option key={tl.value} value={tl.value}>{tl.label}</option>
+                <option key={tl.value} value={tl.value}>{t(tl.labelKey)}</option>
               ))}
             </select>
           </div>
@@ -121,7 +121,7 @@ export default function EditContactDialog({
             <div className="rounded-lg border border-amber-400/50 bg-amber-50/10 p-4 space-y-3">
               <p className="text-sm font-medium">{t('contacts.fingerprintVerificationRequired')}</p>
               <p className="text-xs text-[var(--color-text-muted)]">
-                Ask your contact to read their fingerprint aloud. Does it match?
+                {t('contacts.fingerprintVerificationHint')}
               </p>
               <p className="text-lg font-mono font-bold tracking-wider text-center py-2">
                 {contact.fingerprint}
@@ -143,7 +143,7 @@ export default function EditContactDialog({
             <textarea
               value={notes}
               onChange={e => setNotes(e.target.value)}
-              placeholder="Private notes about this contact…"
+              placeholder={t('contacts.notesPlaceholder')}
               rows={3}
               className="w-full px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm"
             />
@@ -162,7 +162,7 @@ export default function EditContactDialog({
                 : 'border border-red-400 text-red-500 hover:bg-red-50/10'
             } disabled:opacity-50`}
           >
-            {deleting ? 'Deleting…' : confirmDelete ? t('contacts.confirmDeleteContact') : t('common.delete')}
+            {deleting ? t('common.deleting') : confirmDelete ? t('contacts.confirmDeleteContact') : t('common.delete')}
           </button>
           <div className="flex gap-2">
             <button
