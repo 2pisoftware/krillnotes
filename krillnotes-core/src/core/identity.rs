@@ -120,6 +120,18 @@ pub struct UnlockedIdentity {
     pub verifying_key: ed25519_dalek::VerifyingKey,
 }
 
+impl UnlockedIdentity {
+    /// Derives a 32-byte encryption key for this identity's contact book.
+    /// Uses HKDF-SHA256 with the Ed25519 seed as IKM.
+    pub fn contacts_key(&self) -> [u8; 32] {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, self.signing_key.as_bytes());
+        let mut okm = [0u8; 32];
+        hk.expand(b"krillnotes-contacts-v1", &mut okm)
+            .expect("HKDF expand failed — output length is valid");
+        okm
+    }
+}
+
 // ---------------------------------------------------------------------------
 // .swarmid portable identity file
 // ---------------------------------------------------------------------------
@@ -1169,5 +1181,29 @@ mod tests {
             mgr.import_swarmid(bad_version),
             Err(crate::KrillnotesError::SwarmIdVersionUnsupported(99))
         ));
+    }
+
+    #[test]
+    fn contacts_key_is_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let identity = mgr
+            .create_identity("Test User", "passphrase123")
+            .unwrap();
+        let unlocked = mgr
+            .unlock_identity(&identity.identity_uuid, "passphrase123")
+            .unwrap();
+        let key1 = unlocked.contacts_key();
+        let key2 = unlocked.contacts_key();
+        assert_eq!(key1, key2, "contacts_key must be deterministic");
+        assert_eq!(key1.len(), 32);
+        // Must differ from a different identity
+        let identity2 = mgr
+            .create_identity("Other User", "passphrase123")
+            .unwrap();
+        let unlocked2 = mgr
+            .unlock_identity(&identity2.identity_uuid, "passphrase123")
+            .unwrap();
+        assert_ne!(unlocked.contacts_key(), unlocked2.contacts_key());
     }
 }
