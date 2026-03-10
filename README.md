@@ -121,4 +121,4 @@ This removes the quarantine flag macOS adds when mounting a DMG. The app will op
 
 ## License
 
-MPL-2.0 — see [LICENSE](LICENSE). Previously MIT (through v0.2.x).
+MPL-2.0 — see [LICENSE](LICENSE).
