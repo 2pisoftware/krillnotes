@@ -776,6 +776,7 @@ struct SchemaInfo {
     has_views: bool,
     has_hover: bool,
     field_groups: Vec<FieldGroupInfo>,
+    is_leaf: bool,
 }
 
 fn schema_to_info(schema: &Schema, has_views: bool, has_hover: bool) -> SchemaInfo {
@@ -796,6 +797,7 @@ fn schema_to_info(schema: &Schema, has_views: bool, has_hover: bool) -> SchemaIn
             collapsed: g.collapsed,
             has_visible_closure: g.visible.is_some(),
         }).collect(),
+        is_leaf: schema.is_leaf,
     }
 }
 
