@@ -219,3 +219,16 @@ export interface WorkspaceBindingInfo {
   workspaceUuid: string;
   dbPath: string;
 }
+
+export type TrustLevel = 'Tofu' | 'CodeVerified' | 'Vouched' | 'VerifiedInPerson';
+
+export interface ContactInfo {
+  contactId: string;
+  declaredName: string;
+  localName: string | null;
+  publicKey: string;
+  fingerprint: string;
+  trustLevel: TrustLevel;
+  firstSeen: string; // ISO 8601
+  notes: string | null;
+}
