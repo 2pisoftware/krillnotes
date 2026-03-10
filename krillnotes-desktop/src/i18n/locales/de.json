@@ -425,6 +425,7 @@
     "fingerprintVerificationHint": "Bitten Sie Ihren Kontakt, seinen Fingerabdruck laut vorzulesen. Stimmt er mit dem überein, was Sie unten sehen?",
     "fingerprintMatches": "Ja, der Fingerabdruck stimmt überein",
     "saveContact": "Kontakt speichern",
-    "confirmDeleteContact": "Löschen bestätigen"
+    "confirmDeleteContact": "Löschen bestätigen",
+    "contactsButton": "Kontakte ({{count}})"
   }
 }

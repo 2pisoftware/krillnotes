@@ -425,6 +425,7 @@
     "fingerprintVerificationHint": "Pide a tu contacto que lea su huella en voz alta. ¿Coincide con lo que ves abajo?",
     "fingerprintMatches": "Sí, la huella digital coincide",
     "saveContact": "Guardar contacto",
-    "confirmDeleteContact": "Confirmar eliminación"
+    "confirmDeleteContact": "Confirmar eliminación",
+    "contactsButton": "Contactos ({{count}})"
   }
 }

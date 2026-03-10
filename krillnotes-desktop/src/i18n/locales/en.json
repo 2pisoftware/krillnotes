@@ -427,6 +427,7 @@
     "fingerprintVerificationHint": "Ask your contact to read their fingerprint aloud. Does it match what you see below?",
     "fingerprintMatches": "Yes, the fingerprint matches",
     "saveContact": "Save Contact",
-    "confirmDeleteContact": "Confirm Delete"
+    "confirmDeleteContact": "Confirm Delete",
+    "contactsButton": "Contacts ({{count}})"
   }
 }

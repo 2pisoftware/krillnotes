@@ -423,6 +423,7 @@
     "fingerprintVerificationHint": "请联系人大声读出其指纹。与您在下方看到的匹配吗？",
     "fingerprintMatches": "是的，指纹匹配",
     "saveContact": "保存联系人",
-    "confirmDeleteContact": "确认删除"
+    "confirmDeleteContact": "确认删除",
+    "contactsButton": "联系人 ({{count}})"
   }
 }

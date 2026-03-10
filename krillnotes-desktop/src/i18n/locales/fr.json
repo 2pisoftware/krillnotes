@@ -425,6 +425,7 @@
     "fingerprintVerificationHint": "Demandez à votre contact de lire son empreinte à voix haute. Correspond-elle à ce que vous voyez ci-dessous ?",
     "fingerprintMatches": "Oui, l'empreinte correspond",
     "saveContact": "Enregistrer le contact",
-    "confirmDeleteContact": "Confirmer la suppression"
+    "confirmDeleteContact": "Confirmer la suppression",
+    "contactsButton": "Contacts ({{count}})"
   }
 }

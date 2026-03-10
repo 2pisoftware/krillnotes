@@ -423,6 +423,7 @@
     "fingerprintVerificationHint": "連絡先にフィンガープリントを読み上げてもらい、以下の内容と一致するか確認してください。",
     "fingerprintMatches": "はい、フィンガープリントが一致します",
     "saveContact": "連絡先を保存",
-    "confirmDeleteContact": "削除を確認"
+    "confirmDeleteContact": "削除を確認",
+    "contactsButton": "連絡先 ({{count}})"
   }
 }

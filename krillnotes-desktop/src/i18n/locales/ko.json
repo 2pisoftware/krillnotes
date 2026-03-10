@@ -423,6 +423,7 @@
     "fingerprintVerificationHint": "연락처에 지문을 소리 내어 읽어달라고 요청하세요. 아래 내용과 일치하나요?",
     "fingerprintMatches": "예, 지문이 일치합니다",
     "saveContact": "연락처 저장",
-    "confirmDeleteContact": "삭제 확인"
+    "confirmDeleteContact": "삭제 확인",
+    "contactsButton": "연락처 ({{count}})"
   }
 }
