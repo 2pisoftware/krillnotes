@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Update any user scripts that reference `note.node_type` → `note.schema`.
 - `Note` JSON key changed from `nodeType` to `schema` in workspace exports.
   Old `.krillnotes` archives with `nodeType` are still importable (backward compat preserved via serde alias).
+- **Breaking (Rhai scripts):** Schema constraint keys renamed — `allowed_parent_types` → `allowed_parent_schemas`,
+  `allowed_children_types` → `allowed_children_schemas`. Update any schema definitions that use the old keys.
+- **Breaking (Rhai scripts):** `note_link` field option `target_type` renamed to `target_schema`.
+  Update any schema definitions that use `target_type` on a `note_link` field.
 
 ## [0.3.0] — 2026-03-07
 
