@@ -109,6 +109,7 @@ schema("TypeName", #{
     children_sort:          "asc",         // "asc" | "desc" | "none" (default)
     allowed_parent_schemas:   ["Folder"],    // default: [] (any parent allowed)
     allowed_children_schemas: ["Item"],      // default: [] (any child allowed)
+    is_leaf:                  false,         // default: false — true blocks all child notes
 
     // --- required ---
     fields: [
@@ -278,6 +279,17 @@ allowed_children_schemas: ["Contact"],
 
 > **Validation order:** `allowed_parent_schemas` and `allowed_children_schemas` are always checked
 > **before** any hook runs. If validation fails the operation is aborted and no hook fires.
+
+### `is_leaf: true`
+
+When set, notes of this schema cannot have any children. All attempts to add,
+move, or paste a note as a child of a leaf note are rejected by the core with
+an error. In the UI, the "Add Child" and "Paste as Child" actions are greyed out
+and drag-drop onto leaf notes is blocked.
+
+Leaf notes can still be moved, copied, or deleted. Existing children (if any
+were created before `is_leaf` was set) are unaffected — the constraint is
+forward-only.
 
 ### `field_groups: [...]`
 
