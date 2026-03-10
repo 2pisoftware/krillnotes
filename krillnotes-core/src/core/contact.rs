@@ -171,6 +171,11 @@ impl ContactManager {
         let nonce_bytes = BASE64
             .decode(&enc.nonce)
             .map_err(|e| crate::KrillnotesError::ContactEncryption(e.to_string()))?;
+        if nonce_bytes.len() != 12 {
+            return Err(crate::KrillnotesError::ContactEncryption(
+                format!("invalid nonce length: {} bytes", nonce_bytes.len()),
+            ));
+        }
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = BASE64
@@ -289,6 +294,14 @@ impl ContactManager {
         }
         self.cache.write().unwrap().remove(&id);
         Ok(())
+    }
+}
+
+impl Drop for ContactManager {
+    fn drop(&mut self) {
+        if let Some(key) = self.encryption_key.as_mut() {
+            key.fill(0);
+        }
     }
 }
 
