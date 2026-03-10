@@ -856,6 +856,7 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
           y={contextMenu.y}
           noteId={contextMenu.noteId}
           copiedNoteId={copiedNoteId}
+          isLeaf={schemas[contextMenu.noteType ?? '']?.isLeaf ?? false}
           treeActions={contextMenu.noteId ? (treeActionMap[contextMenu.noteType] ?? []) : []}
           onAddChild={() => contextMenu.noteId && handleContextAddChild(contextMenu.noteId)}
           onAddSibling={() => contextMenu.noteId && handleContextAddSibling(contextMenu.noteId)}

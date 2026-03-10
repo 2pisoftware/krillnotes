@@ -83,6 +83,7 @@ export interface SchemaInfo {
   childrenSort: 'asc' | 'desc' | 'none';
   allowedParentSchemas: string[];
   allowedChildrenSchemas: string[];
+  isLeaf: boolean;
   hasViews: boolean;
   hasHover: boolean;
   allowAttachments: boolean;

@@ -13,6 +13,7 @@ interface ContextMenuProps {
   y: number;
   noteId: string | null;  // null = background (no note right-clicked)
   copiedNoteId: string | null;
+  isLeaf: boolean;
   treeActions: string[];
   onAddChild: () => void;
   onAddSibling: () => void;
@@ -27,7 +28,7 @@ interface ContextMenuProps {
 }
 
 function ContextMenu({
-  x, y, noteId, copiedNoteId, treeActions,
+  x, y, noteId, copiedNoteId, isLeaf, treeActions,
   onAddChild, onAddSibling, onAddRoot,
   onEdit, onCopy, onPasteAsChild, onPasteAsSibling,
   onTreeAction, onDelete, onClose,
@@ -70,8 +71,8 @@ function ContextMenu({
         // Note context menu
         <>
           <button
-            className="w-full text-left px-3 py-1.5 text-sm hover:bg-secondary"
-            onClick={() => { onAddChild(); onClose(); }}
+            className={`w-full text-left px-3 py-1.5 text-sm ${isLeaf ? 'opacity-40 cursor-not-allowed' : 'hover:bg-secondary'}`}
+            onClick={() => { if (!isLeaf) { onAddChild(); onClose(); } }}
           >
             {t('notes.addChildShort')}
           </button>
@@ -94,8 +95,8 @@ function ContextMenu({
             {t('notes.copyNote')}
           </button>
           <button
-            className={`w-full text-left px-3 py-1.5 text-sm ${copiedNoteId ? 'hover:bg-secondary' : 'opacity-40 cursor-not-allowed'}`}
-            onClick={() => { if (copiedNoteId) { onPasteAsChild(); onClose(); } }}
+            className={`w-full text-left px-3 py-1.5 text-sm ${(copiedNoteId && !isLeaf) ? 'hover:bg-secondary' : 'opacity-40 cursor-not-allowed'}`}
+            onClick={() => { if (copiedNoteId && !isLeaf) { onPasteAsChild(); onClose(); } }}
           >
             {t('notes.pasteAsChild')}
           </button>
