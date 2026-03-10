@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { ContactInfo, TrustLevel } from '../types';
+import { TRUST_LEVELS } from '../constants';
 
 interface EditContactDialogProps {
   identityUuid: string;
@@ -10,13 +12,6 @@ interface EditContactDialogProps {
   onClose: () => void;
 }
 
-const TRUST_LEVELS: { value: TrustLevel; label: string }[] = [
-  { value: 'Tofu', label: 'Trust on first use' },
-  { value: 'CodeVerified', label: 'Code verified (phone/video)' },
-  { value: 'Vouched', label: 'Vouched for by another contact' },
-  { value: 'VerifiedInPerson', label: 'Verified in person (highest)' },
-];
-
 export default function EditContactDialog({
   identityUuid,
   contact,
@@ -24,6 +19,7 @@ export default function EditContactDialog({
   onDeleted,
   onClose,
 }: EditContactDialogProps) {
+  const { t } = useTranslation();
   const [localName, setLocalName] = useState(contact.localName ?? '');
   const [notes, setNotes] = useState(contact.notes ?? '');
   const [trustLevel, setTrustLevel] = useState<TrustLevel>(contact.trustLevel);
@@ -81,7 +77,7 @@ export default function EditContactDialog({
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-6 w-full max-w-md shadow-xl">
-        <h2 className="text-lg font-semibold mb-1">Edit Contact</h2>
+        <h2 className="text-lg font-semibold mb-1">{t('contacts.editContact')}</h2>
         <p className="text-sm text-[var(--color-text-muted)] mb-4">
           Declared name: <span className="font-medium">{contact.declaredName}</span>
         </p>
@@ -95,7 +91,7 @@ export default function EditContactDialog({
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Local Name Override</label>
+            <label className="block text-sm font-medium mb-1">{t('contacts.localNameOverride')}</label>
             <input
               type="text"
               value={localName}
@@ -104,12 +100,12 @@ export default function EditContactDialog({
               className="w-full px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm"
             />
             <p className="text-xs text-[var(--color-text-muted)] mt-1">
-              Shown only to you — never shared with peers
+              {t('contacts.localNameHint')}
             </p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Trust Level</label>
+            <label className="block text-sm font-medium mb-1">{t('contacts.trustLevel')}</label>
             <select
               value={trustLevel}
               onChange={e => setTrustLevel(e.target.value as TrustLevel)}
@@ -123,7 +119,7 @@ export default function EditContactDialog({
 
           {needsFingerprintConfirm && (
             <div className="rounded-lg border border-amber-400/50 bg-amber-50/10 p-4 space-y-3">
-              <p className="text-sm font-medium">Fingerprint Verification Required</p>
+              <p className="text-sm font-medium">{t('contacts.fingerprintVerificationRequired')}</p>
               <p className="text-xs text-[var(--color-text-muted)]">
                 Ask your contact to read their fingerprint aloud. Does it match?
               </p>
@@ -137,13 +133,13 @@ export default function EditContactDialog({
                   onChange={e => setFingerprintConfirmed(e.target.checked)}
                   className="rounded"
                 />
-                Yes, the fingerprint matches
+                {t('contacts.fingerprintMatches')}
               </label>
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium mb-1">Notes</label>
+            <label className="block text-sm font-medium mb-1">{t('contacts.notes')}</label>
             <textarea
               value={notes}
               onChange={e => setNotes(e.target.value)}
@@ -166,21 +162,21 @@ export default function EditContactDialog({
                 : 'border border-red-400 text-red-500 hover:bg-red-50/10'
             } disabled:opacity-50`}
           >
-            {deleting ? 'Deleting…' : confirmDelete ? 'Confirm Delete' : 'Delete'}
+            {deleting ? 'Deleting…' : confirmDelete ? t('contacts.confirmDeleteContact') : t('common.delete')}
           </button>
           <div className="flex gap-2">
             <button
               onClick={onClose}
               className="px-4 py-2 text-sm rounded border border-[var(--color-border)] hover:bg-[var(--color-hover)]"
             >
-              Cancel
+              {t('common.cancel')}
             </button>
             <button
               onClick={handleSave}
               disabled={!canSave || saving}
               className="px-4 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {saving ? 'Saving…' : 'Save'}
+              {saving ? t('common.saving') : t('contacts.saveContact')}
             </button>
           </div>
         </div>

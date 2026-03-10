@@ -391,5 +391,24 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "Contactos",
+    "addContact": "Agregar contacto",
+    "editContact": "Editar contacto",
+    "contactName": "Nombre",
+    "publicKey": "Clave pública",
+    "trustLevel": "Nivel de confianza",
+    "localNameOverride": "Nombre local (reemplazo)",
+    "localNameHint": "Solo visible para usted — nunca se comparte con otros",
+    "notes": "Notas",
+    "searchContacts": "Buscar por nombre o clave pública…",
+    "noContacts": "Sin contactos todavía. Agrega uno para empezar.",
+    "noContactsMatch": "Ningún contacto coincide con tu búsqueda.",
+    "fingerprintVerificationRequired": "Verificación de huella digital requerida",
+    "fingerprintVerificationHint": "Pide a tu contacto que lea su huella en voz alta. ¿Coincide con lo que ves abajo?",
+    "fingerprintMatches": "Sí, la huella digital coincide",
+    "saveContact": "Guardar contacto",
+    "confirmDeleteContact": "Confirmar eliminación"
   }
 }

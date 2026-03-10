@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { TrustLevel, ContactInfo } from '../types';
+import { TRUST_LEVELS } from '../constants';
 
 interface AddContactDialogProps {
   identityUuid: string;
@@ -8,14 +10,8 @@ interface AddContactDialogProps {
   onClose: () => void;
 }
 
-const TRUST_LEVELS: { value: TrustLevel; label: string }[] = [
-  { value: 'Tofu', label: 'Trust on first use' },
-  { value: 'CodeVerified', label: 'Code verified (phone/video)' },
-  { value: 'Vouched', label: 'Vouched for by another contact' },
-  { value: 'VerifiedInPerson', label: 'Verified in person (highest)' },
-];
-
 export default function AddContactDialog({ identityUuid, onSaved, onClose }: AddContactDialogProps) {
+  const { t } = useTranslation();
   const [name, setName] = useState('');
   const [publicKey, setPublicKey] = useState('');
   const [trustLevel, setTrustLevel] = useState<TrustLevel>('Tofu');
@@ -66,11 +62,11 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-6 w-full max-w-md shadow-xl">
-        <h2 className="text-lg font-semibold mb-4">Add Contact</h2>
+        <h2 className="text-lg font-semibold mb-4">{t('contacts.addContact')}</h2>
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Name</label>
+            <label className="block text-sm font-medium mb-1">{t('contacts.contactName')}</label>
             <input
               type="text"
               value={name}
@@ -81,7 +77,7 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Public Key</label>
+            <label className="block text-sm font-medium mb-1">{t('contacts.publicKey')}</label>
             <textarea
               value={publicKey}
               onChange={e => setPublicKey(e.target.value)}
@@ -97,7 +93,7 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Trust Level</label>
+            <label className="block text-sm font-medium mb-1">{t('contacts.trustLevel')}</label>
             <select
               value={trustLevel}
               onChange={e => setTrustLevel(e.target.value as TrustLevel)}
@@ -111,9 +107,9 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
 
           {trustLevel === 'VerifiedInPerson' && fingerprint && (
             <div className="rounded-lg border border-amber-400/50 bg-amber-50/10 p-4 space-y-3">
-              <p className="text-sm font-medium">Fingerprint Verification Required</p>
+              <p className="text-sm font-medium">{t('contacts.fingerprintVerificationRequired')}</p>
               <p className="text-xs text-[var(--color-text-muted)]">
-                Ask your contact to read their fingerprint aloud. Does it match what you see below?
+                {t('contacts.fingerprintVerificationHint')}
               </p>
               <p className="text-lg font-mono font-bold tracking-wider text-center py-2">
                 {fingerprint}
@@ -125,7 +121,7 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
                   onChange={e => setFingerprintConfirmed(e.target.checked)}
                   className="rounded"
                 />
-                Yes, the fingerprint matches
+                {t('contacts.fingerprintMatches')}
               </label>
             </div>
           )}
@@ -140,14 +136,14 @@ export default function AddContactDialog({ identityUuid, onSaved, onClose }: Add
             onClick={onClose}
             className="px-4 py-2 text-sm rounded border border-[var(--color-border)] hover:bg-[var(--color-hover)]"
           >
-            Cancel
+            {t('common.cancel')}
           </button>
           <button
             onClick={handleSave}
             disabled={!canSave || saving}
             className="px-4 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {saving ? 'Saving…' : 'Save Contact'}
+            {saving ? t('common.saving') : t('contacts.saveContact')}
           </button>
         </div>
       </div>

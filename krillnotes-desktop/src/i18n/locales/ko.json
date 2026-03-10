@@ -389,5 +389,24 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "연락처",
+    "addContact": "연락처 추가",
+    "editContact": "연락처 편집",
+    "contactName": "이름",
+    "publicKey": "공개 키",
+    "trustLevel": "신뢰 수준",
+    "localNameOverride": "로컬 이름 (덮어쓰기)",
+    "localNameHint": "나에게만 표시됩니다 — 피어와 공유되지 않습니다",
+    "notes": "메모",
+    "searchContacts": "이름 또는 공개 키로 검색…",
+    "noContacts": "아직 연락처가 없습니다. 추가해 보세요.",
+    "noContactsMatch": "검색과 일치하는 연락처가 없습니다.",
+    "fingerprintVerificationRequired": "지문 확인 필요",
+    "fingerprintVerificationHint": "연락처에 지문을 소리 내어 읽어달라고 요청하세요. 아래 내용과 일치하나요?",
+    "fingerprintMatches": "예, 지문이 일치합니다",
+    "saveContact": "연락처 저장",
+    "confirmDeleteContact": "삭제 확인"
   }
 }

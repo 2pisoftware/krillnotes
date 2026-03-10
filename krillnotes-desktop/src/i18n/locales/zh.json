@@ -389,5 +389,24 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "联系人",
+    "addContact": "添加联系人",
+    "editContact": "编辑联系人",
+    "contactName": "名称",
+    "publicKey": "公钥",
+    "trustLevel": "信任级别",
+    "localNameOverride": "本地名称（覆盖）",
+    "localNameHint": "仅对您可见 — 从不与对等方共享",
+    "notes": "备注",
+    "searchContacts": "按名称或公钥搜索…",
+    "noContacts": "暂无联系人。添加一个以开始。",
+    "noContactsMatch": "没有与您的搜索匹配的联系人。",
+    "fingerprintVerificationRequired": "需要指纹验证",
+    "fingerprintVerificationHint": "请联系人大声读出其指纹。与您在下方看到的匹配吗？",
+    "fingerprintMatches": "是的，指纹匹配",
+    "saveContact": "保存联系人",
+    "confirmDeleteContact": "确认删除"
   }
 }

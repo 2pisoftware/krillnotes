@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { ContactInfo } from '../types';
 import AddContactDialog from './AddContactDialog';
@@ -18,6 +19,7 @@ const TRUST_BADGE: Record<string, { label: string; class: string }> = {
 };
 
 export default function ContactBookDialog({ identityUuid, identityName, onClose }: ContactBookDialogProps) {
+  const { t } = useTranslation();
   const [contacts, setContacts] = useState<ContactInfo[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -26,6 +28,8 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
   const [editing, setEditing] = useState<ContactInfo | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
       const list = await invoke<ContactInfo[]>('list_contacts', { identityUuid });
       setContacts(list);
@@ -75,7 +79,7 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-border)]">
           <div>
-            <h2 className="text-lg font-semibold">Contacts</h2>
+            <h2 className="text-lg font-semibold">{t('contacts.title')}</h2>
             <p className="text-xs text-[var(--color-text-muted)]">{identityName}</p>
           </div>
           <button
@@ -92,14 +96,14 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search by name or public key…"
+            placeholder={t('contacts.searchContacts')}
             className="flex-1 px-3 py-1.5 rounded border border-[var(--color-border)] bg-[var(--color-input)] text-sm"
           />
           <button
             onClick={() => setShowAdd(true)}
             className="px-3 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 whitespace-nowrap"
           >
-            + Add
+            {t('common.add')}
           </button>
         </div>
 
@@ -113,7 +117,7 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
           )}
           {!loading && !error && filtered.length === 0 && (
             <p className="text-sm text-center text-[var(--color-text-muted)] py-8">
-              {search ? 'No contacts match your search.' : 'No contacts yet. Add one to get started.'}
+              {search ? t('contacts.noContactsMatch') : t('contacts.noContacts')}
             </p>
           )}
           {filtered.map(contact => {
@@ -153,6 +157,7 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
       )}
       {editing && (
         <EditContactDialog
+          key={editing.contactId}
           identityUuid={identityUuid}
           contact={editing}
           onSaved={handleSaved}

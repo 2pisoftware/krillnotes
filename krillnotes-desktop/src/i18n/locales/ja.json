@@ -389,5 +389,24 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "連絡先",
+    "addContact": "連絡先を追加",
+    "editContact": "連絡先を編集",
+    "contactName": "名前",
+    "publicKey": "公開鍵",
+    "trustLevel": "信頼レベル",
+    "localNameOverride": "ローカル名（上書き）",
+    "localNameHint": "自分だけに表示されます — ピアとは共有されません",
+    "notes": "メモ",
+    "searchContacts": "名前または公開鍵で検索…",
+    "noContacts": "まだ連絡先がありません。追加してください。",
+    "noContactsMatch": "検索に一致する連絡先がありません。",
+    "fingerprintVerificationRequired": "フィンガープリント確認が必要です",
+    "fingerprintVerificationHint": "連絡先にフィンガープリントを読み上げてもらい、以下の内容と一致するか確認してください。",
+    "fingerprintMatches": "はい、フィンガープリントが一致します",
+    "saveContact": "連絡先を保存",
+    "confirmDeleteContact": "削除を確認"
   }
 }

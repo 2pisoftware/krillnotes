@@ -391,5 +391,24 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "Kontakte",
+    "addContact": "Kontakt hinzufügen",
+    "editContact": "Kontakt bearbeiten",
+    "contactName": "Name",
+    "publicKey": "Öffentlicher Schlüssel",
+    "trustLevel": "Vertrauensstufe",
+    "localNameOverride": "Lokaler Name (Überschreibung)",
+    "localNameHint": "Nur für Sie sichtbar — wird nie mit Peers geteilt",
+    "notes": "Notizen",
+    "searchContacts": "Nach Name oder öffentlichem Schlüssel suchen…",
+    "noContacts": "Noch keine Kontakte. Fügen Sie einen hinzu.",
+    "noContactsMatch": "Keine Kontakte entsprechen Ihrer Suche.",
+    "fingerprintVerificationRequired": "Fingerabdruck-Verifizierung erforderlich",
+    "fingerprintVerificationHint": "Bitten Sie Ihren Kontakt, seinen Fingerabdruck laut vorzulesen. Stimmt er mit dem überein, was Sie unten sehen?",
+    "fingerprintMatches": "Ja, der Fingerabdruck stimmt überein",
+    "saveContact": "Kontakt speichern",
+    "confirmDeleteContact": "Löschen bestätigen"
   }
 }
