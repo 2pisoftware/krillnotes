@@ -8,9 +8,10 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { confirm, save, open } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
-import type { IdentityRef } from '../types';
+import type { IdentityRef, ContactInfo } from '../types';
 import CreateIdentityDialog from './CreateIdentityDialog';
 import UnlockIdentityDialog from './UnlockIdentityDialog';
+import ContactBookDialog from './ContactBookDialog';
 
 interface IdentityManagerDialogProps {
   isOpen: boolean;
@@ -36,6 +37,9 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
   const [unlocking, setUnlocking] = useState<string | null>(null);
   const [error, setError] = useState('');
 
+  const [showContactBook, setShowContactBook] = useState<string | null>(null); // identity UUID when open
+  const [contactCounts, setContactCounts] = useState<Record<string, number>>({}); // identityUuid → count
+
   // New state for selection-based UX
   const [selectedUuid, setSelectedUuid] = useState<string | null>(null);
   const [activeForm, setActiveForm] = useState<'rename' | 'passphrase' | 'export' | 'publickey' | null>(null);
@@ -54,7 +58,14 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
         invoke<string[]>('get_unlocked_identities'),
       ]);
       setIdentities(ids);
-      setUnlockedIds(new Set(unlocked));
+      const unlockedSet = new Set(unlocked);
+      setUnlockedIds(unlockedSet);
+      // Load contact counts for unlocked identities (silently ignore errors)
+      ids.filter(id => unlockedSet.has(id.uuid)).forEach(identity => {
+        invoke<ContactInfo[]>('list_contacts', { identityUuid: identity.uuid })
+          .then(contacts => setContactCounts(prev => ({ ...prev, [identity.uuid]: contacts.length })))
+          .catch(() => {});
+      });
     } catch (err) {
       setError(String(err));
     } finally {
@@ -531,6 +542,14 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
                   {t('identity.unlock')}
                 </button>
               )}
+              {selectedUuid && isUnlocked(selectedUuid) && (
+                <button
+                  onClick={() => setShowContactBook(selectedUuid)}
+                  className="px-2 py-1 text-xs border border-border rounded hover:bg-secondary"
+                >
+                  {t('contacts.contactsButton', { count: contactCounts[selectedUuid] ?? 0 })}
+                </button>
+              )}
               <button
                 onClick={() => selectedUuid && toggleForm('rename')}
                 disabled={!selectedUuid}
@@ -616,6 +635,14 @@ function IdentityManagerDialog({ isOpen, onClose }: IdentityManagerDialogProps) 
         }}
         onCancel={() => setUnlocking(null)}
       />
+
+      {showContactBook && (
+        <ContactBookDialog
+          identityUuid={showContactBook}
+          identityName={identities.find(i => i.uuid === showContactBook)?.displayName ?? ''}
+          onClose={() => { setShowContactBook(null); loadData(); }}
+        />
+      )}
     </>
   );
 }

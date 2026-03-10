@@ -45,8 +45,8 @@ pub struct AppState {
     pub focused_window: Arc<Mutex<Option<String>>>,
     /// Identity manager — handles identity CRUD, unlock, and workspace bindings.
     pub identity_manager: Arc<Mutex<IdentityManager>>,
-    /// Contact manager — cross-workspace address book for remote peers.
-    pub contact_manager: Arc<Mutex<krillnotes_core::core::contact::ContactManager>>,
+    /// Per-identity contact managers — keyed by identity UUID, created on unlock.
+    pub contact_managers: Arc<Mutex<HashMap<Uuid, krillnotes_core::core::contact::ContactManager>>>,
     /// In-memory map of currently unlocked identities (UUID → unlocked state).
     /// Entries are removed when an identity is locked or the app exits.
     pub unlocked_identities: Arc<Mutex<HashMap<Uuid, UnlockedIdentity>>>,
@@ -88,6 +88,35 @@ pub struct WorkspaceInfo {
 pub struct WorkspaceBindingInfo {
     pub workspace_uuid: String,
     pub db_path: String,
+}
+
+/// Serialisable contact record returned to the frontend.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactInfo {
+    pub contact_id: String,
+    pub declared_name: String,
+    pub local_name: Option<String>,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub trust_level: String,
+    pub first_seen: String,
+    pub notes: Option<String>,
+}
+
+impl ContactInfo {
+    fn from_contact(c: krillnotes_core::core::contact::Contact) -> Self {
+        Self {
+            contact_id: c.contact_id.to_string(),
+            declared_name: c.declared_name,
+            local_name: c.local_name,
+            public_key: c.public_key,
+            fingerprint: c.fingerprint,
+            trust_level: trust_level_to_str(&c.trust_level).to_string(),
+            first_seen: c.first_seen.to_rfc3339(),
+            notes: c.notes,
+        }
+    }
 }
 
 /// Derives a unique window label from the `path` filename stem.
@@ -526,6 +555,9 @@ async fn open_workspace(
             // Lock ordering: always acquire identity_manager before unlocked_identities,
             // and drop identity_manager before re-acquiring it — avoids deadlock with
             // create_workspace / execute_import which use the same ordering.
+            // contact_managers is always acquired after (and separately from) both of
+            // the above; never hold identity_manager or unlocked_identities simultaneously
+            // with contact_managers.
 
             // Step 1: Get identity_uuid from identity_manager (drop lock after)
             let identity_uuid = {
@@ -1494,20 +1526,43 @@ fn list_operations(
         .map_err(|e| e.to_string())?;
 
     // Resolve raw base64 public keys to display names where possible.
-    let identity_manager = state.identity_manager.lock().expect("Mutex poisoned");
-    let contact_manager = state.contact_manager.lock().expect("Mutex poisoned");
-    for summary in &mut summaries {
-        if !summary.author_key.is_empty() {
-            if let Some(name) = identity_manager.lookup_display_name(&summary.author_key) {
-                summary.author_key = name;
-            } else if let Ok(Some(contact)) = contact_manager.find_by_public_key(&summary.author_key) {
-                summary.author_key = contact.display_name().to_string();
-            } else {
+    // We track which indices are already resolved so pass 2 doesn't clobber them.
+    let mut resolved_indices = vec![false; summaries.len()];
+
+    // Pass 1: resolve via identity_manager, then drop the lock.
+    {
+        let identity_manager = state.identity_manager.lock().expect("Mutex poisoned");
+        for (i, summary) in summaries.iter_mut().enumerate() {
+            if !summary.author_key.is_empty() {
+                if let Some(name) = identity_manager.lookup_display_name(&summary.author_key) {
+                    summary.author_key = name;
+                    resolved_indices[i] = true;
+                }
+            }
+        }
+    } // identity_manager lock released here
+
+    // Pass 2: for keys not yet resolved, try contact_managers, then fall back to fingerprint.
+    {
+        let contact_managers = state.contact_managers.lock().expect("Mutex poisoned");
+        for (i, summary) in summaries.iter_mut().enumerate() {
+            if resolved_indices[i] || summary.author_key.is_empty() {
+                continue;
+            }
+            let mut resolved = false;
+            for cm in contact_managers.values() {
+                if let Ok(Some(contact)) = cm.find_by_public_key(&summary.author_key) {
+                    summary.author_key = contact.display_name().to_string();
+                    resolved = true;
+                    break;
+                }
+            }
+            if !resolved {
                 // Unknown key: show first 8 chars of base64 as a compact fingerprint.
                 summary.author_key = summary.author_key.chars().take(8).collect();
             }
         }
-    }
+    } // contact_managers lock released here
 
     Ok(summaries)
 }
@@ -1730,12 +1785,14 @@ fn resolve_identity_name(
         return Some(name);
     }
     drop(identity_mgr);
-    // 2. Contacts address book (remote peers)
-    let contact_mgr = state.contact_manager.lock().expect("Mutex poisoned");
-    if let Ok(Some(contact)) = contact_mgr.find_by_public_key(&public_key) {
-        return Some(contact.display_name().to_string());
+    // 2. Contacts address book (remote peers) — search all unlocked identity managers
+    let cms = state.contact_managers.lock().expect("Mutex poisoned");
+    for cm in cms.values() {
+        if let Ok(Some(contact)) = cm.find_by_public_key(&public_key) {
+            return Some(contact.display_name().to_string());
+        }
     }
-    drop(contact_mgr);
+    drop(cms);
     // 3. Unknown key — show a short fingerprint so it's not blank
     Some(public_key.chars().take(8).collect())
 }
@@ -1756,8 +1813,23 @@ fn create_identity(
     let unlocked = mgr.unlock_identity(&uuid, &passphrase)
         .map_err(|e| e.to_string())?;
     drop(mgr); // Release the lock before acquiring unlocked_identities
+    // Derive contacts key before consuming `unlocked` via insert
+    let contacts_key = unlocked.contacts_key();
     state.unlocked_identities.lock().expect("Mutex poisoned")
         .insert(uuid, unlocked);
+    let contacts_dir = settings::config_dir()
+        .join("identities")
+        .join(uuid.to_string())
+        .join("contacts");
+    match krillnotes_core::core::contact::ContactManager::for_identity(contacts_dir, contacts_key) {
+        Ok(cm) => {
+            state.contact_managers.lock().expect("Mutex poisoned").insert(uuid, cm);
+        }
+        Err(e) => {
+            // Non-fatal: log but don't fail creation
+            eprintln!("Warning: failed to initialize contact manager for {uuid}: {e}");
+        }
+    }
 
     // Return the IdentityRef
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
@@ -1781,8 +1853,24 @@ fn unlock_identity(
             other => other.to_string(),
         })?;
     drop(mgr);
+    // Derive contacts key before consuming `unlocked` via insert
+    let contacts_key = unlocked.contacts_key();
     state.unlocked_identities.lock().expect("Mutex poisoned")
         .insert(uuid, unlocked);
+    // Create per-identity ContactManager (decrypts contacts into memory)
+    let contacts_dir = settings::config_dir()
+        .join("identities")
+        .join(uuid.to_string())
+        .join("contacts");
+    match krillnotes_core::core::contact::ContactManager::for_identity(contacts_dir, contacts_key) {
+        Ok(cm) => {
+            state.contact_managers.lock().expect("Mutex poisoned").insert(uuid, cm);
+        }
+        Err(e) => {
+            // Non-fatal: log but don't fail unlock
+            eprintln!("Warning: failed to initialize contact manager for {uuid}: {e}");
+        }
+    }
     Ok(())
 }
 
@@ -1819,7 +1907,10 @@ fn lock_identity(
         }
     }
 
-    // Wipe identity from memory
+    // Wipe identity from memory.
+    // Remove contact_managers first so there is no window where the identity is
+    // "locked" but its ContactManager is still live.
+    state.contact_managers.lock().expect("Mutex poisoned").remove(&uuid);
     state.unlocked_identities.lock().expect("Mutex poisoned").remove(&uuid);
     Ok(())
 }
@@ -1995,6 +2086,116 @@ fn import_swarmid_overwrite_cmd(
         .map_err(|e| format!("Invalid .swarmid file: {e}"))?;
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
     mgr.import_swarmid_overwrite(file).map_err(|e| e.to_string())
+}
+
+// ── Contact commands ──────────────────────────────────────────────
+
+fn parse_trust_level(s: &str) -> std::result::Result<krillnotes_core::core::contact::TrustLevel, String> {
+    use krillnotes_core::core::contact::TrustLevel;
+    match s {
+        "Tofu" => Ok(TrustLevel::Tofu),
+        "CodeVerified" => Ok(TrustLevel::CodeVerified),
+        "Vouched" => Ok(TrustLevel::Vouched),
+        "VerifiedInPerson" => Ok(TrustLevel::VerifiedInPerson),
+        other => Err(format!("Unknown trust level: {other}")),
+    }
+}
+
+/// Explicit string mapping — do NOT use `format!("{:?}", ...)` which is fragile.
+fn trust_level_to_str(tl: &krillnotes_core::core::contact::TrustLevel) -> &'static str {
+    use krillnotes_core::core::contact::TrustLevel;
+    match tl {
+        TrustLevel::Tofu => "Tofu",
+        TrustLevel::CodeVerified => "CodeVerified",
+        TrustLevel::Vouched => "Vouched",
+        TrustLevel::VerifiedInPerson => "VerifiedInPerson",
+    }
+}
+
+#[tauri::command]
+fn list_contacts(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+) -> std::result::Result<Vec<ContactInfo>, String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let cms = state.contact_managers.lock().expect("Mutex poisoned");
+    let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
+    let contacts = cm.list_contacts().map_err(|e| e.to_string())?;
+    Ok(contacts.into_iter().map(ContactInfo::from_contact).collect())
+}
+
+#[tauri::command]
+fn get_contact(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    contact_id: String,
+) -> std::result::Result<Option<ContactInfo>, String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let cid = Uuid::parse_str(&contact_id).map_err(|e| e.to_string())?;
+    let cms = state.contact_managers.lock().expect("Mutex poisoned");
+    let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
+    let contact = cm.get_contact(cid).map_err(|e| e.to_string())?;
+    Ok(contact.map(ContactInfo::from_contact))
+}
+
+#[tauri::command]
+fn create_contact(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    declared_name: String,
+    public_key: String,
+    trust_level: String,
+) -> std::result::Result<ContactInfo, String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let tl = parse_trust_level(&trust_level)?;
+    let cms = state.contact_managers.lock().expect("Mutex poisoned");
+    let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
+    let contact = cm.create_contact(&declared_name, &public_key, tl)
+        .map_err(|e| e.to_string())?;
+    Ok(ContactInfo::from_contact(contact))
+}
+
+#[tauri::command]
+fn update_contact(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    contact_id: String,
+    local_name: Option<String>,
+    notes: Option<String>,
+    trust_level: String,
+) -> std::result::Result<ContactInfo, String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let cid = Uuid::parse_str(&contact_id).map_err(|e| e.to_string())?;
+    let tl = parse_trust_level(&trust_level)?;
+    let cms = state.contact_managers.lock().expect("Mutex poisoned");
+    let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
+    let mut contact = cm.get_contact(cid)
+        .map_err(|e| e.to_string())?
+        .ok_or("Contact not found")?;
+    contact.local_name = local_name;
+    contact.notes = notes;
+    contact.trust_level = tl;
+    cm.save_contact(&contact).map_err(|e| e.to_string())?;
+    Ok(ContactInfo::from_contact(contact))
+}
+
+#[tauri::command]
+fn delete_contact(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    contact_id: String,
+) -> std::result::Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let cid = Uuid::parse_str(&contact_id).map_err(|e| e.to_string())?;
+    let cms = state.contact_managers.lock().expect("Mutex poisoned");
+    let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
+    cm.delete_contact(cid).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_fingerprint(public_key: String) -> std::result::Result<String, String> {
+    krillnotes_core::core::contact::generate_fingerprint(&public_key)
+        .map_err(|e| e.to_string())
 }
 
 // ── Theme commands ────────────────────────────────────────────────
@@ -3213,9 +3414,7 @@ pub fn run() {
             identity_manager: Arc::new(Mutex::new(
                 IdentityManager::new(settings::config_dir()).expect("Failed to init IdentityManager")
             )),
-            contact_manager: Arc::new(Mutex::new(
-                krillnotes_core::core::contact::ContactManager::new(settings::config_dir()).expect("Failed to init ContactManager")
-            )),
+            contact_managers: Arc::new(Mutex::new(HashMap::new())),
             unlocked_identities: Arc::new(Mutex::new(HashMap::new())),
             paste_menu_items: Arc::new(Mutex::new(HashMap::new())),
             workspace_menu_items: Arc::new(Mutex::new(HashMap::new())),
@@ -3427,6 +3626,12 @@ pub fn run() {
             script_redo,
             can_script_undo,
             can_script_redo,
+            list_contacts,
+            get_contact,
+            create_contact,
+            update_contact,
+            delete_contact,
+            get_fingerprint,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

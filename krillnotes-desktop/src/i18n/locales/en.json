@@ -5,6 +5,8 @@
     "cancel": "Cancel",
     "close": "Close",
     "delete": "Delete",
+    "deleting": "Deleting…",
+    "loading": "Loading…",
     "edit": "Edit",
     "view": "View",
     "replace": "Replace",
@@ -393,5 +395,39 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "Contacts",
+    "addContact": "Add Contact",
+    "editContact": "Edit Contact",
+    "contactName": "Name",
+    "namePlaceholder": "Display name",
+    "publicKey": "Public Key",
+    "publicKeyPlaceholder": "Paste base64-encoded Ed25519 public key",
+    "fingerprintLabel": "Fingerprint:",
+    "fingerprintHeading": "Fingerprint",
+    "declaredNameLabel": "Declared name:",
+    "notesPlaceholder": "Private notes about this contact…",
+    "contactCount_one": "1 contact",
+    "contactCount_other": "{{count}} contacts",
+    "trustLevel": "Trust Level",
+    "trustLevels": {
+      "tofu": "Trust on first use",
+      "codeVerified": "Code verified (phone/video)",
+      "vouched": "Vouched for by another contact",
+      "verifiedInPerson": "Verified in person (highest)"
+    },
+    "localNameOverride": "Local Name Override",
+    "localNameHint": "Shown only to you — never shared with peers",
+    "notes": "Notes",
+    "searchContacts": "Search by name or public key…",
+    "noContacts": "No contacts yet. Add one to get started.",
+    "noContactsMatch": "No contacts match your search.",
+    "fingerprintVerificationRequired": "Fingerprint Verification Required",
+    "fingerprintVerificationHint": "Ask your contact to read their fingerprint aloud. Does it match what you see below?",
+    "fingerprintMatches": "Yes, the fingerprint matches",
+    "saveContact": "Save Contact",
+    "confirmDeleteContact": "Confirm Delete",
+    "contactsButton": "Contacts ({{count}})"
   }
 }

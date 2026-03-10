@@ -5,6 +5,8 @@
     "cancel": "取消",
     "close": "关闭",
     "delete": "删除",
+    "deleting": "删除中…",
+    "loading": "加载中…",
     "edit": "编辑",
     "view": "查看",
     "replace": "替换",
@@ -389,5 +391,39 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "联系人",
+    "addContact": "添加联系人",
+    "editContact": "编辑联系人",
+    "contactName": "名称",
+    "namePlaceholder": "显示名称",
+    "publicKey": "公钥",
+    "publicKeyPlaceholder": "粘贴Base64编码的Ed25519公钥",
+    "fingerprintLabel": "指纹：",
+    "fingerprintHeading": "指纹",
+    "declaredNameLabel": "声明名称：",
+    "notesPlaceholder": "关于此联系人的私人备注…",
+    "contactCount_one": "1 个联系人",
+    "contactCount_other": "{{count}} 个联系人",
+    "trustLevel": "信任级别",
+    "trustLevels": {
+      "tofu": "首次使用时信任",
+      "codeVerified": "通过代码验证（电话/视频）",
+      "vouched": "由另一个联系人担保",
+      "verifiedInPerson": "当面验证（最高级别）"
+    },
+    "localNameOverride": "本地名称（覆盖）",
+    "localNameHint": "仅对您可见 — 从不与对等方共享",
+    "notes": "备注",
+    "searchContacts": "按名称或公钥搜索…",
+    "noContacts": "暂无联系人。添加一个以开始。",
+    "noContactsMatch": "没有与您的搜索匹配的联系人。",
+    "fingerprintVerificationRequired": "需要指纹验证",
+    "fingerprintVerificationHint": "请联系人大声读出其指纹。与您在下方看到的匹配吗？",
+    "fingerprintMatches": "是的，指纹匹配",
+    "saveContact": "保存联系人",
+    "confirmDeleteContact": "确认删除",
+    "contactsButton": "联系人 ({{count}})"
   }
 }

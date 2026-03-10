@@ -5,6 +5,8 @@
     "cancel": "Cancelar",
     "close": "Cerrar",
     "delete": "Eliminar",
+    "deleting": "Eliminando…",
+    "loading": "Cargando…",
     "edit": "Editar",
     "view": "Ver",
     "replace": "Reemplazar",
@@ -391,5 +393,39 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "Contactos",
+    "addContact": "Agregar contacto",
+    "editContact": "Editar contacto",
+    "contactName": "Nombre",
+    "namePlaceholder": "Nombre de pantalla",
+    "publicKey": "Clave pública",
+    "publicKeyPlaceholder": "Pegar clave pública Ed25519 en base64",
+    "fingerprintLabel": "Huella digital:",
+    "fingerprintHeading": "Huella digital",
+    "declaredNameLabel": "Nombre declarado:",
+    "notesPlaceholder": "Notas privadas sobre este contacto…",
+    "contactCount_one": "1 contacto",
+    "contactCount_other": "{{count}} contactos",
+    "trustLevel": "Nivel de confianza",
+    "trustLevels": {
+      "tofu": "Confiar en el primer uso",
+      "codeVerified": "Verificado por código (teléfono/video)",
+      "vouched": "Avalado por otro contacto",
+      "verifiedInPerson": "Verificado en persona (más alto)"
+    },
+    "localNameOverride": "Nombre local (reemplazo)",
+    "localNameHint": "Solo visible para usted — nunca se comparte con otros",
+    "notes": "Notas",
+    "searchContacts": "Buscar por nombre o clave pública…",
+    "noContacts": "Sin contactos todavía. Agrega uno para empezar.",
+    "noContactsMatch": "Ningún contacto coincide con tu búsqueda.",
+    "fingerprintVerificationRequired": "Verificación de huella digital requerida",
+    "fingerprintVerificationHint": "Pide a tu contacto que lea su huella en voz alta. ¿Coincide con lo que ves abajo?",
+    "fingerprintMatches": "Sí, la huella digital coincide",
+    "saveContact": "Guardar contacto",
+    "confirmDeleteContact": "Confirmar eliminación",
+    "contactsButton": "Contactos ({{count}})"
   }
 }

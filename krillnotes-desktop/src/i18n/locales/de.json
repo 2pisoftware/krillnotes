@@ -5,6 +5,8 @@
     "cancel": "Abbrechen",
     "close": "Schließen",
     "delete": "Löschen",
+    "deleting": "Wird gelöscht…",
+    "loading": "Wird geladen…",
     "edit": "Bearbeiten",
     "view": "Ansehen",
     "replace": "Ersetzen",
@@ -391,5 +393,39 @@
     "identityLocked": "Unlock your identity first.",
     "noIdentity": "You need to create an identity before using sync features.",
     "saveCancelled": "Save cancelled."
+  },
+  "contacts": {
+    "title": "Kontakte",
+    "addContact": "Kontakt hinzufügen",
+    "editContact": "Kontakt bearbeiten",
+    "contactName": "Name",
+    "namePlaceholder": "Anzeigename",
+    "publicKey": "Öffentlicher Schlüssel",
+    "publicKeyPlaceholder": "Base64-codierten Ed25519-Schlüssel einfügen",
+    "fingerprintLabel": "Fingerabdruck:",
+    "fingerprintHeading": "Fingerabdruck",
+    "declaredNameLabel": "Angegebener Name:",
+    "notesPlaceholder": "Private Notizen über diesen Kontakt…",
+    "contactCount_one": "1 Kontakt",
+    "contactCount_other": "{{count}} Kontakte",
+    "trustLevel": "Vertrauensstufe",
+    "trustLevels": {
+      "tofu": "Vertrauen beim ersten Kontakt",
+      "codeVerified": "Per Code verifiziert (Telefon/Video)",
+      "vouched": "Von einem anderen Kontakt empfohlen",
+      "verifiedInPerson": "Persönlich verifiziert (höchste Stufe)"
+    },
+    "localNameOverride": "Lokaler Name (Überschreibung)",
+    "localNameHint": "Nur für Sie sichtbar — wird nie mit Peers geteilt",
+    "notes": "Notizen",
+    "searchContacts": "Nach Name oder öffentlichem Schlüssel suchen…",
+    "noContacts": "Noch keine Kontakte. Fügen Sie einen hinzu.",
+    "noContactsMatch": "Keine Kontakte entsprechen Ihrer Suche.",
+    "fingerprintVerificationRequired": "Fingerabdruck-Verifizierung erforderlich",
+    "fingerprintVerificationHint": "Bitten Sie Ihren Kontakt, seinen Fingerabdruck laut vorzulesen. Stimmt er mit dem überein, was Sie unten sehen?",
+    "fingerprintMatches": "Ja, der Fingerabdruck stimmt überein",
+    "saveContact": "Kontakt speichern",
+    "confirmDeleteContact": "Löschen bestätigen",
+    "contactsButton": "Kontakte ({{count}})"
   }
 }
