@@ -74,7 +74,7 @@ export default function ContactBookDialog({ identityUuid, identityName, onClose 
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-40">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-60">
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg w-full max-w-lg shadow-xl flex flex-col" style={{ maxHeight: '80vh' }}>
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-border)]">

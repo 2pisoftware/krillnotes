@@ -75,7 +75,7 @@ export default function EditContactDialog({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-70">
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-6 w-full max-w-md shadow-xl">
         <h2 className="text-lg font-semibold mb-1">{t('contacts.editContact')}</h2>
         <p className="text-sm text-[var(--color-text-muted)] mb-4">
