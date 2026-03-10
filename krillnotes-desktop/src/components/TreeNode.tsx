@@ -85,6 +85,12 @@ function TreeNode({
         prospectiveParentType = parentNote ? parentNote.schema : null;
       }
 
+      // is_leaf blocks all drops onto this note as parent
+      if (prospectiveParentType !== null && schemas[prospectiveParentType]?.isLeaf) {
+        setDropIndicator(null);
+        return;
+      }
+
       // Child constraint: dragged type's allowedParentSchemas
       const apt = schemas[draggedNote.schema]?.allowedParentSchemas ?? [];
       if (apt.length > 0) {
@@ -143,6 +149,13 @@ function TreeNode({
     const draggedNote = notes.find(n => n.id === draggedNoteId);
     if (draggedNote) {
       const parentNote = newParentId ? notes.find(n => n.id === newParentId) : null;
+
+      // is_leaf: prospective parent cannot have any children
+      if (parentNote && schemas[parentNote.schema]?.isLeaf) {
+        setDraggedNoteId(null);
+        setDropIndicator(null);
+        return;
+      }
 
       // Child constraint: dragged type's allowedParentSchemas
       const apt = schemas[draggedNote.schema]?.allowedParentSchemas ?? [];

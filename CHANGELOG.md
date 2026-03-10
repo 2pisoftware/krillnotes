@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`is_leaf` schema option** — When `is_leaf: true` is set on a schema, notes of that
+  type cannot have children. Blocked in core (`create_note`, `move_note`, `deep_copy_note`)
+  and observed in the UI ("Add Child" and "Paste as Child" are greyed out; drag-drop onto
+  leaf notes is blocked).
 - **Swarm contacts data model** — `Contact` struct and core CRUD in `krillnotes-core`; UI not yet wired (A1)
 - **Sync peers table and PeerRegistry** — tracks known peers and their sync state per workspace (A2)
 - **SwarmHeader codec and bundle-level signatures** — all `.swarm` file payloads are signed with Ed25519 and verified on open (A3, A4)
