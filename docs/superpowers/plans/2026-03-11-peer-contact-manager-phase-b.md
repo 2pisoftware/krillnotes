@@ -1271,9 +1271,8 @@ git commit -m "fix: workspace peers smoke test fixups"
 | `krillnotes-core/src/core/peer_registry.rs` | Add `PeerInfo` struct |
 | `krillnotes-core/src/core/workspace.rs` | Add `list_peers_info`, `add_contact_as_peer`, `remove_peer` + tests |
 | `krillnotes-core/src/lib.rs` | Re-export `PeerInfo` |
-| `krillnotes-desktop/src-tauri/src/lib.rs` | 3 new Tauri commands |
-| `krillnotes-desktop/src-tauri/src/menu.rs` | New "Workspace Peers" menu item (using `s(strings, …)` pattern) |
 | `krillnotes-desktop/src-tauri/src/lib.rs` | 3 new Tauri commands + new `MENU_MESSAGES` entry for workspace_peers |
+| `krillnotes-desktop/src-tauri/src/menu.rs` | New "Workspace Peers" menu item (using `s(strings, …)` pattern) |
 | `krillnotes-desktop/src/types.ts` | Add `PeerInfo` interface |
 | `krillnotes-desktop/src/i18n/locales/*.json` (7 files) | New locale keys |
 | `krillnotes-desktop/src/App.tsx` | Menu handler + dialog state + identityUuid prop |
