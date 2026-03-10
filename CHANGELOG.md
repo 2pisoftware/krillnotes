@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ContactManager` wired into `AppState`** — enables contact address book lookups from any Tauri command
 
 ### Fixed
+- **Workspace Properties dialog no longer crashes on workspaces with no tags** — `meta.tags` is now guarded with `?? []` before calling `.join()` (was `TypeError: undefined is not an object`)
 - **Script category preserved on export/import** — `ScriptManifestEntry` now includes the `category` field so schema vs. presentation classification survives a `.krillnotes` archive round-trip. Previously all scripts were imported as `"presentation"`, causing schema scripts to fail with *"schema() can only be called from schema-category scripts"* and library-defined functions to be unavailable (PR #89)
 - Library script functions are now visible to schema scripts and their hooks — library source is prepended when compiling schema scripts so functions defined in `.rhai` library scripts are available at both load time and hook call time
 - `register_view` and `register_menu` no longer produce duplicate tabs/entries when a library script is loaded alongside multiple schema scripts (deduplication by type + label in `resolve_bindings`)
