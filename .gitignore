@@ -31,3 +31,6 @@ krillnotes-desktop/src-tauri/WixTools/
 
 # Worktrees
 .worktrees/
+
+# Superpowers
+.superpowers/
