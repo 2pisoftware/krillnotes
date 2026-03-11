@@ -136,6 +136,39 @@ pub fn verify_payload(
         .map_err(|_| KrillnotesError::InvalidSignature)
 }
 
+// ── Zip I/O helpers ───────────────────────────────────────────────────────────
+
+/// Write a single JSON string into a zip archive at `path`, stored as `entry_name`.
+fn write_json_zip(path: &Path, entry_name: &str, json: &str) -> Result<()> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+    let file = std::fs::File::create(path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file(entry_name, options)
+        .map_err(|e| KrillnotesError::Swarm(format!("zip write error: {e}")))?;
+    zip.write_all(json.as_bytes())?;
+    zip.finish()
+        .map_err(|e| KrillnotesError::Swarm(format!("zip finish error: {e}")))?;
+    Ok(())
+}
+
+/// Read the contents of `entry_name` from the zip archive at `path`.
+fn read_json_from_zip(path: &Path, entry_name: &str) -> Result<String> {
+    use std::io::Read;
+    use zip::ZipArchive;
+    let file = std::fs::File::open(path)?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| KrillnotesError::Swarm(format!("Cannot open .swarm file: {e}")))?;
+    let mut entry = zip.by_name(entry_name)
+        .map_err(|_| KrillnotesError::Swarm(format!("Missing '{}' in .swarm file", entry_name)))?;
+    let mut buf = String::new();
+    entry.read_to_string(&mut buf)?;
+    Ok(buf)
+}
+
 // ── InviteManager ─────────────────────────────────────────────────────────────
 
 pub struct InviteManager {
@@ -256,7 +289,7 @@ impl InviteManager {
     /// Returns the PendingPeer data. Does NOT check invite validity here —
     /// the Tauri command does that after looking up the record.
     pub fn parse_and_verify_response(path: &Path) -> Result<InviteResponseFile> {
-        let json = std::fs::read_to_string(path)?;
+        let json = read_json_from_zip(path, "response.json")?;
         let response: InviteResponseFile = serde_json::from_str(&json)?;
         if response.file_type != "krillnotes-invite-response-v1" {
             return Err(KrillnotesError::Swarm("Not a response file".to_string()));
@@ -268,7 +301,7 @@ impl InviteManager {
 
     /// Parse and verify an invite `.swarm` file (invitee side).
     pub fn parse_and_verify_invite(path: &Path) -> Result<InviteFile> {
-        let json = std::fs::read_to_string(path)?;
+        let json = read_json_from_zip(path, "invite.json")?;
         let invite: InviteFile = serde_json::from_str(&json)?;
         if invite.file_type != "krillnotes-invite-v1" {
             return Err(KrillnotesError::Swarm("Not an invite file".to_string()));
@@ -296,8 +329,14 @@ impl InviteManager {
         let payload = serde_json::to_value(&response)?;
         response.signature = sign_payload(&payload, signing_key);
         let json = serde_json::to_string_pretty(&response)?;
-        std::fs::write(save_path, json)?;
+        write_json_zip(save_path, "response.json", &json)?;
         Ok(())
+    }
+
+    /// Write a signed InviteFile as a zip archive. Called by the Tauri command after create_invite.
+    pub fn save_invite_file(file: &InviteFile, save_path: &Path) -> Result<()> {
+        let json = serde_json::to_string_pretty(file)?;
+        write_json_zip(save_path, "invite.json", &json)
     }
 }
 

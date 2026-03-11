@@ -3101,6 +3101,15 @@ fn peek_swarm_header(data: &[u8]) -> std::result::Result<krillnotes_core::core::
     let cursor = Cursor::new(data);
     let mut zip = ZipArchive::new(cursor)
         .map_err(|e| format!("Cannot open bundle: {e}"))?;
+
+    // Detect Phase C invite/response files before trying to read header.json
+    if zip.by_name("invite.json").is_ok() {
+        return Err("This is a Phase C invite file. Use the 'Import Invite' button to open it.".to_string());
+    }
+    if zip.by_name("response.json").is_ok() {
+        return Err("This is a Phase C response file. Use the 'Import Response' button to open it.".to_string());
+    }
+
     let header_bytes = {
         let mut file = zip.by_name("header.json")
             .map_err(|_| "bundle missing 'header.json'".to_string())?;
@@ -3319,8 +3328,8 @@ fn create_invite(
         )
         .map_err(|e| e.to_string())?;
 
-    let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    std::fs::write(&save_path, json).map_err(|e| e.to_string())?;
+    krillnotes_core::core::invite::InviteManager::save_invite_file(&file, std::path::Path::new(&save_path))
+        .map_err(|e| e.to_string())?;
 
     Ok(InviteInfo::from(record))
 }
