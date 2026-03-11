@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Workspace Peers dialog (Phase B)** — new "Workspace Peers" item in the Edit menu opens a
+  dedicated dialog listing all sync peers for the open workspace with resolved display name,
+  4-word BIP-39 fingerprint, trust-level badge (from the contact book), and last-sync time.
+  Actions: remove a peer (inline confirmation), add a contact as a pre-authorised peer before
+  any `.swarm` exchange, and create an invite file. Unknown peers (not in contacts) show an
+  "Add to contacts" button that opens `AddContactDialog` pre-filled with their public key.
+  Three new Tauri commands (`list_workspace_peers`, `remove_workspace_peer`,
+  `add_contact_as_peer`) and three new `Workspace` methods in `krillnotes-core`
+  (`list_peers_info`, `add_contact_as_peer`, `remove_peer`). Localised in all 7 languages.
 - **Per-identity encrypted contact book (Phase A)** — contacts are stored per identity under
   `~/.config/krillnotes/identities/<uuid>/contacts/` as AES-256-GCM encrypted blobs. The
   encryption key is derived via HKDF-SHA256 from the identity seed and is only in memory while
