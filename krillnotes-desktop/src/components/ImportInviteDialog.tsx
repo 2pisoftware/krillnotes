@@ -1,28 +1,49 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
-import type { InviteFileData } from '../types';
+import type { InviteFileData, IdentityRef } from '../types';
 
 interface Props {
-  identityUuid: string;
+  initialIdentityUuid?: string;
   invitePath: string;
   inviteData: InviteFileData;
   onResponded: () => void;
   onClose: () => void;
 }
 
-export function ImportInviteDialog({ identityUuid, invitePath, inviteData, onResponded, onClose }: Props) {
+export function ImportInviteDialog({ initialIdentityUuid, invitePath, inviteData, onResponded, onClose }: Props) {
   const { t } = useTranslation();
   const [fingerprintConfirmed, setFingerprintConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [unlockedIdentities, setUnlockedIdentities] = useState<IdentityRef[]>([]);
+  const [selectedUuid, setSelectedUuid] = useState(initialIdentityUuid ?? '');
+
+  useEffect(() => {
+    Promise.all([
+      invoke<IdentityRef[]>('list_identities'),
+      invoke<string[]>('get_unlocked_identities'),
+    ]).then(([all, unlockedUuids]) => {
+      const unlocked = all.filter(id => unlockedUuids.includes(id.uuid));
+      setUnlockedIdentities(unlocked);
+      // Pick initial selection: prefer the hint, fall back to first unlocked.
+      if (unlocked.length > 0) {
+        const hint = unlocked.find(id => id.uuid === initialIdentityUuid);
+        setSelectedUuid(hint ? hint.uuid : unlocked[0].uuid);
+      }
+    }).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isExpired = inviteData.expiresAt
     ? new Date(inviteData.expiresAt) < new Date()
     : false;
 
   const handleRespond = async () => {
+    if (!selectedUuid) {
+      setError(t('swarm.identityLocked'));
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -33,7 +54,7 @@ export function ImportInviteDialog({ identityUuid, invitePath, inviteData, onRes
       if (!savePath) { setLoading(false); return; }
 
       await invoke('respond_to_invite', {
-        identityUuid,
+        identityUuid: selectedUuid,
         invitePath,
         savePath,
       });
@@ -85,6 +106,28 @@ export function ImportInviteDialog({ identityUuid, invitePath, inviteData, onRes
           <p className="text-xs font-mono text-zinc-500 mt-1">{inviteData.inviterFingerprint}</p>
         </div>
 
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1">
+            {t('invite.respondAs', 'Respond as')}
+          </label>
+          {unlockedIdentities.length === 0 ? (
+            <p className="text-sm text-amber-600 dark:text-amber-400">
+              {t('swarm.identityLocked')}
+            </p>
+          ) : (
+            <select
+              value={selectedUuid}
+              onChange={e => setSelectedUuid(e.target.value)}
+              className="w-full border border-zinc-300 dark:border-zinc-600 rounded px-3 py-2 bg-white dark:bg-zinc-800 text-sm"
+              disabled={loading}
+            >
+              {unlockedIdentities.map(id => (
+                <option key={id.uuid} value={id.uuid}>{id.displayName}</option>
+              ))}
+            </select>
+          )}
+        </div>
+
         <p className="text-sm text-amber-600 dark:text-amber-400 mb-3">
           {t('invite.fingerprintVerifyPrompt')}
         </p>
@@ -109,7 +152,7 @@ export function ImportInviteDialog({ identityUuid, invitePath, inviteData, onRes
           </button>
           <button
             onClick={handleRespond}
-            disabled={loading || !fingerprintConfirmed || isExpired}
+            disabled={loading || !fingerprintConfirmed || isExpired || !selectedUuid}
             className="px-4 py-2 text-sm rounded bg-blue-600 text-white disabled:opacity-50"
           >
             {loading ? t('common.saving') : t('invite.respond')}

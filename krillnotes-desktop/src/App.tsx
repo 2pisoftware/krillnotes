@@ -14,12 +14,13 @@ import StatusMessage from './components/StatusMessage';
 import NewWorkspaceDialog from './components/NewWorkspaceDialog';
 import WorkspaceManagerDialog from './components/WorkspaceManagerDialog';
 import SettingsDialog from './components/SettingsDialog';
-import type { WorkspaceInfo as WorkspaceInfoType, AppSettings, IdentityRef } from './types';
+import type { WorkspaceInfo as WorkspaceInfoType, AppSettings, IdentityRef, InviteFileData } from './types';
 import CreateIdentityDialog from './components/CreateIdentityDialog';
 import IdentityManagerDialog from './components/IdentityManagerDialog';
 import SwarmInviteDialog from './components/SwarmInviteDialog';
 import SwarmOpenDialog from './components/SwarmOpenDialog';
 import WorkspacePeersDialog from './components/WorkspacePeersDialog';
+import { ImportInviteDialog } from './components/ImportInviteDialog';
 import './styles/globals.css';
 import { ThemeProvider } from './contexts/ThemeContext';
 import i18n from './i18n';
@@ -47,8 +48,7 @@ const createMenuHandlers = (
   setShowIdentityManager: (show: boolean) => void,
   doImport: (zipPath: string) => void,
   setShowSwarmInvite: (show: boolean) => void,
-  setSwarmFilePath: (path: string | null) => void,
-  setShowSwarmOpen: (show: boolean) => void,
+  openSwarmFile: (path: string) => void,
   setShowWorkspacePeers: (show: boolean) => void,
 ) => ({
   'File > New Workspace clicked': () => {
@@ -104,8 +104,7 @@ const createMenuHandlers = (
         title: 'Open .swarm file',
       });
       if (!picked || Array.isArray(picked)) return;
-      setSwarmFilePath(picked as string);
-      setShowSwarmOpen(true);
+      openSwarmFile(picked as string);
     } catch {
       // user cancelled
     }
@@ -137,6 +136,8 @@ function App() {
   const [showSwarmInvite, setShowSwarmInvite] = useState(false);
   const [showSwarmOpen, setShowSwarmOpen] = useState(false);
   const [swarmFilePath, setSwarmFilePath] = useState<string | null>(null);
+  const [pendingInvitePath, setPendingInvitePath] = useState<string | null>(null);
+  const [pendingInviteData, setPendingInviteData] = useState<InviteFileData | null>(null);
   const [unlockedIdentityUuid, setUnlockedIdentityUuid] = useState<string | null>(null);
   const [showWorkspacePeers, setShowWorkspacePeers] = useState(false);
 
@@ -144,6 +145,21 @@ function App() {
     invoke<string[]>('get_unlocked_identities')
       .then(ids => setUnlockedIdentityUuid(ids.length > 0 ? ids[0] : null))
       .catch(() => {});
+  };
+
+  // Route a .swarm file to the correct dialog: Phase C invite → ImportInviteDialog,
+  // all other formats (WP-A header.json based) → SwarmOpenDialog.
+  const openSwarmFile = (path: string) => {
+    invoke<InviteFileData>('import_invite', { path })
+      .then(data => {
+        setPendingInvitePath(path);
+        setPendingInviteData(data);
+      })
+      .catch(() => {
+        // Not a Phase C invite file — fall through to the WP-A swarm open dialog.
+        setSwarmFilePath(path);
+        setShowSwarmOpen(true);
+      });
   };
 
   useEffect(() => {
@@ -187,10 +203,7 @@ function App() {
       if (path) proceedWithImport(path, null);
     });
     invoke<string | null>('consume_pending_swarm_file').then(path => {
-      if (path) {
-        setSwarmFilePath(path);
-        setShowSwarmOpen(true);
-      }
+      if (path) openSwarmFile(path);
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -215,8 +228,7 @@ function App() {
     const win = getCurrentWebviewWindow();
     if (win.label !== 'main') return;
     const unlisten = win.listen<string>('swarm-file-opened', (event) => {
-      setSwarmFilePath(event.payload);
-      setShowSwarmOpen(true);
+      openSwarmFile(event.payload);
     });
     return () => { unlisten.then(f => f()); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -248,8 +260,7 @@ function App() {
       setShowIdentityManager,
       (zipPath) => proceedWithImport(zipPath, null),
       setShowSwarmInvite,
-      setSwarmFilePath,
-      setShowSwarmOpen,
+      openSwarmFile,
       setShowWorkspacePeers,
     );
 
@@ -617,9 +628,18 @@ function App() {
         unlockedIdentityUuid={unlockedIdentityUuid}
         deviceId={unlockedIdentityUuid ?? ''}
       />
+      {pendingInviteData && pendingInvitePath && (
+        <ImportInviteDialog
+          initialIdentityUuid={unlockedIdentityUuid ?? undefined}
+          invitePath={pendingInvitePath}
+          inviteData={pendingInviteData}
+          onResponded={() => { setPendingInvitePath(null); setPendingInviteData(null); }}
+          onClose={() => { setPendingInvitePath(null); setPendingInviteData(null); }}
+        />
+      )}
       {showWorkspacePeers && (
         <WorkspacePeersDialog
-          identityUuid={unlockedIdentityUuid ?? ''}
+          identityUuid={workspace?.identityUuid ?? unlockedIdentityUuid ?? ''}
           workspaceInfo={workspace}
           unlockedIdentityUuid={unlockedIdentityUuid}
           onClose={() => setShowWorkspacePeers(false)}
