@@ -168,10 +168,90 @@ impl IdentityManager {
     /// Create a new `IdentityManager`.
     ///
     /// Ensures the `identities/` subdirectory exists under `config_dir`.
+    /// Runs on-disk migrations (idempotent).
     pub fn new(config_dir: PathBuf) -> Result<Self> {
         let identities_dir = config_dir.join("identities");
         std::fs::create_dir_all(&identities_dir)?;
+        Self::migrate(&config_dir);
         Ok(Self { config_dir })
+    }
+
+    /// Runs on-disk migrations. Called once from `new()`. Idempotent.
+    fn migrate(config_dir: &std::path::Path) {
+        Self::migrate_pass1_identity_files(config_dir);
+    }
+
+    /// Pass 1: move flat `identities/<uuid>.json` → `identities/<uuid>/identity.json`.
+    fn migrate_pass1_identity_files(config_dir: &std::path::Path) {
+        let identities_dir = config_dir.join("identities");
+        let settings_path = config_dir.join("identity_settings.json");
+
+        // Collect flat .json files (entries like `<uuid>.json` at root of identities/)
+        let flat_files: Vec<(Uuid, std::path::PathBuf)> = match std::fs::read_dir(&identities_dir) {
+            Ok(rd) => rd.flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    if p.is_file() && p.extension().map(|x| x == "json").unwrap_or(false) {
+                        let stem = p.file_stem()?.to_str()?;
+                        let uuid = Uuid::parse_str(stem).ok()?;
+                        Some((uuid, p))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Err(_) => return,
+        };
+
+        if flat_files.is_empty() { return; }
+
+        // Load settings to update file refs
+        let raw = match std::fs::read_to_string(&settings_path) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let mut settings: IdentitySettings = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut changed = false;
+        for (uuid, src_path) in flat_files {
+            let dest_dir = identities_dir.join(uuid.to_string());
+            let dest_path = dest_dir.join("identity.json");
+
+            if dest_path.exists() {
+                // Already migrated — remove the now-orphaned flat file
+                let _ = std::fs::remove_file(&src_path);
+                changed = true;
+                continue;
+            }
+
+            if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+                eprintln!("[migration] Cannot create {dest_dir:?}: {e}");
+                continue;
+            }
+            if let Err(e) = std::fs::rename(&src_path, &dest_path) {
+                eprintln!("[migration] Cannot move {src_path:?}: {e}");
+                continue;
+            }
+
+            // Update IdentityRef.file in settings
+            let new_file = format!("identities/{uuid}/identity.json");
+            for id_ref in settings.identities.iter_mut() {
+                if id_ref.uuid == uuid {
+                    id_ref.file = new_file.clone();
+                    break;
+                }
+            }
+            changed = true;
+        }
+
+        if changed {
+            if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                let _ = std::fs::write(&settings_path, json);
+            }
+        }
     }
 
     fn identities_dir(&self) -> PathBuf {
@@ -273,8 +353,13 @@ impl IdentityManager {
             },
         };
 
-        // Write identity file
-        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
+        // Write identity file into per-identity directory
+        let identity_dir = self.identity_dir(&identity_uuid);
+        std::fs::create_dir_all(&identity_dir)?;
+        // Pre-create data subdirs so the identity folder is complete from the start
+        std::fs::create_dir_all(identity_dir.join("contacts"))?;
+        std::fs::create_dir_all(identity_dir.join("invites"))?;
+        let file_path = identity_dir.join("identity.json");
         let json = serde_json::to_string_pretty(&identity_file)?;
         std::fs::write(&file_path, json)?;
 
@@ -283,7 +368,7 @@ impl IdentityManager {
         settings.identities.push(IdentityRef {
             uuid: identity_uuid,
             display_name: display_name.to_string(),
-            file: format!("identities/{identity_uuid}.json"),
+            file: format!("identities/{identity_uuid}/identity.json"),
             last_used: Utc::now(),
         });
         self.save_settings(&settings)?;
@@ -294,7 +379,7 @@ impl IdentityManager {
     /// Unlock an identity by decrypting its Ed25519 seed with the given passphrase.
     pub fn unlock_identity(&self, identity_uuid: &Uuid, passphrase: &str) -> Result<UnlockedIdentity> {
         // Load identity file
-        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
+        let file_path = self.identity_file_path(identity_uuid);
         if !file_path.exists() {
             return Err(crate::KrillnotesError::IdentityNotFound(identity_uuid.to_string()));
         }
@@ -366,7 +451,7 @@ impl IdentityManager {
     pub fn lookup_display_name(&self, public_key: &str) -> Option<String> {
         let settings = self.load_settings().ok()?;
         for identity_ref in &settings.identities {
-            let file_path = self.identities_dir().join(format!("{}.json", identity_ref.uuid));
+            let file_path = self.identity_file_path(&identity_ref.uuid);
             let Ok(data) = std::fs::read_to_string(&file_path) else { continue };
             let Ok(identity_file) = serde_json::from_str::<IdentityFile>(&data) else { continue };
             if identity_file.public_key == public_key {
@@ -394,10 +479,10 @@ impl IdentityManager {
         settings.identities.retain(|i| i.uuid != *identity_uuid);
         self.save_settings(&settings)?;
 
-        // Delete file
-        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
-        if file_path.exists() {
-            std::fs::remove_file(&file_path)?;
+        // Delete entire identity directory
+        let identity_dir = self.identity_dir(identity_uuid);
+        if identity_dir.exists() {
+            std::fs::remove_dir_all(&identity_dir)?;
         }
 
         Ok(())
@@ -445,7 +530,7 @@ impl IdentityManager {
             .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES encrypt: {e}")))?;
 
         // Load and update identity file
-        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
+        let file_path = self.identity_file_path(identity_uuid);
         let data = std::fs::read_to_string(&file_path)?;
         let mut identity_file: IdentityFile = serde_json::from_str(&data)
             .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("JSON parse: {e}")))?;
@@ -471,7 +556,7 @@ impl IdentityManager {
     /// Renames an identity's display name in both the identity file and the settings registry.
     pub fn rename_identity(&self, identity_uuid: &Uuid, new_name: &str) -> Result<()> {
         // Update identity file
-        let identity_path = self.identities_dir().join(format!("{}.json", identity_uuid));
+        let identity_path = self.identity_file_path(identity_uuid);
         let content = std::fs::read_to_string(&identity_path)
             .map_err(|_| crate::KrillnotesError::IdentityNotFound(identity_uuid.to_string()))?;
         let mut identity_file: IdentityFile = serde_json::from_str(&content)
@@ -497,7 +582,7 @@ impl IdentityManager {
         self.unlock_identity(identity_uuid, passphrase)?;
 
         // Read the raw IdentityFile from disk
-        let file_path = self.identities_dir().join(format!("{identity_uuid}.json"));
+        let file_path = self.identity_file_path(identity_uuid);
         let data = std::fs::read_to_string(&file_path)
             .map_err(|_| crate::KrillnotesError::IdentityNotFound(identity_uuid.to_string()))?;
         let identity: IdentityFile = serde_json::from_str(&data)
@@ -536,9 +621,9 @@ impl IdentityManager {
         let mut settings = self.load_settings()?;
         settings.identities.retain(|i| i.uuid != uuid);
         self.save_settings(&settings)?;
-        let file_path = self.identities_dir().join(format!("{uuid}.json"));
-        if file_path.exists() {
-            std::fs::remove_file(&file_path)?;
+        let identity_dir = self.identity_dir(&uuid);
+        if identity_dir.exists() {
+            std::fs::remove_dir_all(&identity_dir)?;
         }
         self.write_swarmid_to_store(file)
     }
@@ -563,8 +648,12 @@ impl IdentityManager {
         let uuid = identity.identity_uuid;
         let display_name = identity.display_name.clone();
 
-        // Write identity file to disk
-        let file_path = self.identities_dir().join(format!("{uuid}.json"));
+        // Write identity file into per-identity directory
+        let identity_dir = self.identity_dir(&uuid);
+        std::fs::create_dir_all(&identity_dir)?;
+        std::fs::create_dir_all(identity_dir.join("contacts"))?;
+        std::fs::create_dir_all(identity_dir.join("invites"))?;
+        let file_path = identity_dir.join("identity.json");
         let json = serde_json::to_string_pretty(&identity)?;
         std::fs::write(&file_path, json)?;
 
@@ -573,7 +662,7 @@ impl IdentityManager {
         let identity_ref = IdentityRef {
             uuid,
             display_name: display_name.clone(),
-            file: format!("identities/{uuid}.json"),
+            file: format!("identities/{uuid}/identity.json"),
             last_used: Utc::now(),
         };
         settings.identities.push(identity_ref.clone());
@@ -772,8 +861,10 @@ mod tests {
 
         let identity_file = mgr.create_identity("Alice", "password123").unwrap();
 
-        // File was written
-        let file_path = dir.path().join("identities").join(format!("{}.json", identity_file.identity_uuid));
+        // File was written in the new per-identity subfolder
+        let file_path = dir.path().join("identities")
+            .join(identity_file.identity_uuid.to_string())
+            .join("identity.json");
         assert!(file_path.exists());
 
         // Settings updated
@@ -864,12 +955,12 @@ mod tests {
         let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
         let identity = mgr.create_identity("ToDelete", "pass").unwrap();
 
-        let file_path = dir.path().join("identities").join(format!("{}.json", identity.identity_uuid));
-        assert!(file_path.exists());
+        let identity_dir = dir.path().join("identities").join(identity.identity_uuid.to_string());
+        assert!(identity_dir.join("identity.json").exists());
 
         mgr.delete_identity(&identity.identity_uuid).unwrap();
 
-        assert!(!file_path.exists());
+        assert!(!identity_dir.exists());
         let list = mgr.list_identities().unwrap();
         assert!(list.is_empty());
     }
@@ -1051,8 +1142,10 @@ mod tests {
         let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
         let identity = mgr.create_identity("Spec Check", "pass").unwrap();
 
-        // Read the raw JSON file
-        let file_path = dir.path().join("identities").join(format!("{}.json", identity.identity_uuid));
+        // Read the raw JSON file from the new per-identity subfolder
+        let file_path = dir.path().join("identities")
+            .join(identity.identity_uuid.to_string())
+            .join("identity.json");
         let raw = std::fs::read_to_string(&file_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
@@ -1291,5 +1384,67 @@ mod tests {
             mgr.identity_file_path(&uuid),
             tmp.path().join("identities").join("aaaaaaaa-0000-0000-0000-000000000001").join("identity.json")
         );
+    }
+
+    #[test]
+    fn migration_pass1_moves_flat_json_into_identity_subfolder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().to_path_buf();
+        let identities_dir = config_dir.join("identities");
+        std::fs::create_dir_all(&identities_dir).unwrap();
+
+        // Create legacy flat identity file
+        let uuid = Uuid::new_v4();
+        let legacy_path = identities_dir.join(format!("{uuid}.json"));
+        let identity_file = serde_json::json!({
+            "identity_uuid": uuid.to_string(),
+            "display_name": "Test",
+            "public_key": "dGVzdA==",
+            "private_key_enc": {
+                "ciphertext": "dGVzdA==",
+                "nonce": "dGVzdA==",
+                "kdf": "argon2id",
+                "kdf_params": { "salt": "dGVzdA==", "m_cost": 1024, "t_cost": 1, "p_cost": 1 }
+            }
+        });
+        std::fs::write(&legacy_path, serde_json::to_string(&identity_file).unwrap()).unwrap();
+
+        // Create identity_settings.json referencing the flat file
+        let settings = serde_json::json!({
+            "identities": [{
+                "uuid": uuid.to_string(),
+                "displayName": "Test",
+                "file": format!("identities/{uuid}.json"),
+                "lastUsed": "2026-01-01T00:00:00Z"
+            }]
+        });
+        std::fs::write(config_dir.join("identity_settings.json"),
+            serde_json::to_string(&settings).unwrap()).unwrap();
+
+        // Trigger migration
+        let _mgr = IdentityManager::new(config_dir.clone()).unwrap();
+
+        // Flat file must be gone
+        assert!(!legacy_path.exists(), "flat file should be removed");
+
+        // New path must exist
+        let new_path = identities_dir.join(uuid.to_string()).join("identity.json");
+        assert!(new_path.exists(), "identity.json inside folder must exist");
+
+        // settings must be updated
+        let raw = std::fs::read_to_string(config_dir.join("identity_settings.json")).unwrap();
+        let updated: IdentitySettings = serde_json::from_str(&raw).unwrap();
+        assert_eq!(updated.identities[0].file,
+            format!("identities/{uuid}/identity.json"));
+    }
+
+    #[test]
+    fn migration_pass1_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().to_path_buf();
+        // First call (no legacy files) — should succeed silently
+        let _m1 = IdentityManager::new(config_dir.clone()).unwrap();
+        // Second call — must also succeed
+        let _m2 = IdentityManager::new(config_dir.clone()).unwrap();
     }
 }
