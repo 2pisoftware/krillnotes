@@ -9,7 +9,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 use crate::core::swarm::crypto::{decrypt_payload, encrypt_for_recipients};
