@@ -3698,6 +3698,8 @@ async fn apply_swarm_snapshot(
     // 5. Restore notes + user scripts from the snapshot.
     ws.import_snapshot_json(&parsed.workspace_json)
         .map_err(|e| e.to_string())?;
+    // Run the imported scripts in the Rhai engine so all schemas are registered.
+    ws.reload_all_scripts().map_err(|e| e.to_string())?;
 
     // 6. Restore attachment blobs — look up metadata from snapshot to pass correct fields.
     let _ = std::fs::create_dir_all(folder.join("attachments"));

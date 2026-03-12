@@ -658,8 +658,8 @@ impl Workspace {
         signing_key: ed25519_dalek::SigningKey,
         workspace_id: &str,
     ) -> Result<Self> {
-        let mut storage = Storage::create(&path, password)?;
-        let mut script_registry = ScriptRegistry::new()?;
+        let storage = Storage::create(&path, password)?;
+        let script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
 
         let device_id = get_device_id()?;
@@ -692,54 +692,9 @@ impl Workspace {
             None
         };
 
-        // Seed starter scripts (same as create_empty).
-        let now = chrono::Utc::now().timestamp();
-        let starters = ScriptRegistry::starter_scripts();
-        {
-            let tx = storage.connection_mut().transaction()?;
-            for (load_order, starter) in starters.iter().enumerate() {
-                let fm = user_script::parse_front_matter(&starter.source_code);
-                let id = Uuid::new_v4().to_string();
-                let category = if starter.filename.ends_with(".schema.rhai") { "schema" } else { "presentation" };
-                tx.execute(
-                    "INSERT INTO user_scripts (id, name, description, source_code, load_order, enabled, created_at, modified_at, category)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    rusqlite::params![id, fm.name, fm.description, &starter.source_code, load_order as i32, true, now, now, category],
-                )?;
-            }
-            tx.commit()?;
-        }
-
-        let scripts = {
-            let mut stmt = storage.connection().prepare(
-                "SELECT id, name, description, source_code, load_order, enabled, created_at, modified_at, category
-                 FROM user_scripts ORDER BY load_order ASC, created_at ASC",
-            )?;
-            let results: Vec<UserScript> = stmt.query_map([], |row| {
-                Ok(UserScript {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    source_code: row.get(3)?,
-                    load_order: row.get(4)?,
-                    enabled: row.get::<_, i64>(5).map(|v| v != 0)?,
-                    created_at: row.get(6)?,
-                    modified_at: row.get(7)?,
-                    category: row.get::<_, String>(8).unwrap_or_else(|_| "presentation".to_string()),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-            results
-        };
-        for script in scripts.iter().filter(|s| s.enabled && s.category == "presentation") {
-            script_registry.set_loading_category(Some("presentation".to_string()));
-            let _ = script_registry.load_script(&script.source_code, &script.name);
-        }
-        for script in scripts.iter().filter(|s| s.enabled && s.category == "schema") {
-            script_registry.set_loading_category(Some("schema".to_string()));
-            let _ = script_registry.load_script(&script.source_code, &script.name);
-        }
-        script_registry.resolve_bindings();
+        // No starter scripts: this constructor is for snapshot restoration.
+        // The caller (apply_swarm_snapshot) will call reload_all_scripts()
+        // after import_snapshot_json() to run the snapshot's own scripts.
 
         let identity_pubkey_b64 = {
             use base64::Engine as _;
