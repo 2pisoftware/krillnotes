@@ -8050,7 +8050,7 @@ schema("SameVerType", #{
 
         let cm_dir = tempfile::tempdir().unwrap();
         let key = [1u8; 32];
-        let mut cm = ContactManager::for_identity(cm_dir.path().to_path_buf(), key).unwrap();
+        let cm = ContactManager::for_identity(cm_dir.path().to_path_buf(), key).unwrap();
         let contact = cm.create_contact("Bob", pubkey, TrustLevel::CodeVerified).unwrap();
 
         let peers = ws.list_peers_info(&cm).unwrap();
