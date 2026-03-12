@@ -88,14 +88,19 @@ pub struct WorkspaceBinding {
 
 `db_path` is removed — the folder is the lookup key, not the UUID.
 
-### `IdentitySettings` (simplified)
+### `IdentitySettings` transition
+
+The `workspaces` field is kept in the struct during migration but annotated `#[serde(default, skip_serializing)]` so it is readable from old files but never written back. Once migration has run and the field is always empty, it can be removed from the struct in a follow-up cleanup. This avoids a deserialization failure if the app starts on a pre-migration `identity_settings.json` that still has a `workspaces` key.
 
 ```rust
 pub struct IdentitySettings {
     pub identities: Vec<IdentityRef>,
-    // workspaces field removed
+    #[serde(default, skip_serializing)]   // readable from old files; never written
+    pub workspaces: HashMap<String, LegacyWorkspaceBinding>,  // migration only
 }
 ```
+
+After migration runs, `workspaces` is always empty in memory and never written, so `identity_settings.json` on disk will no longer contain the key.
 
 ## IdentityManager API Changes
 
@@ -131,6 +136,16 @@ fn unbind_workspace(workspace_dir: &Path) -> Result<()>
 Methods whose **internals change but signatures stay the same:**
 `create_identity`, `unlock_identity`, `delete_identity`, `change_passphrase`, `rename_identity`, `export_swarmid`, `import_swarmid`, `import_swarmid_overwrite` — all update internal path from `identities/<uuid>.json` to `identities/<uuid>/identity.json`.
 
+**New helper (eliminates raw `file` field usage in `lib.rs`):**
+```rust
+// Returns the absolute path to the identity key file for a given UUID.
+// Replaces the pattern: config_dir.join(&identity_ref.file)
+fn identity_file_path(&self, identity_uuid: &Uuid) -> PathBuf {
+    self.config_dir.join("identities").join(identity_uuid.to_string()).join("identity.json")
+}
+```
+Three call sites in `lib.rs` currently do `config_dir().join(&identity_ref.file)` directly (lines 2075, 3155, 3199 — in `get_identity_key_info` and `open_swarm_file_cmd`). These should be replaced with `mgr.identity_file_path(&identity_uuid)` to remove the dependency on the `file` field string.
+
 ## `lib.rs` Call Site Changes
 
 All call sites already have the workspace folder path available:
@@ -142,8 +157,12 @@ All call sites already have the workspace folder path available:
 | `execute_import` | Pass `folder` to `bind_workspace` |
 | `apply_swarm_snapshot` | Pass `folder` to `bind_workspace` |
 | `list_workspace_files` | Pass `folder` to `get_workspace_binding` (already iterates folders) |
-| `lock_identity` | Pass `settings::load_settings().workspace_directory` to `get_workspaces_for_identity` |
-| `delete_workspace` | Remove `unbind_workspace` call — binding deleted with the folder |
+| `get_workspace_info_internal` (line 435) | Pass folder path from `state.workspace_paths` to `get_workspace_binding` instead of `workspace.workspace_id()` |
+| `list_workspace_peers` (line 2248) | Pass `folder` from `state.workspace_paths` to `get_workspace_binding` |
+| `lock_identity` | Pass `settings::load_settings().workspace_directory` to `get_workspaces_for_identity`; return type changes to `Vec<(PathBuf, WorkspaceBinding)>` so the UUID-based `HashSet` match becomes a folder-path-based match against `state.workspace_paths` |
+| `get_identity_key_info` (line 2075) | Replace `config_dir().join(&identity_ref.file)` with `mgr.identity_file_path(&uuid)` |
+| `open_swarm_file_cmd` (lines 3155, 3199) | Replace `config_dir().join(&identity_ref.file)` with `mgr.identity_file_path(&uuid)` (two branches: Invite and Snapshot) |
+| `delete_workspace` | No `unbind_workspace` call needed — binding is deleted with the folder |
 | `duplicate_workspace` | New binding created with new UUID/password — not copied from source |
 
 ## Error Handling
