@@ -9,6 +9,7 @@ export interface WorkspaceInfo {
   path: string;
   noteCount: number;
   selectedNoteId?: string;
+  identityUuid?: string;
 }
 
 export interface Note {

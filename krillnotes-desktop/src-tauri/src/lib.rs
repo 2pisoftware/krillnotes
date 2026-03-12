@@ -82,6 +82,8 @@ pub struct WorkspaceInfo {
     pub note_count: usize,
     /// ID of the note selected when the workspace was last saved, if any.
     pub selected_note_id: Option<String>,
+    /// UUID of the identity bound to this workspace, if any.
+    pub identity_uuid: Option<String>,
 }
 
 /// Information about a workspace bound to an identity, returned to the frontend.
@@ -430,11 +432,18 @@ fn get_workspace_info_internal(
         .ok()
         .flatten();
 
+    let identity_uuid = state.identity_manager.lock().expect("Mutex poisoned")
+        .get_workspace_binding(workspace.workspace_id())
+        .ok()
+        .flatten()
+        .map(|b| b.identity_uuid.to_string());
+
     Ok(WorkspaceInfo {
         filename,
         path: path.display().to_string(),
         note_count,
         selected_note_id,
+        identity_uuid,
     })
 }
 

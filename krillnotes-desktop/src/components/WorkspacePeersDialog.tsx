@@ -8,11 +8,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
-import type { PeerInfo, WorkspaceInfo, InviteFileData } from '../types';
+import type { PeerInfo, WorkspaceInfo, InviteFileData, PendingPeer, ContactInfo } from '../types';
 import AddPeerFromContactsDialog from './AddPeerFromContactsDialog';
 import AddContactDialog from './AddContactDialog';
 import { InviteManagerDialog } from './InviteManagerDialog';
 import { ImportInviteDialog } from './ImportInviteDialog';
+import { AcceptPeerDialog } from './AcceptPeerDialog';
 
 interface Props {
   identityUuid: string;
@@ -45,6 +46,7 @@ export default function WorkspacePeersDialog({
   const [showInviteManager, setShowInviteManager] = useState(false);
   const [importInviteData, setImportInviteData] = useState<InviteFileData | null>(null);
   const [importInvitePath, setImportInvitePath] = useState<string | null>(null);
+  const [pendingResponsePeer, setPendingResponsePeer] = useState<PendingPeer | null>(null);
 
   const loadPeers = useCallback(async () => {
     setLoading(true);
@@ -84,13 +86,22 @@ export default function WorkspacePeersDialog({
   };
 
   const handleImportInvite = async () => {
-    const path = await open({ filters: [{ name: 'Swarm Invite', extensions: ['swarm'] }] });
+    const path = await open({ filters: [{ name: 'Swarm File', extensions: ['swarm'] }] });
     if (!path) return;
     const p = typeof path === 'string' ? path : path[0];
+    // Try invite file first; if it's a response file, fall through to response import.
     try {
       const data = await invoke<InviteFileData>('import_invite', { path: p });
       setImportInvitePath(p);
       setImportInviteData(data);
+      return;
+    } catch { /* not an invite file — try response */ }
+    try {
+      const peer = await invoke<PendingPeer>('import_invite_response', {
+        identityUuid,
+        path: p,
+      });
+      setPendingResponsePeer(peer);
     } catch (e) {
       setError(String(e));
     }
@@ -267,11 +278,19 @@ export default function WorkspacePeersDialog({
       )}
       {importInviteData && importInvitePath && (
         <ImportInviteDialog
-          identityUuid={identityUuid}
+          initialIdentityUuid={identityUuid}
           invitePath={importInvitePath}
           inviteData={importInviteData}
           onResponded={() => {}}
           onClose={() => { setImportInviteData(null); setImportInvitePath(null); }}
+        />
+      )}
+      {pendingResponsePeer !== null && (
+        <AcceptPeerDialog
+          identityUuid={identityUuid}
+          pendingPeer={pendingResponsePeer}
+          onAccepted={(_contact: ContactInfo) => { setPendingResponsePeer(null); loadPeers(); }}
+          onClose={() => setPendingResponsePeer(null)}
         />
       )}
     </div>
