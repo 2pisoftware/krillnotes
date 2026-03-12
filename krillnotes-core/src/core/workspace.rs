@@ -4930,6 +4930,20 @@ impl Workspace {
         registry.upsert_last_sent(&placeholder_device_id, identity_pk, op_id)
     }
 
+    /// Insert or update a sync peer row. Pass `None` for watermark fields that
+    /// should not overwrite an existing value.
+    pub fn upsert_sync_peer(
+        &self,
+        device_id: &str,
+        identity_id: &str,
+        last_sent_op: Option<&str>,
+        last_received_op: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.storage.connection();
+        let registry = PeerRegistry::new(conn);
+        registry.upsert_sync_peer(device_id, identity_id, last_sent_op, last_received_op)
+    }
+
 }
 
 /// Keeps the `note_links` junction table in sync with the current field values of a note.

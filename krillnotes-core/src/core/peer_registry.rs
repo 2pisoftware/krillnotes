@@ -146,6 +146,31 @@ impl<'a> PeerRegistry<'a> {
         Ok(())
     }
 
+    /// Insert or update a sync peer row with optional watermark fields.
+    ///
+    /// On conflict, only non-null incoming values overwrite existing ones
+    /// (preserves existing watermarks when called with `None`).
+    pub fn upsert_sync_peer(
+        &self,
+        peer_device_id: &str,
+        peer_identity_id: &str,
+        last_sent_op: Option<&str>,
+        last_received_op: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO sync_peers (peer_device_id, peer_identity_id, last_sent_op, last_received_op, last_sync)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(peer_device_id) DO UPDATE SET
+                 peer_identity_id = excluded.peer_identity_id,
+                 last_sent_op = COALESCE(excluded.last_sent_op, last_sent_op),
+                 last_received_op = COALESCE(excluded.last_received_op, last_received_op),
+                 last_sync = excluded.last_sync",
+            rusqlite::params![peer_device_id, peer_identity_id, last_sent_op, last_received_op, now],
+        )?;
+        Ok(())
+    }
+
     /// Update the last-received operation marker for a peer.
     pub fn update_last_received(&self, peer_device_id: &str, operation_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();

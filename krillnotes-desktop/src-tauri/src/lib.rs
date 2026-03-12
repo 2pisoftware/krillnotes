@@ -3620,6 +3620,140 @@ async fn create_snapshot_for_peers(
     })
 }
 
+/// Apply a `.swarm` snapshot bundle to create a new local workspace.
+///
+/// Mirrors `execute_import`: decrypts the bundle, creates the workspace DB with
+/// the snapshot's UUID preserved (required for CRDT convergence), restores all
+/// notes, user scripts, and attachments, then opens a new window.
+#[tauri::command]
+async fn apply_swarm_snapshot(
+    window: tauri::Window,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    identity_uuid: String,
+    workspace_name_override: Option<String>,
+) -> std::result::Result<WorkspaceInfo, String> {
+    use base64::Engine;
+    use krillnotes_core::core::swarm::snapshot::parse_snapshot_bundle;
+    use krillnotes_core::core::workspace::WorkspaceSnapshot;
+    use rand::RngCore;
+
+    let identity_uuid_parsed = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+
+    // 1. Read bundle bytes and get the recipient signing key from the unlocked identity.
+    let data = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let import_seed = {
+        let ids = state.unlocked_identities.lock().expect("Mutex poisoned");
+        let id = ids.get(&identity_uuid_parsed).ok_or("Identity not unlocked")?;
+        id.signing_key.to_bytes()
+    };
+    let recipient_key = Ed25519SigningKey::from_bytes(&import_seed);
+    let parsed = parse_snapshot_bundle(&data, &recipient_key).map_err(|e| e.to_string())?;
+
+    // Deserialise snapshot JSON now so we can look up attachment metadata later.
+    let snapshot: WorkspaceSnapshot = serde_json::from_slice(&parsed.workspace_json)
+        .map_err(|e| e.to_string())?;
+
+    // 2. Determine workspace name → folder name (mirrors file-stem convention).
+    let ws_name = workspace_name_override
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| parsed.workspace_name.clone());
+
+    // Derive folder inside the app data dir (same base used by the OS-level app).
+    let folder = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?
+        .join("workspaces")
+        .join(&ws_name);
+
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| format!("create workspace dir: {e}"))?;
+    let db_path = folder.join("notes.db");
+    if db_path.exists() {
+        return Err(format!("Workspace '{}' already exists locally.", ws_name));
+    }
+
+    // 3. Generate a fresh DB encryption password (never leaves this device).
+    let workspace_password: String = {
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    };
+
+    // 4. Create workspace DB preserving the snapshot's UUID.
+    let pubkey_str = base64::engine::general_purpose::STANDARD.encode(
+        Ed25519SigningKey::from_bytes(&import_seed).verifying_key().as_bytes(),
+    );
+    let mut ws = Workspace::create_empty_with_id(
+        &db_path,
+        &workspace_password,
+        &pubkey_str,
+        Ed25519SigningKey::from_bytes(&import_seed),
+        &parsed.workspace_id,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 5. Restore notes + user scripts from the snapshot.
+    ws.import_snapshot_json(&parsed.workspace_json)
+        .map_err(|e| e.to_string())?;
+
+    // 6. Restore attachment blobs — look up metadata from snapshot to pass correct fields.
+    let _ = std::fs::create_dir_all(folder.join("attachments"));
+    for (att_id, plaintext) in &parsed.attachment_blobs {
+        if let Some(meta) = snapshot.attachments.iter().find(|a| a.id == *att_id) {
+            ws.attach_file_with_id(
+                att_id,
+                &meta.note_id,
+                &meta.filename,
+                meta.mime_type.as_deref(),
+                plaintext,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 7. Register the snapshot sender as a sync peer with last_received_op = snapshot watermark.
+    let placeholder_device_id = format!("identity:{}", parsed.sender_public_key);
+    let _ = ws.upsert_sync_peer(
+        &placeholder_device_id,
+        &parsed.sender_public_key,
+        None,
+        Some(&parsed.as_of_operation_id),
+    );
+
+    // 8. Bind workspace to identity so it can be reopened on next launch.
+    let workspace_uuid = ws.workspace_id().to_string();
+    {
+        let ids = state.unlocked_identities.lock().expect("Mutex poisoned");
+        let unlocked = ids.get(&identity_uuid_parsed).ok_or("Identity not unlocked")?;
+        let seed = unlocked.signing_key.to_bytes();
+        let mgr = state.identity_manager.lock().expect("Mutex poisoned");
+        mgr.bind_workspace(
+            &identity_uuid_parsed,
+            &workspace_uuid,
+            &db_path.display().to_string(),
+            &workspace_password,
+            &seed,
+        )
+        .map_err(|e| format!("bind_workspace: {e}"))?;
+    }
+
+    // 9. Open the workspace in a new window (mirrors execute_import exactly).
+    let label = generate_unique_label(&state, &folder);
+    let new_window = create_workspace_window(&app, &label, &window)?;
+    store_workspace(&state, label.clone(), ws, folder);
+    new_window
+        .set_title(&format!("Krillnotes - {ws_name}"))
+        .map_err(|e| e.to_string())?;
+    if window.label() == "main" {
+        window.close().map_err(|e| e.to_string())?;
+    }
+
+    get_workspace_info_internal(&state, &label)
+}
+
 /// Maps raw menu event IDs to the user-facing message strings emitted to the frontend.
 const MENU_MESSAGES: &[(&str, &str)] = &[
     ("file_new", "File > New Workspace clicked"),
@@ -3924,6 +4058,7 @@ pub fn run() {
             remove_workspace_peer,
             add_contact_as_peer,
             create_snapshot_for_peers,
+            apply_swarm_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
