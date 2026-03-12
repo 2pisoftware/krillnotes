@@ -173,18 +173,189 @@ pub struct ContactInfo {
 
 ## Phase C — Invite Flow
 
-*(Planned, not yet designed in detail)*
+### File Format Clarification
 
-- "Invite peer" action in workspace → pick from contact book or enter public key manually
-- Generates an invite bundle tied to workspace + inviter identity
-- Receiving an unknown peer's bundle → prompt to add them to contacts (pre-filled from their declared name)
-- Newly discovered workspace peers auto-suggested for addition to the contact book
+| File | Purpose |
+|------|---------|
+| `.swarmid` | Export **your own identity** to another device (private key transfer, e.g. desktop → mobile). Contains secret material — never shared with peers. |
+| `.swarm` | **Peer-to-peer** public information exchange. Contains only public keys, signatures, and metadata. Used for invites and responses. |
+
+### Flow Overview
+
+Invites are **multi-use**: the same invite `.swarm` file can be posted publicly (e.g. a forum) and responded to by many people. The inviter reviews and accepts each responder individually, case-by-case.
+
+```
+Inviter                              Invitee
+   |                                    |
+   |-- invite.swarm ------------------> |  (delivered out-of-band: email,
+   |   • invite_id (UUID)               |   chat, forum post, USB, etc.)
+   |   • workspace_id + display name    |
+   |   • inviter public key             |
+   |   • inviter declared name          |
+   |   • inviter signature over above   |  invitee verifies fingerprint
+   |   • expires_at (optional)          |  out-of-band (call, in person)
+   |                                    |
+   |<-- response.swarm ---------------- |
+   |   • invite_id (references invite)  |
+   |   • invitee public key             |
+   |   • invitee declared name          |
+   |   • invitee signature over above   |
+   |                                    |
+   inviter verifies fingerprint         |
+   → sets trust level                   |
+   → adds to contact book               |
+   → adds as workspace peer             |
+```
+
+### C1. Invite Storage
+
+Invites are stored per-identity alongside contacts:
+
+```
+~/.config/krillnotes/
+└── identities/
+    └── <identity_uuid>/
+        ├── contacts/
+        │   └── <contact_uuid>.json
+        └── invites/
+            └── <invite_uuid>.json    ← plaintext (public data only)
+```
+
+Each invite record:
+```json
+{
+  "invite_id": "uuid",
+  "workspace_id": "uuid",
+  "workspace_name": "string",
+  "created_at": "ISO 8601",
+  "expires_at": "ISO 8601 | null",
+  "revoked": false,
+  "use_count": 0
+}
+```
+
+### C2. .swarm File Format
+
+**Invite file** (`invite_<short_id>.swarm`):
+```json
+{
+  "type": "krillnotes-invite-v1",
+  "invite_id": "uuid",
+  "workspace_id": "uuid",
+  "workspace_name": "string",
+  "workspace_description": "string | null",
+  "workspace_author_name": "string | null",
+  "workspace_author_org": "string | null",
+  "workspace_homepage_url": "string | null",
+  "workspace_license": "string | null",
+  "workspace_language": "string | null",
+  "workspace_tags": ["string"],
+  "inviter_public_key": "base64",
+  "inviter_declared_name": "string",
+  "expires_at": "ISO 8601 | null",
+  "signature": "base64"
+}
+```
+Workspace metadata fields are optional (omitted if not set). They are read from `WorkspaceMetadata` via `get_workspace_metadata()` at invite creation time and embedded as-is — they are informational only and not verified by the invitee.
+
+Signature covers all fields except `signature` itself (canonical JSON, sorted keys).
+
+**Response file** (`response_<short_id>.swarm`):
+```json
+{
+  "type": "krillnotes-invite-response-v1",
+  "invite_id": "uuid",
+  "invitee_public_key": "base64",
+  "invitee_declared_name": "string",
+  "signature": "base64"
+}
+```
+Signature covers all fields except `signature` itself. Inviter verifies it against `invitee_public_key`.
+
+### C3. Tauri Commands
+
+| Command | Parameters | Returns |
+|---------|-----------|---------|
+| `create_invite` | `identity_uuid`, `workspace_id`, `expires_in_days: Option<u32>` | `InviteInfo` + writes `.swarm` file to chosen path |
+| `list_invites` | `identity_uuid` | `Vec<InviteInfo>` |
+| `revoke_invite` | `identity_uuid`, `invite_id` | `()` |
+| `import_invite_response` | `identity_uuid`, `path: String` | `PendingPeer` (parsed response, not yet accepted) |
+| `accept_peer` | `identity_uuid`, `workspace_id`, `invitee_public_key`, `declared_name`, `trust_level`, `local_name: Option<String>` | `ContactInfo` |
+
+**`InviteInfo`** (Rust → TS, camelCase):
+```rust
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteInfo {
+    pub invite_id: String,
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub revoked: bool,
+    pub use_count: u32,
+}
+```
+
+**`PendingPeer`** (Rust → TS, camelCase):
+```rust
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPeer {
+    pub invite_id: String,
+    pub invitee_public_key: String,
+    pub invitee_declared_name: String,
+    pub fingerprint: String,   // 4 BIP-39 words, derived server-side
+}
+```
+
+### C4. UI Components
+
+**Entry point:** Workspace peers panel (Phase B) → **"Create Invite"** button.
+
+**`InviteManagerDialog`**
+- Header: workspace name + "Invites"
+- List of open invites, each row showing:
+  - Creation date · expiry (or "No expiry") · use count · Revoke button
+- **"Create Invite"** button → `CreateInviteDialog`
+- **"Import Response"** button → file picker → opens `AcceptPeerDialog`
+
+**`CreateInviteDialog`**
+1. Expiry selector: "No expiry" / "7 days" / "30 days" / "Custom (days)"
+2. Preview of what the invite file will contain (workspace name, your display name)
+3. **"Create & Save"** → file save dialog → writes `invite_<short_id>.swarm`
+
+**`AcceptPeerDialog`** (opened after importing a response `.swarm`)
+- Shows parsed peer info: declared name, fingerprint (4 BIP-39 words, prominent)
+- Label: *"Ask this peer to read their fingerprint aloud. Does it match?"*
+- Checkbox: *"Yes, the fingerprint matches"* — required to enable Accept
+- Trust level selector (same options as Phase A contact manager)
+- Optional **Local Name** override
+- **Accept** / **Reject** buttons
+- Accept → creates contact + adds as workspace peer in one operation
+
+**`ImportInviteDialog`** (opened after receiving an invite `.swarm` as an invitee)
+- Displays workspace info from the invite file:
+  - Workspace name (always shown)
+  - Description, author name/org, homepage URL, license, language, tags (each shown only if present)
+- Displays inviter info: declared name, fingerprint (4 BIP-39 words, prominent)
+- Label: *"Verify the fingerprint with the inviter before accepting."*
+- Checkbox: *"Yes, the fingerprint matches"* — required to enable Respond
+- **Respond** → generates `response_<short_id>.swarm` and opens a file save dialog
+- **Reject** → discards, no file written
+
+### C5. Validation Rules
+
+- Expired invites: `import_invite_response` rejects response files that reference a revoked or expired invite (checked by `expires_at` and `revoked` flag)
+- Signature verification: both invite and response signatures are verified before any UI is shown
+- Duplicate detection: if `invitee_public_key` already exists in contacts, `AcceptPeerDialog` shows a notice and pre-fills from existing contact data
 
 ---
 
 ## Out of Scope (All Phases)
 
-- Contact import from `.swarmid` files (deferred to a later issue)
+- In-band invite delivery (direct network transport) — `.swarm` files are transferred manually for now
+- `.swarmid` contact import — `.swarmid` is for identity migration between devices, not peer discovery
 - Contact sync across devices
 - Vouched trust chain UI (vouch chains are stored but not surfaced in UI yet)
 - Anonymous read-only workspace peers (`.cloud` broadcasts)
