@@ -179,6 +179,59 @@ impl IdentityManager {
     /// Runs on-disk migrations. Called once from `new()`. Idempotent.
     fn migrate(config_dir: &std::path::Path) {
         Self::migrate_pass1_identity_files(config_dir);
+        Self::migrate_pass2_workspace_bindings(config_dir);
+    }
+
+    /// Pass 2: migrate workspace bindings from `identity_settings.json.workspaces`
+    /// into per-workspace `binding.json` files.
+    fn migrate_pass2_workspace_bindings(config_dir: &std::path::Path) {
+        let settings_path = config_dir.join("identity_settings.json");
+        let raw = match std::fs::read_to_string(&settings_path) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let mut settings: IdentitySettings = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if settings.workspaces.is_empty() { return; }
+
+        for (ws_uuid, legacy) in &settings.workspaces {
+            // Derive workspace folder from db_path (parent of the .db file)
+            let workspace_dir = std::path::Path::new(&legacy.db_path)
+                .parent()
+                .map(|p| p.to_path_buf());
+
+            let workspace_dir = match workspace_dir {
+                Some(d) if d.is_dir() => d,
+                _ => {
+                    eprintln!("[migration] Workspace folder missing for {ws_uuid}, dropping binding");
+                    continue;
+                }
+            };
+
+            let binding = WorkspaceBinding {
+                workspace_uuid: ws_uuid.clone(),
+                identity_uuid: legacy.identity_uuid,
+                db_password_enc: legacy.db_password_enc.clone(),
+            };
+            let binding_path = workspace_dir.join("binding.json");
+            match serde_json::to_string_pretty(&binding) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&binding_path, json) {
+                        eprintln!("[migration] Cannot write binding.json to {binding_path:?}: {e}");
+                    }
+                }
+                Err(e) => eprintln!("[migration] Cannot serialise binding for {ws_uuid}: {e}"),
+            }
+        }
+
+        // Clear workspaces from settings regardless (stale entries are dropped)
+        settings.workspaces.clear();
+        if let Ok(json) = serde_json::to_string_pretty(&settings) {
+            let _ = std::fs::write(&settings_path, json);
+        }
     }
 
     /// Pass 1: move flat `identities/<uuid>.json` → `identities/<uuid>/identity.json`.
@@ -1446,5 +1499,84 @@ mod tests {
         let _m1 = IdentityManager::new(config_dir.clone()).unwrap();
         // Second call — must also succeed
         let _m2 = IdentityManager::new(config_dir.clone()).unwrap();
+    }
+
+    #[test]
+    fn migration_pass2_writes_binding_json_for_existing_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().to_path_buf();
+
+        // Create a fake workspace folder with notes.db
+        let ws_dir = tmp.path().join("workspaces").join("my-workspace");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(ws_dir.join("notes.db"), b"").unwrap();
+
+        let ws_uuid = "aaaaaaaa-1111-0000-0000-000000000001";
+        let identity_uuid = "bbbbbbbb-2222-0000-0000-000000000001";
+
+        // Write legacy identity_settings.json with workspaces section
+        let settings_json = serde_json::json!({
+            "identities": [],
+            "workspaces": {
+                ws_uuid: {
+                    "db_path": ws_dir.join("notes.db").display().to_string(),
+                    "identity_uuid": identity_uuid,
+                    "db_password_enc": "dGVzdA=="
+                }
+            }
+        });
+        std::fs::write(
+            config_dir.join("identity_settings.json"),
+            serde_json::to_string(&settings_json).unwrap()
+        ).unwrap();
+
+        // Trigger migration
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let _mgr = IdentityManager::new(config_dir.clone()).unwrap();
+
+        // binding.json must exist in workspace folder
+        let binding_path = ws_dir.join("binding.json");
+        assert!(binding_path.exists(), "binding.json must be written");
+
+        let raw = std::fs::read_to_string(&binding_path).unwrap();
+        let binding: WorkspaceBinding = serde_json::from_str(&raw).unwrap();
+        assert_eq!(binding.workspace_uuid, ws_uuid);
+        assert_eq!(binding.identity_uuid.to_string(), identity_uuid);
+        assert_eq!(binding.db_password_enc, "dGVzdA==");
+
+        // identity_settings.json must no longer have workspaces key
+        let raw_settings = std::fs::read_to_string(config_dir.join("identity_settings.json")).unwrap();
+        assert!(!raw_settings.contains("workspaces"),
+            "workspaces key must be absent after migration");
+    }
+
+    #[test]
+    fn migration_pass2_drops_stale_entry_for_missing_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+
+        // Stale binding — workspace folder does not exist
+        let settings_json = serde_json::json!({
+            "identities": [],
+            "workspaces": {
+                "dead-ws-uuid": {
+                    "db_path": "/nonexistent/workspace/notes.db",
+                    "identity_uuid": "00000000-0000-0000-0000-000000000001",
+                    "db_password_enc": "dGVzdA=="
+                }
+            }
+        });
+        std::fs::write(
+            config_dir.join("identity_settings.json"),
+            serde_json::to_string(&settings_json).unwrap()
+        ).unwrap();
+
+        // Must not panic
+        let _mgr = IdentityManager::new(config_dir.clone()).unwrap();
+
+        // identity_settings.json cleaned up
+        let raw = std::fs::read_to_string(config_dir.join("identity_settings.json")).unwrap();
+        assert!(!raw.contains("workspaces"));
     }
 }
