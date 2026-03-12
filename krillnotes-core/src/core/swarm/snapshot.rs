@@ -57,6 +57,14 @@ pub fn create_snapshot_bundle(params: SnapshotParams<'_>) -> Result<Vec<u8>> {
         entry.peer_id = peer_id.clone();
     }
 
+    // Validate attachment IDs are safe ZIP path segments (UUID-shaped).
+    for (att_id, _) in &params.attachment_blobs {
+        debug_assert!(
+            att_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "attachment ID must be alphanumeric+hyphens only (UUID-shaped), got: {att_id}"
+        );
+    }
+
     // Encrypt each attachment blob with the same symmetric key.
     let mut att_entries: Vec<(String, Vec<u8>)> = Vec::new();
     for (att_id, plaintext) in &params.attachment_blobs {
@@ -95,6 +103,9 @@ pub fn create_snapshot_bundle(params: SnapshotParams<'_>) -> Result<Vec<u8>> {
         ("header.json", &header_bytes),
         ("payload.enc", &ciphertext),
     ];
+    // Attachment blobs are authenticated by their individual AES-GCM tags (using the
+    // same symmetric key as the payload), so they do not need to be included in the
+    // Ed25519 manifest signature.
     let sig = sign_manifest(&files, params.sender_key);
 
     let mut buf = Vec::new();
@@ -159,7 +170,7 @@ pub fn parse_snapshot_bundle(data: &[u8], recipient_key: &SigningKey) -> Result<
     }
     let workspace_json = plaintext
         .ok_or_else(|| KrillnotesError::Swarm("no recipient entry matched our key".to_string()))?;
-    let sym_key = sym_key_found.unwrap();
+    let sym_key = sym_key_found.expect("sym_key is set iff plaintext decryption succeeded");
 
     // Decrypt attachment blobs — entries named "attachments/<id>.enc"
     let mut attachment_blobs = Vec::new();
@@ -220,6 +231,7 @@ mod tests {
         assert_eq!(result.workspace_json, payload);
         assert_eq!(result.workspace_id, workspace_id);
         assert_eq!(result.as_of_operation_id, "op-uuid-1");
+        assert_eq!(result.workspace_name, "Test");
     }
 
     #[test]
@@ -289,5 +301,35 @@ mod tests {
         let parsed = parse_snapshot_bundle(&bundle, &recipient_key).unwrap();
         assert_eq!(parsed.attachment_blobs.len(), 0);
         assert_eq!(parsed.workspace_name, "Test");
+    }
+
+    #[test]
+    fn test_snapshot_multi_attachment_roundtrip() {
+        let sender_key = make_key();
+        let recipient_key = make_key();
+        let blobs = vec![
+            ("att-1".to_string(), b"blob one".to_vec()),
+            ("att-2".to_string(), b"blob two".to_vec()),
+            ("att-3".to_string(), b"blob three".to_vec()),
+        ];
+        let bundle = create_snapshot_bundle(SnapshotParams {
+            workspace_id: "ws-1".to_string(),
+            workspace_name: "Multi".to_string(),
+            source_device_id: "dev-1".to_string(),
+            as_of_operation_id: "op-1".to_string(),
+            workspace_json: b"{}".to_vec(),
+            sender_key: &sender_key,
+            recipient_keys: vec![&recipient_key.verifying_key()],
+            recipient_peer_ids: vec!["p1".to_string()],
+            attachment_blobs: blobs.clone(),
+        }).unwrap();
+        let parsed = parse_snapshot_bundle(&bundle, &recipient_key).unwrap();
+        assert_eq!(parsed.attachment_blobs.len(), 3);
+        // All IDs and blobs must be present (order may differ)
+        let mut result = parsed.attachment_blobs.clone();
+        result.sort_by_key(|(id, _)| id.clone());
+        assert_eq!(result[0], ("att-1".to_string(), b"blob one".to_vec()));
+        assert_eq!(result[1], ("att-2".to_string(), b"blob two".to_vec()));
+        assert_eq!(result[2], ("att-3".to_string(), b"blob three".to_vec()));
     }
 }
