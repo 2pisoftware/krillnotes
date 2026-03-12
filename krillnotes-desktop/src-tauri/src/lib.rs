@@ -3527,7 +3527,8 @@ async fn create_snapshot_for_peers(
     save_path: String,
 ) -> std::result::Result<SnapshotCreatedResult, String> {
     use base64::Engine;
-    use krillnotes_core::core::swarm::snapshot::{create_snapshot_bundle, SnapshotParams};
+    use krillnotes_core::core::swarm::snapshot::create_snapshot_bundle;
+    use krillnotes_core::core::swarm::snapshot::SnapshotParams;
 
     let identity_uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
 
@@ -3555,7 +3556,7 @@ async fn create_snapshot_for_peers(
         .collect::<std::result::Result<_, _>>()?;
 
     // 3. Collect workspace data (hold lock only briefly).
-    let (workspace_id, workspace_name, workspace_json, attachment_blobs, as_of_op_id) = {
+    let (workspace_id, _workspace_name_from_db, workspace_json, attachment_blobs, as_of_op_id) = {
         let workspaces = state.workspaces.lock().expect("Mutex poisoned");
         let ws = workspaces.get(window.label()).ok_or("Workspace not open")?;
 
@@ -3576,7 +3577,7 @@ async fn create_snapshot_for_peers(
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
 
-        (workspace_id, workspace_name, workspace_json, attachment_blobs, as_of_op_id)
+        (workspace_id, workspace_name.clone(), workspace_json, attachment_blobs, as_of_op_id)
     };
 
     // 4. Build the bundle.
