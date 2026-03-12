@@ -3522,12 +3522,12 @@ async fn create_snapshot_for_peers(
     window: tauri::Window,
     state: State<'_, AppState>,
     identity_uuid: String,
+    workspace_name: String,
     peer_public_keys: Vec<String>,   // base64-encoded Ed25519 verifying keys
     save_path: String,
 ) -> std::result::Result<SnapshotCreatedResult, String> {
     use base64::Engine;
     use krillnotes_core::core::swarm::snapshot::{create_snapshot_bundle, SnapshotParams};
-    use krillnotes_core::core::workspace::WorkspaceSnapshot;
 
     let identity_uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
 
@@ -3560,13 +3560,11 @@ async fn create_snapshot_for_peers(
         let ws = workspaces.get(window.label()).ok_or("Workspace not open")?;
 
         let workspace_id = ws.workspace_id().to_string();
-        // WorkspaceMetadata has no dedicated name field; fall back to workspace_id.
-        let workspace_name = workspace_id.clone();
 
         let workspace_json = ws.to_snapshot_json().map_err(|e| e.to_string())?;
 
         // Get attachment metadata from the snapshot JSON to load blobs.
-        let snapshot: WorkspaceSnapshot = serde_json::from_slice(&workspace_json)
+        let snapshot: krillnotes_core::core::workspace::WorkspaceSnapshot = serde_json::from_slice(&workspace_json)
             .map_err(|e| e.to_string())?;
         let mut attachment_blobs = Vec::new();
         for meta in &snapshot.attachments {
