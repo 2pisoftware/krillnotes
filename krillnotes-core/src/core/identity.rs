@@ -515,18 +515,16 @@ impl IdentityManager {
     }
 
     /// Delete an identity. Fails if any workspaces are still bound to it.
-    pub fn delete_identity(&self, identity_uuid: &Uuid) -> Result<()> {
-        let mut settings = self.load_settings()?;
-
-        // Check for bound workspaces
-        let bound: Vec<_> = settings.workspaces.values()
-            .filter(|b| b.identity_uuid == *identity_uuid)
-            .collect();
+    pub fn delete_identity(&self, identity_uuid: &Uuid, workspace_base_dir: &std::path::Path) -> Result<()> {
+        // Check for bound workspaces in the workspace base directory
+        let bound = self.get_workspaces_for_identity(identity_uuid, workspace_base_dir)?;
         if !bound.is_empty() {
             return Err(crate::KrillnotesError::IdentityHasBoundWorkspaces(
                 identity_uuid.to_string(),
             ));
         }
+
+        let mut settings = self.load_settings()?;
 
         // Remove from settings
         settings.identities.retain(|i| i.uuid != *identity_uuid);
@@ -724,85 +722,100 @@ impl IdentityManager {
         Ok(identity_ref)
     }
 
-    /// Bind a workspace to an identity, encrypting the DB password with a key
-    /// derived from the Ed25519 seed.
+    /// Encrypts `db_password` with `seed` and writes a `binding.json` into `workspace_dir`.
     pub fn bind_workspace(
         &self,
         identity_uuid: &Uuid,
         workspace_uuid: &str,
-        db_path: &str,
+        workspace_dir: &std::path::Path,
         db_password: &str,
         seed: &[u8; 32],
     ) -> Result<()> {
-        let encrypted = self.encrypt_db_password(seed, workspace_uuid, db_password)?;
-
-        let mut settings = self.load_settings()?;
-        settings.workspaces.insert(
-            workspace_uuid.to_string(),
-            LegacyWorkspaceBinding {
-                db_path: db_path.to_string(),
-                identity_uuid: *identity_uuid,
-                db_password_enc: encrypted,
-            },
-        );
-        self.save_settings(&settings)?;
+        let db_password_enc = self.encrypt_db_password(seed, workspace_uuid, db_password)?;
+        let binding = WorkspaceBinding {
+            workspace_uuid: workspace_uuid.to_string(),
+            identity_uuid: *identity_uuid,
+            db_password_enc,
+        };
+        let json = serde_json::to_string_pretty(&binding)?;
+        std::fs::write(workspace_dir.join("binding.json"), json)?;
         Ok(())
     }
 
-    /// Remove a workspace binding from the identity settings.
-    pub fn unbind_workspace(&self, workspace_uuid: &str) -> Result<()> {
-        let mut settings = self.load_settings()?;
-        if settings.workspaces.remove(workspace_uuid).is_none() {
-            return Err(crate::KrillnotesError::WorkspaceNotBound(workspace_uuid.to_string()));
+    /// Removes `binding.json` from `workspace_dir`. Returns `Ok(())` if already absent.
+    pub fn unbind_workspace(&self, workspace_dir: &std::path::Path) -> Result<()> {
+        let path = workspace_dir.join("binding.json");
+        if path.exists() {
+            std::fs::remove_file(&path)?;
         }
-        self.save_settings(&settings)?;
         Ok(())
     }
 
-    /// Decrypt a workspace's DB password using the Ed25519 seed.
-    pub fn decrypt_db_password(
-        &self,
-        workspace_uuid: &str,
-        seed: &[u8; 32],
-    ) -> Result<String> {
-        let settings = self.load_settings()?;
-        let binding = settings.workspaces.get(workspace_uuid)
-            .ok_or_else(|| crate::KrillnotesError::WorkspaceNotBound(workspace_uuid.to_string()))?;
+    /// Reads `<workspace_dir>/binding.json`. Returns `None` if the file is absent.
+    pub fn get_workspace_binding(&self, workspace_dir: &std::path::Path) -> Result<Option<WorkspaceBinding>> {
+        let path = workspace_dir.join("binding.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let binding: WorkspaceBinding = serde_json::from_str(&raw)
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(
+                format!("binding.json in {:?}: {e}", workspace_dir)
+            ))?;
+        Ok(Some(binding))
+    }
 
+    /// Decrypts the DB password from `<workspace_dir>/binding.json`.
+    /// Uses `workspace_uuid` stored in the binding for HKDF key derivation.
+    pub fn decrypt_db_password(&self, workspace_dir: &std::path::Path, seed: &[u8; 32]) -> Result<String> {
+        let binding = self.get_workspace_binding(workspace_dir)?
+            .ok_or_else(|| crate::KrillnotesError::WorkspaceNotBound(
+                workspace_dir.display().to_string()
+            ))?;
+
+        let key = self.derive_db_password_key(seed, &binding.workspace_uuid)?;
         let blob = BASE64.decode(&binding.db_password_enc)
-            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("db_password_enc decode: {e}")))?;
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("db_password_enc: {e}")))?;
 
-        let key = self.derive_db_password_key(seed, workspace_uuid)?;
-
-        // AES-256-GCM decrypt: first 12 bytes are nonce, rest is ciphertext+tag
-        if blob.len() < 13 {
-            return Err(crate::KrillnotesError::IdentityCorrupt("db password blob too short".to_string()));
+        if blob.len() < 12 {
+            return Err(crate::KrillnotesError::IdentityCorrupt("db_password_enc too short".into()));
         }
         let (nonce_bytes, ciphertext) = blob.split_at(12);
         let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("AES key: {e}")))?;
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(e.to_string()))?;
         let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| crate::KrillnotesError::IdentityWrongPassphrase)?;
-
+        let plaintext = cipher.decrypt(nonce, ciphertext)
+            .map_err(|_| crate::KrillnotesError::IdentityCorrupt("decrypt failed".into()))?;
         String::from_utf8(plaintext)
-            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(format!("db password not UTF-8: {e}")))
+            .map_err(|e| crate::KrillnotesError::IdentityCorrupt(e.to_string()))
     }
 
-    /// Get all workspace bindings for a given identity.
-    pub fn get_workspaces_for_identity(&self, identity_uuid: &Uuid) -> Result<Vec<(String, LegacyWorkspaceBinding)>> {
-        let settings = self.load_settings()?;
-        let result = settings.workspaces.into_iter()
-            .filter(|(_, b)| b.identity_uuid == *identity_uuid)
-            .collect();
-        Ok(result)
-    }
-
-    /// Return the [`LegacyWorkspaceBinding`] for a given `workspace_uuid`, if one exists.
-    pub fn get_workspace_binding(&self, workspace_uuid: &str) -> Result<Option<LegacyWorkspaceBinding>> {
-        let settings = self.load_settings()?;
-        Ok(settings.workspaces.get(workspace_uuid).cloned())
+    /// Scans all subdirectories of `workspace_base_dir` for `binding.json` files
+    /// that belong to `identity_uuid`. Returns `(workspace_folder, WorkspaceBinding)` pairs.
+    pub fn get_workspaces_for_identity(
+        &self,
+        identity_uuid: &Uuid,
+        workspace_base_dir: &std::path::Path,
+    ) -> Result<Vec<(PathBuf, WorkspaceBinding)>> {
+        let mut results = Vec::new();
+        let entries = match std::fs::read_dir(workspace_base_dir) {
+            Ok(rd) => rd,
+            Err(_) => return Ok(results), // directory doesn't exist yet
+        };
+        for entry in entries.flatten() {
+            let folder = entry.path();
+            if !folder.is_dir() { continue; }
+            let binding_path = folder.join("binding.json");
+            if !binding_path.exists() { continue; }
+            if let Ok(raw) = std::fs::read_to_string(&binding_path) {
+                if let Ok(b) = serde_json::from_str::<WorkspaceBinding>(&raw) {
+                    if b.identity_uuid == *identity_uuid {
+                        results.push((folder, b));
+                    }
+                }
+            }
+        }
+        Ok(results)
     }
 
     // --- private helpers ---
@@ -1011,7 +1024,10 @@ mod tests {
         let identity_dir = dir.path().join("identities").join(identity.identity_uuid.to_string());
         assert!(identity_dir.join("identity.json").exists());
 
-        mgr.delete_identity(&identity.identity_uuid).unwrap();
+        // Empty workspace base dir — no bound workspaces
+        let ws_base = dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_base).unwrap();
+        mgr.delete_identity(&identity.identity_uuid, &ws_base).unwrap();
 
         assert!(!identity_dir.exists());
         let list = mgr.list_identities().unwrap();
@@ -1041,117 +1057,144 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_workspace_and_decrypt() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
-        let identity = mgr.create_identity("Frank", "pass").unwrap();
-        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+    fn bind_and_get_workspace_binding_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir).unwrap();
 
-        let db_password = "random-db-password-abc123";
-        mgr.bind_workspace(
-            &identity.identity_uuid,
-            "workspace-uuid-1",
-            "/path/to/ws.db",
-            db_password,
-            unlocked.signing_key.as_bytes(),
-        ).unwrap();
+        let identity_uuid = Uuid::new_v4();
+        let workspace_uuid = Uuid::new_v4().to_string();
+        let workspace_dir = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
 
-        // Settings should have the binding
-        let settings = mgr.load_settings().unwrap();
-        assert!(settings.workspaces.contains_key("workspace-uuid-1"));
-        assert_eq!(settings.workspaces["workspace-uuid-1"].identity_uuid, identity.identity_uuid);
+        let seed = [42u8; 32];
+        let password = "hunter2";
 
-        // Decrypt should return original password
-        let decrypted = mgr.decrypt_db_password(
-            "workspace-uuid-1",
-            unlocked.signing_key.as_bytes(),
-        ).unwrap();
-        assert_eq!(decrypted, db_password);
+        mgr.bind_workspace(&identity_uuid, &workspace_uuid, &workspace_dir, password, &seed).unwrap();
+
+        // binding.json must exist
+        assert!(workspace_dir.join("binding.json").exists());
+
+        let binding = mgr.get_workspace_binding(&workspace_dir).unwrap().unwrap();
+        assert_eq!(binding.workspace_uuid, workspace_uuid);
+        assert_eq!(binding.identity_uuid, identity_uuid);
+
+        // Decrypt round-trip
+        let decrypted = mgr.decrypt_db_password(&workspace_dir, &seed).unwrap();
+        assert_eq!(decrypted, password);
     }
 
     #[test]
-    fn test_db_password_roundtrip_multiple_workspaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
-        let identity = mgr.create_identity("Grace", "pass").unwrap();
-        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+    fn get_workspace_binding_returns_none_when_no_binding_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
 
-        let seed = unlocked.signing_key.as_bytes();
-        mgr.bind_workspace(&identity.identity_uuid, "ws-1", "/a.db", "pw-alpha", seed).unwrap();
-        mgr.bind_workspace(&identity.identity_uuid, "ws-2", "/b.db", "pw-beta", seed).unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir).unwrap();
 
-        assert_eq!(mgr.decrypt_db_password("ws-1", seed).unwrap(), "pw-alpha");
-        assert_eq!(mgr.decrypt_db_password("ws-2", seed).unwrap(), "pw-beta");
+        assert!(mgr.get_workspace_binding(&ws_dir).unwrap().is_none());
     }
 
     #[test]
-    fn test_unbind_workspace() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
-        let identity = mgr.create_identity("Heidi", "pass").unwrap();
-        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+    fn decrypt_db_password_round_trips_multiple_workspaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir).unwrap();
+        let identity_uuid = Uuid::new_v4();
+        let seed = [7u8; 32];
 
-        mgr.bind_workspace(
-            &identity.identity_uuid,
-            "ws-unbind",
-            "/db.db",
-            "pw",
-            unlocked.signing_key.as_bytes(),
-        ).unwrap();
+        for i in 0..3 {
+            let ws_uuid = Uuid::new_v4().to_string();
+            let ws_dir = tmp.path().join(format!("ws{i}"));
+            std::fs::create_dir_all(&ws_dir).unwrap();
+            let password = format!("pass{i}");
+            mgr.bind_workspace(&identity_uuid, &ws_uuid, &ws_dir, &password, &seed).unwrap();
+            let decrypted = mgr.decrypt_db_password(&ws_dir, &seed).unwrap();
+            assert_eq!(decrypted, password);
+        }
+    }
 
-        mgr.unbind_workspace("ws-unbind").unwrap();
+    #[test]
+    fn unbind_workspace_removes_binding_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let binding_path = ws_dir.join("binding.json");
+        std::fs::write(&binding_path, "{}").unwrap();
 
-        let result = mgr.decrypt_db_password("ws-unbind", unlocked.signing_key.as_bytes());
-        assert!(matches!(result.unwrap_err(), crate::KrillnotesError::WorkspaceNotBound(_)));
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir).unwrap();
+
+        mgr.unbind_workspace(&ws_dir).unwrap();
+        assert!(!binding_path.exists());
     }
 
     #[test]
     fn test_multiple_identities_isolation() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir).unwrap();
 
         let id_a = mgr.create_identity("IdentA", "passA").unwrap();
         let id_b = mgr.create_identity("IdentB", "passB").unwrap();
         let unlocked_a = mgr.unlock_identity(&id_a.identity_uuid, "passA").unwrap();
         let unlocked_b = mgr.unlock_identity(&id_b.identity_uuid, "passB").unwrap();
 
-        mgr.bind_workspace(&id_a.identity_uuid, "ws-a", "/a.db", "pw-a", unlocked_a.signing_key.as_bytes()).unwrap();
-        mgr.bind_workspace(&id_b.identity_uuid, "ws-b", "/b.db", "pw-b", unlocked_b.signing_key.as_bytes()).unwrap();
+        let ws_a = tmp.path().join("ws_a");
+        let ws_b = tmp.path().join("ws_b");
+        std::fs::create_dir_all(&ws_a).unwrap();
+        std::fs::create_dir_all(&ws_b).unwrap();
+
+        mgr.bind_workspace(&id_a.identity_uuid, "ws-a-uuid", &ws_a, "pw-a", unlocked_a.signing_key.as_bytes()).unwrap();
+        mgr.bind_workspace(&id_b.identity_uuid, "ws-b-uuid", &ws_b, "pw-b", unlocked_b.signing_key.as_bytes()).unwrap();
 
         // A can decrypt A's workspace
-        assert_eq!(mgr.decrypt_db_password("ws-a", unlocked_a.signing_key.as_bytes()).unwrap(), "pw-a");
+        assert_eq!(mgr.decrypt_db_password(&ws_a, unlocked_a.signing_key.as_bytes()).unwrap(), "pw-a");
 
         // B can decrypt B's workspace
-        assert_eq!(mgr.decrypt_db_password("ws-b", unlocked_b.signing_key.as_bytes()).unwrap(), "pw-b");
+        assert_eq!(mgr.decrypt_db_password(&ws_b, unlocked_b.signing_key.as_bytes()).unwrap(), "pw-b");
 
         // A cannot decrypt B's workspace (wrong key, AES-GCM will fail)
-        let result = mgr.decrypt_db_password("ws-b", unlocked_a.signing_key.as_bytes());
+        let result = mgr.decrypt_db_password(&ws_b, unlocked_a.signing_key.as_bytes());
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_delete_identity_with_bound_workspaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
-        let identity = mgr.create_identity("Bound", "pass").unwrap();
-        let unlocked = mgr.unlock_identity(&identity.identity_uuid, "pass").unwrap();
+    fn delete_identity_fails_if_workspaces_still_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir.clone()).unwrap();
 
-        // Bind a workspace
-        mgr.bind_workspace(
-            &identity.identity_uuid,
-            "ws-uuid-123",
-            "/path/to/db",
-            "db-password",
-            unlocked.signing_key.as_bytes(),
-        ).unwrap();
+        let identity_uuid = Uuid::new_v4();
+        let seed = [1u8; 32];
+        let ws_dir = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
 
-        // Delete should fail
-        let result = mgr.delete_identity(&identity.identity_uuid);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            crate::KrillnotesError::IdentityHasBoundWorkspaces(_)
-        ));
+        // Create the identity first
+        let display_name = "Test";
+        let passphrase = "testpass";
+        mgr.create_identity(display_name, passphrase).unwrap();
+
+        // Get the UUID we just created
+        let settings = mgr.load_settings().unwrap();
+        let id_ref = settings.identities.first().unwrap();
+        let real_uuid = id_ref.uuid;
+
+        // Bind a workspace to it
+        let ws_uuid = Uuid::new_v4().to_string();
+        mgr.bind_workspace(&real_uuid, &ws_uuid, &ws_dir, "pass", &seed).unwrap();
+
+        // delete_identity must fail because a workspace is still bound
+        let ws_base = tmp.path().to_path_buf();
+        let result = mgr.delete_identity(&real_uuid, &ws_base);
+        assert!(result.is_err(), "should fail when workspaces are bound");
     }
 
     #[test]
@@ -1174,19 +1217,36 @@ mod tests {
     }
 
     #[test]
-    fn test_get_workspaces_for_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = IdentityManager::new(dir.path().to_path_buf()).unwrap();
+    fn get_workspaces_for_identity_scans_workspace_base_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(config_dir.join("identities")).unwrap();
+        let mgr = IdentityManager::new(config_dir).unwrap();
 
-        let id_a = mgr.create_identity("Multi", "pass").unwrap();
-        let unlocked = mgr.unlock_identity(&id_a.identity_uuid, "pass").unwrap();
-        let seed = unlocked.signing_key.as_bytes();
+        let identity_a = Uuid::new_v4();
+        let identity_b = Uuid::new_v4();
+        let ws_base = tmp.path().join("workspaces");
 
-        mgr.bind_workspace(&id_a.identity_uuid, "ws-1", "/a.db", "pw1", seed).unwrap();
-        mgr.bind_workspace(&id_a.identity_uuid, "ws-2", "/b.db", "pw2", seed).unwrap();
+        // Two workspaces for identity_a, one for identity_b
+        for (name, owner) in &[("ws1", identity_a), ("ws2", identity_a), ("ws3", identity_b)] {
+            let ws_dir = ws_base.join(name);
+            std::fs::create_dir_all(&ws_dir).unwrap();
+            let binding = WorkspaceBinding {
+                workspace_uuid: Uuid::new_v4().to_string(),
+                identity_uuid: *owner,
+                db_password_enc: "enc".to_string(),
+            };
+            std::fs::write(
+                ws_dir.join("binding.json"),
+                serde_json::to_string(&binding).unwrap()
+            ).unwrap();
+        }
+        // ws4 has no binding.json — must be ignored
+        std::fs::create_dir_all(ws_base.join("ws4")).unwrap();
 
-        let workspaces = mgr.get_workspaces_for_identity(&id_a.identity_uuid).unwrap();
-        assert_eq!(workspaces.len(), 2);
+        let results = mgr.get_workspaces_for_identity(&identity_a, &ws_base).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(_, b)| b.identity_uuid == identity_a));
     }
 
     #[test]
@@ -1283,7 +1343,9 @@ mod tests {
             version: SwarmIdFile::VERSION,
             identity: original.clone(),
         };
-        mgr.delete_identity(&original.identity_uuid).unwrap();
+        let ws_base = dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_base).unwrap();
+        mgr.delete_identity(&original.identity_uuid, &ws_base).unwrap();
         assert!(mgr.list_identities().unwrap().is_empty());
 
         let identity_ref = mgr.import_swarmid(swarmid).unwrap();
