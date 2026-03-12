@@ -3660,12 +3660,9 @@ async fn apply_swarm_snapshot(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| parsed.workspace_name.clone());
 
-    // Derive folder inside the app data dir (same base used by the OS-level app).
-    let folder = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app_data_dir: {e}"))?
-        .join("workspaces")
+    // Derive folder inside the user's configured workspace directory,
+    // the same location used by create_workspace and list_workspace_files.
+    let folder = PathBuf::from(&settings::load_settings().workspace_directory)
         .join(&ws_name);
 
     std::fs::create_dir_all(&folder)
