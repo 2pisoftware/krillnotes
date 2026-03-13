@@ -7,10 +7,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { confirm } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
-import type { Note, FieldValue, SchemaInfo, FieldDefinition, AttachmentMeta, SaveResult } from '../types';
+import type { Note, FieldValue, SchemaInfo, AttachmentMeta } from '../types';
 import FieldDisplay from './FieldDisplay';
 import FieldEditor from './FieldEditor';
 import TagPill from './TagPill';
@@ -18,6 +17,7 @@ import AttachmentsSection from './AttachmentsSection';
 import { ChevronRight } from 'lucide-react';
 import { defaultValueForFieldType, isEmptyFieldValue } from '../utils/fieldValue';
 import { useSchema } from '../hooks/useSchema';
+import { useNoteForm } from '../hooks/useNoteForm';
 
 interface InfoPanelProps {
   selectedNote: Note | null;
@@ -33,27 +33,21 @@ interface InfoPanelProps {
 
 function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMode, onEditDone, onLinkNavigate, onBack, backNoteTitle, refreshSignal }: InfoPanelProps) {
   const { t } = useTranslation();
-  const [isEditing, setIsEditing] = useState(false);
-  const [editedTitle, setEditedTitle] = useState('');
-  const [editedFields, setEditedFields] = useState<Record<string, FieldValue>>({});
-  const [isDirty, setIsDirty] = useState(false);
-  const [editedTags, setEditedTags] = useState<string[]>([]);
-  const [allTags, setAllTags] = useState<string[]>([]);
-  const [tagInput, setTagInput] = useState('');
-  const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [recentlyDeleted, setRecentlyDeleted] = useState<AttachmentMeta[]>([]);
-  const [groupCollapsed, setGroupCollapsed] = useState<Record<string, boolean>>({});
-  const [groupVisible, setGroupVisible] = useState<Record<string, boolean>>({});
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [noteErrors, setNoteErrors] = useState<string[]>([]);
   const [authorNames, setAuthorNames] = useState<{ createdBy: string | null; modifiedBy: string | null }>({ createdBy: null, modifiedBy: null });
-  const titleInputRef = useRef<HTMLInputElement>(null);
+  // isEditing is kept in InfoPanel (not in useNoteForm) to break the circular dependency:
+  // useSchema needs isEditing, and useNoteForm needs schemaInfo from useSchema.
+  const [isEditing, setIsEditing] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const viewHtmlRef = useRef<HTMLDivElement>(null);
   const pendingEditModeRef = useRef(false);
 
+  // Stable ref so handleSchemaLoaded (defined before useNoteForm) can call
+  // setEditedFields that comes from useNoteForm (defined after useSchema).
+  const setEditedFieldsRef = useRef<React.Dispatch<React.SetStateAction<Record<string, FieldValue>>> | null>(null);
+
   const handleSchemaLoaded = useCallback((schema: SchemaInfo) => {
-    setEditedFields(prev => {
+    setEditedFieldsRef.current?.(prev => {
       const merged = { ...prev };
       for (const field of schema.fields) {
         if (!(field.name in merged)) {
@@ -71,24 +65,21 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   const { schemaInfo, views, activeTab, setActiveTab, viewHtml, setViewHtml, previousTab, setPreviousTab, schemaLoadedRef } =
     useSchema(selectedNote, isEditing, handleSchemaLoaded);
 
-  useEffect(() => {
-    if (selectedNote) {
-      setIsEditing(false);
-      setEditedTitle(selectedNote.title);
-      setEditedFields({ ...selectedNote.fields });
-      setEditedTags(selectedNote.tags ?? []);
-      setTagInput('');
-      setTagSuggestions([]);
-      setIsDirty(false);
-      setGroupCollapsed({});
-      setGroupVisible({});
-      setFieldErrors({});
-      setNoteErrors([]);
-    } else {
-      setIsEditing(false);
-      pendingEditModeRef.current = false;
-    }
-  }, [selectedNote?.id]);
+  const {
+    editedTitle, setEditedTitle, editedFields, setEditedFields,
+    setIsDirty, editedTags, tagInput, tagSuggestions,
+    groupCollapsed, setGroupCollapsed, groupVisible, fieldErrors, noteErrors, titleInputRef,
+    handleFormKeyDown, handleEdit, handleCancel, handleSave,
+    handleFieldChange, handleFieldBlur, addTag, removeTag, handleTagInputChange,
+  } = useNoteForm(
+    selectedNote, schemaInfo,
+    { activeTab, setActiveTab, previousTab, setPreviousTab, setViewHtml },
+    onNoteUpdated, onEditDone,
+    isEditing, setIsEditing,
+  );
+
+  // Wire the stable ref so handleSchemaLoaded can call setEditedFields from the hook
+  setEditedFieldsRef.current = setEditedFields;
 
   // Enter edit mode when WorkspaceView requests it (e.g. via context menu, note creation).
   // NOTE: This effect must be declared AFTER the selectedNote?.id effects above.
@@ -188,19 +179,6 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
     });
   }, [activeViewHtml]);
 
-  // Focus first editable field whenever edit mode activates
-  useEffect(() => {
-    if (!isEditing) return;
-    const rafId = requestAnimationFrame(() => {
-      if (titleInputRef.current) {
-        titleInputRef.current.focus();
-      } else {
-        panelRef.current?.querySelector<HTMLElement>('input, textarea, select')?.focus();
-      }
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [isEditing]);
-
   useEffect(() => {
     if (!selectedNote) {
       setAuthorNames({ createdBy: null, modifiedBy: null });
@@ -212,157 +190,6 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
       modifiedBy ? invoke<string | null>('resolve_identity_name', { publicKey: modifiedBy }) : Promise.resolve(null),
     ]).then(([cb, mb]) => setAuthorNames({ createdBy: cb, modifiedBy: mb }));
   }, [selectedNote?.createdBy, selectedNote?.modifiedBy]);
-
-  const handleFormKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!isEditing) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      handleCancel();
-    } else if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
-      e.preventDefault();
-      handleSave();
-    }
-  };
-
-  const handleEdit = () => {
-    invoke<string[]>('get_all_tags').then(setAllTags).catch(console.error);
-    setPreviousTab(activeTab);
-    setActiveTab('fields');
-    setIsEditing(true);
-  };
-
-  function addTag(tag: string) {
-    const normalised = tag.trim().toLowerCase();
-    if (!normalised || editedTags.includes(normalised)) return;
-    setEditedTags(prev => [...prev, normalised].sort());
-    setTagInput('');
-    setTagSuggestions([]);
-    setIsDirty(true);
-  }
-
-  function removeTag(tag: string) {
-    setEditedTags(prev => prev.filter(t => t !== tag));
-    setIsDirty(true);
-  }
-
-  function handleTagInputChange(value: string) {
-    setTagInput(value);
-    if (!value.trim()) {
-      setTagSuggestions([]);
-      return;
-    }
-    const lower = value.trim().toLowerCase();
-    setTagSuggestions(
-      allTags.filter(t => t.includes(lower) && !editedTags.includes(t)).slice(0, 8)
-    );
-  }
-
-  const evaluateGroupVisibility = async (fields: Record<string, FieldValue>) => {
-    if (!selectedNote || !schemaInfo.fieldGroups.some(g => g.hasVisibleClosure)) return;
-    try {
-      const vis = await invoke<Record<string, boolean>>('evaluate_group_visibility', {
-        schemaName: selectedNote.schema,
-        fields,
-      });
-      setGroupVisible(vis);
-    } catch {
-      // ignore — groups default to visible
-    }
-  };
-
-  const handleFieldBlur = async (fieldName: string, fieldDef: FieldDefinition) => {
-    if (!selectedNote || !fieldDef.hasValidate) return;
-    try {
-      const error = await invoke<string | null>('validate_field', {
-        schemaName: selectedNote.schema,
-        fieldName,
-        value: editedFields[fieldName] ?? defaultValueForFieldType(fieldDef.fieldType),
-      });
-      setFieldErrors(prev => {
-        const next = { ...prev };
-        if (error) { next[fieldName] = error; } else { delete next[fieldName]; }
-        return next;
-      });
-    } catch {
-      // ignore validation errors silently
-    }
-  };
-
-  const handleCancel = async () => {
-    if (isDirty) {
-      if (!await confirm(t('notes.discardChanges'))) {
-        return;
-      }
-    }
-    setIsEditing(false);
-    if (previousTab) {
-      setActiveTab(previousTab);
-      setPreviousTab(null);
-    }
-    setEditedTitle(selectedNote!.title);
-    setEditedFields({ ...selectedNote!.fields });
-    setEditedTags(selectedNote!.tags ?? []);
-    setTagInput('');
-    setTagSuggestions([]);
-    setIsDirty(false);
-    setFieldErrors({});
-    setNoteErrors([]);
-    onEditDone();
-  };
-
-  const handleSave = async () => {
-    if (!selectedNote) return;
-    setFieldErrors({});
-    setNoteErrors([]);
-
-    try {
-      const result = await invoke<SaveResult>('save_note', {
-        noteId: selectedNote.id,
-        title: editedTitle,
-        fields: editedFields,
-      });
-
-      if ('validationErrors' in result) {
-        setFieldErrors(result.validationErrors.fieldErrors);
-        setNoteErrors(result.validationErrors.noteErrors);
-        if (result.validationErrors.previewTitle !== null) {
-          setEditedTitle(result.validationErrors.previewTitle);
-        }
-        setEditedFields(prev => ({ ...prev, ...result.validationErrors.previewFields }));
-        return;
-      }
-
-      const updatedNote = result.ok;
-      await invoke('update_note_tags', { noteId: selectedNote.id, tags: editedTags });
-      setEditedTitle(updatedNote.title);
-      setEditedFields({ ...updatedNote.fields });
-      setEditedTags(editedTags);
-      setIsEditing(false);
-      setIsDirty(false);
-      // Restore the tab that was active before editing
-      const restoreTab = previousTab;
-      if (restoreTab) {
-        setActiveTab(restoreTab);
-        setPreviousTab(null);
-      }
-      onNoteUpdated();
-      onEditDone();
-      // Re-fetch view HTML after save — on_save may have changed field values.
-      // Clear cached HTML so the render_view effect re-fetches.
-      setViewHtml({});
-    } catch (err) {
-      alert(t('notes.saveFailed', { error: String(err) }));
-    }
-  };
-
-  const handleFieldChange = (fieldName: string, value: FieldValue) => {
-    setEditedFields(prev => {
-      const next = { ...prev, [fieldName]: value };
-      evaluateGroupVisibility(next);
-      return next;
-    });
-    setIsDirty(true);
-  };
 
   if (!selectedNote) {
     return (
