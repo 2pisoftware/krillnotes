@@ -833,7 +833,7 @@ pub fn update_settings(
 /// (containing `notes.db`) in the configured workspace directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct WorkspaceEntry {
+pub struct WorkspaceEntry {
     /// Folder name (used as the workspace display name).
     name: String,
     /// Absolute path to the workspace folder.
@@ -891,13 +891,6 @@ pub fn read_info_json_full(workspace_dir: &Path) -> (Option<String>, Option<i64>
     let note_count = v["note_count"].as_u64().map(|n| n as usize);
     let attachment_count = v["attachment_count"].as_u64().map(|n| n as usize);
     (workspace_id, created_at, note_count, attachment_count)
-}
-
-/// Reads `info.json` from `workspace_dir` and returns `(created_at, note_count, attachment_count)`.
-/// Returns `(None, None, None)` if the file is missing or malformed.
-fn read_info_json(workspace_dir: &Path) -> (Option<i64>, Option<usize>, Option<usize>) {
-    let (_, created_at, note_count, attachment_count) = read_info_json_full(workspace_dir);
-    (created_at, note_count, attachment_count)
 }
 
 /// Lists all workspace folders (subdirectories containing `notes.db`) in the

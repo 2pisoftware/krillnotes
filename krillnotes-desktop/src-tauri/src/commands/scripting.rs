@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ScriptMutationResult<T: serde::Serialize> {
+pub struct ScriptMutationResult<T: serde::Serialize> {
     pub data: T,
     pub load_errors: Vec<crate::ScriptError>,
 }
@@ -18,7 +18,7 @@ pub(crate) struct ScriptMutationResult<T: serde::Serialize> {
 /// Serializable field definition with an extra `has_validate` flag for the frontend.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FieldDefInfo {
+pub struct FieldDefInfo {
     pub name: String,
     pub field_type: String,
     pub required: bool,
@@ -54,7 +54,7 @@ impl From<&crate::FieldDefinition> for FieldDefInfo {
 /// Serializable field group for the SchemaInfo Tauri response.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FieldGroupInfo {
+pub struct FieldGroupInfo {
     pub name: String,
     pub fields: Vec<FieldDefInfo>,
     pub collapsed: bool,
@@ -65,7 +65,7 @@ pub(crate) struct FieldGroupInfo {
 /// definitions with schema-level title visibility flags.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SchemaInfo {
+pub struct SchemaInfo {
     pub fields: Vec<FieldDefInfo>,
     pub title_can_view: bool,
     pub title_can_edit: bool,

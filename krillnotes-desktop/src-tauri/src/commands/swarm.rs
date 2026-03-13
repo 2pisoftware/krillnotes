@@ -569,7 +569,7 @@ pub async fn apply_swarm_delta(
 /// Serialisable result returned after one or more delta bundles are written.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GenerateDeltasResult {
+pub struct GenerateDeltasResult {
     succeeded: Vec<String>,          // peer_device_ids that worked
     failed: Vec<(String, String)>,   // (peer_device_id, error_message)
     files_written: Vec<String>,      // absolute paths of written .swarm files
