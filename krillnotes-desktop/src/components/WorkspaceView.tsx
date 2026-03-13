@@ -5,6 +5,7 @@
 // Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useResizablePanels } from '../hooks/useResizablePanels';
 import { Undo2, Redo2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -85,11 +86,9 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
   const [hoverHtml, setHoverHtml] = useState<string | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Resizable tree panel
-  const [treeWidth, setTreeWidth] = useState(300);
-  const isDragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(0);
+  // Resizable panels
+  const { treeWidth, tagCloudHeight, handleDividerMouseDown, handleTagDividerMouseDown } =
+    useResizablePanels();
 
   // Undo/redo state
   const [canUndo, setCanUndo] = useState(false);
@@ -101,55 +100,7 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
 
   // Tag cloud
   const [workspaceTags, setWorkspaceTags] = useState<string[]>([]);
-  const [tagCloudHeight, setTagCloudHeight] = useState(120);
   const [tagFilterQuery, setTagFilterQuery] = useState<string | undefined>(undefined);
-  const isTagDragging = useRef(false);
-  const tagDragStartY = useRef(0);
-  const tagDragStartHeight = useRef(0);
-
-  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    isDragging.current = true;
-    dragStartX.current = e.clientX;
-    dragStartWidth.current = treeWidth;
-    e.preventDefault();
-  }, [treeWidth]);
-
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isDragging.current) return;
-      const delta = e.clientX - dragStartX.current;
-      setTreeWidth(Math.max(180, Math.min(600, dragStartWidth.current + delta)));
-    };
-    const onMouseUp = () => { isDragging.current = false; };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  const handleTagDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    isTagDragging.current = true;
-    tagDragStartY.current = e.clientY;
-    tagDragStartHeight.current = tagCloudHeight;
-    e.preventDefault();
-  }, [tagCloudHeight]);
-
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isTagDragging.current) return;
-      const delta = tagDragStartY.current - e.clientY;
-      setTagCloudHeight(Math.max(0, Math.min(400, tagDragStartHeight.current + delta)));
-    };
-    const onMouseUp = () => { isTagDragging.current = false; };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
 
   selectedNoteIdRef.current = selectedNoteId;
 
