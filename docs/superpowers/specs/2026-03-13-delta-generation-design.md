@@ -13,6 +13,12 @@ With snapshot import (A11) complete, peers can onboard into a workspace. This ph
 
 Delta bundles carry all workspace operations since the last sync watermark, encrypted per-recipient. Each peer requires a *separate* delta file (different encryption key, different `since_operation_id`). The primary UX surface is a batch export: one menu action generates delta files for all selected peers into a user-chosen directory.
 
+### Sync is bidirectional and transitive
+
+**Bidirectional:** After Alice sends Bob a snapshot, Bob can immediately generate a delta back to Alice with his own changes, then Alice generates a delta back to Bob, and so on. The watermark `last_sent_op` tracks what each side has sent, independently. See Section 1.3 — snapshot import must initialise `last_sent_op` to enable this.
+
+**Transitive:** If Alice invites Bob and Bob invites George, George's operations travel to Alice via Bob — Alice never syncs directly with George. This works automatically: `operations_since` returns *all* operations in the log since the watermark, not just locally-authored ones. When Bob applies George's delta, George's operations enter Bob's log. Bob's next delta to Alice includes them. Alice can verify George's individual operation signatures once George's public key propagates via TOFU contact registration.
+
 ---
 
 ## Constraints (Regression Safety)
@@ -196,6 +202,32 @@ Applies a single operation received from a remote peer. Returns `true` if applie
 
 ---
 
+### 1.3 A11 fix — snapshot import must initialise both watermarks
+
+**Bug in current implementation (lib.rs line ~3726):** `upsert_sync_peer` is called with `last_sent_op = None` during snapshot import. This leaves the importing peer's `last_sent_op` as `None` for the snapshot sender, which causes `generate_delta` (step 2) to return an error — permanently blocking bidirectional exchange.
+
+**Fix:** When importing a snapshot, set **both** `last_received_op` and `last_sent_op` to `as_of_operation_id`:
+
+```rust
+// Current (broken for bidirectional sync):
+ws.upsert_sync_peer(&placeholder_device_id, &parsed.sender_public_key,
+    None,                              // last_sent_op
+    Some(&parsed.as_of_operation_id),  // last_received_op
+);
+
+// Fixed:
+ws.upsert_sync_peer(&placeholder_device_id, &parsed.sender_public_key,
+    Some(&parsed.as_of_operation_id),  // last_sent_op — snapshot covers up to here
+    Some(&parsed.as_of_operation_id),  // last_received_op
+);
+```
+
+**Rationale:** The snapshot represents everything the sender had up to `as_of_operation_id`. The importer acknowledges this as the shared baseline. Setting `last_sent_op = as_of_operation_id` means "my first delta to this peer covers only what happened after the snapshot" — which is exactly correct.
+
+This fix is part of the A12/A13 implementation scope (it is a prerequisite for delta generation to work at all) and must be applied to the existing snapshot import handler in `lib.rs`.
+
+---
+
 ## Section 2: Tauri Commands
 
 Three commands added to `lib.rs`:
@@ -374,6 +406,24 @@ Note: full semantics (handling schema conflicts, the `notes_migrated` counter) a
 6. Bob creates 1 note, generates delta for Alice.
 7. Alice applies Bob's delta.
 8. Both workspaces have 4 notes, identical state.
+
+### T-A13-9: Bidirectional exchange after snapshot import (regression test for Section 1.3 fix)
+
+1. Alice generates snapshot for Bob. Bob imports it. Both watermarks set to `as_of_operation_id`.
+2. Assert: Bob's `last_sent_op[Alice]` is `Some(as_of_operation_id)` — not `None`.
+3. Bob creates a note immediately after import.
+4. Assert: `generate_delta(bob_workspace, alice_device_id, ...)` succeeds (no "snapshot must precede delta" error).
+5. Bundle contains exactly 1 operation (Bob's new note — the snapshot baseline is excluded).
+
+### T-A13-10: Transitive operation forwarding
+
+1. Alice invites Bob (snapshot exchange). Bob invites George (snapshot exchange).
+2. George creates a note → `CreateNote` operation in George's log.
+3. George generates delta for Bob. Bob applies it → George's op now in Bob's log.
+4. Bob generates delta for Alice.
+5. Assert: Alice's delta from Bob contains George's `CreateNote` operation.
+6. Assert: Alice can parse and apply it (George's op stored with `synced = 1` in Alice's log).
+7. Assert: George auto-registered as TOFU contact in Alice's contact manager.
 
 ---
 
