@@ -173,6 +173,16 @@ impl IdentityManager {
         let identities_dir = config_dir.join("identities");
         std::fs::create_dir_all(&identities_dir)?;
         Self::migrate(&config_dir);
+        // Remove vestigial top-level contacts/ dir (empty, superseded by per-identity folders)
+        let legacy_contacts = config_dir.join("contacts");
+        if legacy_contacts.is_dir() {
+            let is_empty = std::fs::read_dir(&legacy_contacts)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
+            if is_empty {
+                let _ = std::fs::remove_dir(&legacy_contacts);
+            }
+        }
         Ok(Self { config_dir })
     }
 
