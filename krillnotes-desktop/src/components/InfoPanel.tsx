@@ -16,6 +16,7 @@ import FieldEditor from './FieldEditor';
 import TagPill from './TagPill';
 import AttachmentsSection from './AttachmentsSection';
 import { ChevronRight } from 'lucide-react';
+import { defaultValueForFieldType, isEmptyFieldValue } from '../utils/fieldValue';
 
 interface InfoPanelProps {
   selectedNote: Note | null;
@@ -27,28 +28,6 @@ interface InfoPanelProps {
   onBack: () => void;
   backNoteTitle?: string;
   refreshSignal?: number;
-}
-
-function defaultValueForFieldType(fieldType: string): FieldValue {
-  switch (fieldType) {
-    case 'boolean': return { Boolean: false };
-    case 'number':  return { Number: 0 };
-    case 'rating':  return { Number: 0 };
-    case 'date':      return { Date: null };
-    case 'email':     return { Email: '' };
-    case 'note_link': return { NoteLink: null };
-    case 'file':      return { File: null };
-    default:          return { Text: '' }; // covers 'text', 'textarea', 'select'
-  }
-}
-
-function isEmptyFieldValue(value: FieldValue): boolean {
-  if ('Text' in value)     return value.Text === '';
-  if ('Email' in value)    return value.Email === '';
-  if ('Date' in value)     return value.Date === null;
-  if ('NoteLink' in value) return value.NoteLink === null;
-  if ('File' in value)     return value.File === null;
-  return false; // Number and Boolean are never empty
 }
 
 function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMode, onEditDone, onLinkNavigate, onBack, backNoteTitle, refreshSignal }: InfoPanelProps) {
