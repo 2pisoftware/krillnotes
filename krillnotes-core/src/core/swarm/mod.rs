@@ -108,11 +108,13 @@ mod integration_tests {
             workspace_id: "ws-alpha".to_string(),
             workspace_name: "Project Alpha".to_string(),
             source_device_id: "dev-alice".to_string(),
+            source_display_name: "Alice".to_string(),
             since_operation_id: "op-baseline".to_string(),
             operations: alice_ops.clone(),
             sender_key: &alice_key,
             recipient_keys: vec![&bob_key.verifying_key()],
             recipient_peer_ids: vec!["dev-bob".to_string()],
+            recipient_identity_id: "pk-bob".to_string(),
         }).unwrap();
 
         // === Step 8: Bob applies delta ===

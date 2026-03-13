@@ -3752,13 +3752,10 @@ async fn apply_swarm_snapshot(
     };
 
     // 4. Create workspace DB preserving the snapshot's UUID.
-    let pubkey_str = base64::engine::general_purpose::STANDARD.encode(
-        Ed25519SigningKey::from_bytes(&import_seed).verifying_key().as_bytes(),
-    );
     let mut ws = Workspace::create_empty_with_id(
         &db_path,
         &workspace_password,
-        &pubkey_str,
+        &identity_uuid,
         Ed25519SigningKey::from_bytes(&import_seed),
         &parsed.workspace_id,
     )
@@ -3888,8 +3885,8 @@ async fn generate_deltas_for_peers(
 ) -> std::result::Result<GenerateDeltasResult, String> {
     use krillnotes_core::core::swarm::sync::generate_delta;
 
-    // Get signing key and workspace name upfront (before per-peer loop).
-    let (signing_key, workspace_name, identity_uuid) = {
+    // Get signing key, display name, and workspace name upfront (before per-peer loop).
+    let (signing_key, sender_display_name, workspace_name, identity_uuid) = {
         let ids = state.unlocked_identities.lock().expect("Mutex poisoned");
         let workspaces = state.workspaces.lock().expect("Mutex poisoned");
         let ws = workspaces.get(window.label()).ok_or("Workspace not open")?;
@@ -3898,6 +3895,7 @@ async fn generate_deltas_for_peers(
 
         let id = ids.get(&identity_uuid).ok_or("Identity not unlocked")?;
         let key = Ed25519SigningKey::from_bytes(&id.signing_key.to_bytes());
+        let display_name = id.display_name.clone();
 
         let paths = state.workspace_paths.lock().expect("Mutex poisoned");
         let ws_name = paths
@@ -3907,7 +3905,7 @@ async fn generate_deltas_for_peers(
             .unwrap_or("Untitled")
             .to_string();
 
-        (key, ws_name, identity_uuid)
+        (key, display_name, ws_name, identity_uuid)
     };
 
     let dir = std::path::Path::new(&dir_path);
@@ -3965,7 +3963,7 @@ async fn generate_deltas_for_peers(
             let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
             let ws = workspaces.get_mut(window.label()).ok_or("Workspace not open")?;
             if let Some(cm) = cm_guard.get(&identity_uuid) {
-                generate_delta(ws, peer_id, &workspace_name, &signing_key, cm)
+                generate_delta(ws, peer_id, &workspace_name, &signing_key, &sender_display_name, cm)
                     .map_err(|e| e.to_string())
             } else {
                 Err("Contact manager not available".to_string())

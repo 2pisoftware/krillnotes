@@ -50,6 +50,7 @@ pub fn generate_delta(
     peer_device_id: &str,
     workspace_name: &str,
     signing_key: &SigningKey,
+    sender_display_name: &str,
     contact_manager: &ContactManager,
 ) -> Result<Vec<u8>> {
     // 1. Look up peer.
@@ -95,11 +96,13 @@ pub fn generate_delta(
         workspace_id: workspace.workspace_id().to_string(),
         workspace_name: workspace_name.to_string(),
         source_device_id,
+        source_display_name: sender_display_name.to_string(),
         since_operation_id: last_sent_op.to_string(),
         operations: ops.clone(),
         sender_key: signing_key,
         recipient_keys: vec![&recipient_vk],
         recipient_peer_ids: vec![peer_device_id.to_string()],
+        recipient_identity_id: peer.peer_identity_id.clone(),
     })?;
 
     // 6. Update watermark only if we sent at least one operation.
@@ -170,16 +173,15 @@ pub fn apply_delta(
         }
     }
 
-    // 4. Upsert sender in peer registry.
+    // 4. Upsert sender in peer registry, consolidating any placeholder row.
     let last_received = if last_applied_op_id.is_empty() {
         None
     } else {
         Some(last_applied_op_id.as_str())
     };
-    workspace.upsert_sync_peer(
+    workspace.upsert_peer_from_delta(
         &parsed.sender_device_id,
         &parsed.sender_public_key,
-        None, // don't touch last_sent_op
         last_received,
     )?;
 
@@ -251,6 +253,7 @@ mod tests {
             "dev-bob",
             "TestWorkspace",
             &alice_key,
+            "Alice",
             &alice_cm,
         )
         .unwrap();
@@ -293,7 +296,7 @@ mod tests {
         .unwrap();
 
         let result =
-            super::generate_delta(&mut ws, "dev-bob", "TestWorkspace", &alice_key, &cm);
+            super::generate_delta(&mut ws, "dev-bob", "TestWorkspace", &alice_key, "Alice", &cm);
         assert!(result.is_err(), "must error when last_sent_op is None");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -346,6 +349,7 @@ mod tests {
             "dev-bob",
             "Test",
             &alice_key,
+            "Alice",
             &alice_cm,
         )
         .unwrap();
@@ -418,7 +422,7 @@ mod tests {
             )
             .unwrap();
         let bundle =
-            super::generate_delta(&mut alice_ws, "dev-bob", "Test", &alice_key, &alice_cm)
+            super::generate_delta(&mut alice_ws, "dev-bob", "Test", &alice_key, "Alice", &alice_cm)
                 .unwrap();
 
         // Bob's workspace — **different database file** → different workspace_id.

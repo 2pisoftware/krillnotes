@@ -4771,7 +4771,18 @@ impl Workspace {
                 )?.collect::<rusqlite::Result<Vec<_>>>().map_err(KrillnotesError::Database)?;
                 rows
             } else {
-                vec![] // watermark op not found in this workspace — nothing to send
+                // Watermark op not in this workspace's log (e.g. freshly imported
+                // from a snapshot whose operations were never inserted locally).
+                // Fall back to sending everything — the recipient's INSERT OR IGNORE
+                // handles any duplicates safely.
+                let mut stmt = conn.prepare(
+                    "SELECT operation_data FROM operations WHERE device_id != ?1 \
+                     ORDER BY timestamp_wall_ms ASC, timestamp_counter ASC, \
+                              timestamp_node_id ASC",
+                )?;
+                let rows = stmt.query_map([exclude_device_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>().map_err(KrillnotesError::Database)?;
+                rows
             }
         } else {
             let mut stmt = conn.prepare(
@@ -5151,6 +5162,17 @@ impl Workspace {
     pub fn get_sync_peer(&self, peer_device_id: &str) -> Result<Option<crate::core::peer_registry::SyncPeer>> {
         crate::core::peer_registry::PeerRegistry::new(self.storage.connection())
             .get_peer(peer_device_id)
+    }
+
+    /// Upsert a peer received via a delta bundle, consolidating any placeholder row.
+    pub fn upsert_peer_from_delta(
+        &self,
+        real_device_id: &str,
+        peer_identity_id: &str,
+        last_received_op: Option<&str>,
+    ) -> Result<()> {
+        crate::core::peer_registry::PeerRegistry::new(self.storage.connection())
+            .upsert_peer_from_delta(real_device_id, peer_identity_id, last_received_op)
     }
 
     /// Insert or update a sync peer row. Pass `None` for watermark fields that
