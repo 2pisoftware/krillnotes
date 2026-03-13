@@ -91,7 +91,7 @@ pub struct WorkspaceInfo {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceBindingInfo {
     pub workspace_uuid: String,
-    pub db_path: String,
+    pub folder_path: String,
 }
 
 /// Serialisable contact record returned to the frontend.
@@ -433,7 +433,7 @@ fn get_workspace_info_internal(
         .flatten();
 
     let identity_uuid = state.identity_manager.lock().expect("Mutex poisoned")
-        .get_workspace_binding(workspace.workspace_id())
+        .get_workspace_binding(path.as_path())
         .ok()
         .flatten()
         .map(|b| b.identity_uuid.to_string());
@@ -510,7 +510,7 @@ async fn create_workspace(
                 mgr.bind_workspace(
                     &uuid,
                     &workspace_uuid,
-                    &db_path.display().to_string(),
+                    &folder,
                     &password,
                     &seed,
                 ).map_err(|e| format!("Failed to bind workspace to identity: {e}"))?;
@@ -573,7 +573,7 @@ async fn open_workspace(
             // Step 1: Get identity_uuid from identity_manager (drop lock after)
             let identity_uuid = {
                 let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-                let binding = mgr.get_workspace_binding(&workspace_uuid)
+                let binding = mgr.get_workspace_binding(&folder)
                     .map_err(|e: KrillnotesError| e.to_string())?
                     .ok_or_else(|| "IDENTITY_REQUIRED".to_string())?;
                 binding.identity_uuid
@@ -592,7 +592,7 @@ async fn open_workspace(
             // Step 3: Decrypt DB password (no other locks held)
             let db_password = {
                 let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-                mgr.decrypt_db_password(&workspace_uuid, &seed)
+                mgr.decrypt_db_password(&folder, &seed)
                     .map_err(|e| format!("Failed to decrypt DB password: {e}"))?
             };
 
@@ -1708,7 +1708,7 @@ async fn execute_import(
         mgr.bind_workspace(
             &uuid,
             &workspace_uuid,
-            &db_path_buf.display().to_string(),
+            &folder,
             &workspace_password,
             &seed,
         ).map_err(|e| format!("Failed to bind workspace to identity: {e}"))?;
@@ -1911,22 +1911,22 @@ fn lock_identity(
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
 
     // Find and close all workspace windows belonging to this identity
+    let workspace_base_dir = PathBuf::from(&settings::load_settings().workspace_directory);
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    let bound_workspaces = mgr.get_workspaces_for_identity(&uuid)
-        .map_err(|e| e.to_string())?;
-    let bound_workspace_ids: std::collections::HashSet<String> = bound_workspaces.into_iter()
-        .map(|(ws_uuid, _)| ws_uuid)
-        .collect();
+    let bound_folders: std::collections::HashSet<PathBuf> =
+        mgr.get_workspaces_for_identity(&uuid, &workspace_base_dir)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(folder, _)| folder)
+            .collect();
     drop(mgr);
 
-    // Match workspace_ids against open workspaces using in-memory Workspace objects
-    // (avoids disk reads via info.json for each open workspace).
-    let workspaces = state.workspaces.lock().expect("Mutex poisoned");
-    let labels_to_close: Vec<String> = workspaces.iter()
-        .filter(|(_, ws)| bound_workspace_ids.contains(ws.workspace_id()))
+    let labels_to_close: Vec<String> = state.workspace_paths.lock()
+        .expect("Mutex poisoned")
+        .iter()
+        .filter(|(_, path)| bound_folders.contains(*path))
         .map(|(label, _)| label.clone())
         .collect();
-    drop(workspaces);
 
     for label in &labels_to_close {
         if let Some(win) = app.get_webview_window(label) {
@@ -1957,8 +1957,9 @@ fn delete_identity(
         return Err("Lock the identity before deleting it".to_string());
     }
 
+    let workspace_base_dir = PathBuf::from(&settings::load_settings().workspace_directory);
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    mgr.delete_identity(&uuid).map_err(|e| e.to_string())
+    mgr.delete_identity(&uuid, &workspace_base_dir).map_err(|e| e.to_string())
 }
 
 /// Renames an identity.
@@ -2019,13 +2020,19 @@ fn get_workspaces_for_identity(
     identity_uuid: String,
 ) -> std::result::Result<Vec<WorkspaceBindingInfo>, String> {
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+    let workspace_base_dir = PathBuf::from(&settings::load_settings().workspace_directory);
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    let bindings = mgr.get_workspaces_for_identity(&uuid)
+    let bindings = mgr
+        .get_workspaces_for_identity(&uuid, &workspace_base_dir)
         .map_err(|e| e.to_string())?;
-    Ok(bindings.into_iter().map(|(ws_uuid, binding)| WorkspaceBindingInfo {
-        workspace_uuid: ws_uuid,
-        db_path: binding.db_path,
-    }).collect())
+    let result: Vec<WorkspaceBindingInfo> = bindings
+        .into_iter()
+        .map(|(folder, binding)| WorkspaceBindingInfo {
+            workspace_uuid: binding.workspace_uuid,
+            folder_path: folder.display().to_string(),
+        })
+        .collect();
+    Ok(result)
 }
 
 /// Export an identity to a `.swarmid` file at the given path.
@@ -2072,7 +2079,7 @@ fn get_identity_public_key(
         .into_iter()
         .find(|i| i.uuid == uuid)
         .ok_or("Identity not found")?;
-    let full_path = crate::settings::config_dir().join(&identity_ref.file);
+    let full_path = mgr.identity_file_path(&identity_ref.uuid);
     let data = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("Cannot read identity file: {e}"))?;
     let file: krillnotes_core::core::identity::IdentityFile =
@@ -2245,7 +2252,7 @@ fn list_workspace_peers(
         let (ws_uuid_opt, _, _, _) = read_info_json_full(&folder);
         let workspace_uuid = ws_uuid_opt.ok_or("Workspace UUID missing from info.json")?;
         let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-        mgr.get_workspace_binding(&workspace_uuid)
+        mgr.get_workspace_binding(&folder)
             .map_err(|e| e.to_string())?
             .ok_or("No identity bound to this workspace")?
             .identity_uuid
@@ -2685,9 +2692,9 @@ fn list_workspace_files(
             let (workspace_id, created_at, note_count, attachment_count) = read_info_json_full(&folder);
 
             // Look up identity binding for this workspace
-            let (identity_uuid, identity_name) = if let Some(ref ws_id) = workspace_id {
+            let (identity_uuid, identity_name) = if workspace_id.is_some() {
                 let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-                if let Ok(Some(binding)) = mgr.get_workspace_binding(ws_id) {
+                if let Ok(Some(binding)) = mgr.get_workspace_binding(&folder) {
                     let identities = mgr.list_identities().unwrap_or_default();
                     let identity = identities.iter().find(|i| i.uuid == binding.identity_uuid);
                     (
@@ -2779,7 +2786,7 @@ fn duplicate_workspace(
         let identity_uuid = {
             let mgr = state.identity_manager.lock().expect("Mutex poisoned");
             let binding = mgr
-                .get_workspace_binding(&ws_uuid)
+                .get_workspace_binding(&source_folder)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "Source workspace is not bound to any identity".to_string())?;
             binding.identity_uuid
@@ -2798,7 +2805,7 @@ fn duplicate_workspace(
 
         // Step 3: Decrypt DB password (no other locks held)
         let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-        mgr.decrypt_db_password(&ws_uuid, &seed)
+        mgr.decrypt_db_password(&source_folder, &seed)
             .map_err(|e| format!("Failed to decrypt source password: {e}"))?
     };
 
@@ -2862,7 +2869,7 @@ fn duplicate_workspace(
     mgr.bind_workspace(
         &uuid,
         &new_ws_uuid,
-        &dest_db.display().to_string(),
+        &dest_folder,
         &new_password,
         &seed,
     )
@@ -3152,7 +3159,7 @@ fn open_swarm_file_cmd(
                 let mut found_name = None;
                 if let Some(ref target_pubkey) = header.target_peer {
                     for identity_ref in &identities {
-                        let full_path = crate::settings::config_dir().join(&identity_ref.file);
+                        let full_path = mgr.identity_file_path(&identity_ref.uuid);
                         if let Ok(data) = std::fs::read_to_string(&full_path) {
                             if let Ok(file) = serde_json::from_str::<krillnotes_core::core::identity::IdentityFile>(&data) {
                                 if &file.public_key == target_pubkey {
@@ -3196,7 +3203,7 @@ fn open_swarm_file_cmd(
                 let mut found_uuid = None;
                 let mut found_name = None;
                 for identity_ref in &identities {
-                    let full_path = crate::settings::config_dir().join(&identity_ref.file);
+                    let full_path = mgr.identity_file_path(&identity_ref.uuid);
                     if let Ok(data) = std::fs::read_to_string(&full_path) {
                         if let Ok(file) = serde_json::from_str::<krillnotes_core::core::identity::IdentityFile>(&data) {
                             if peer_ids.contains(&file.public_key) {
@@ -3732,7 +3739,7 @@ async fn apply_swarm_snapshot(
         mgr.bind_workspace(
             &identity_uuid_parsed,
             &workspace_uuid,
-            &db_path.display().to_string(),
+            &folder,
             &workspace_password,
             &seed,
         )

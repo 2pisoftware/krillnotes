@@ -218,7 +218,7 @@ export interface IdentityRef {
 
 export interface WorkspaceBindingInfo {
   workspaceUuid: string;
-  dbPath: string;
+  folderPath: string;
 }
 
 export type TrustLevel = 'Tofu' | 'CodeVerified' | 'Vouched' | 'VerifiedInPerson';
