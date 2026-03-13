@@ -4,19 +4,20 @@
 //
 // Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
 
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
-import type { Note, FieldValue, SchemaInfo, FieldDefinition, AttachmentMeta, SaveResult, ViewInfo } from '../types';
+import type { Note, FieldValue, SchemaInfo, FieldDefinition, AttachmentMeta, SaveResult } from '../types';
 import FieldDisplay from './FieldDisplay';
 import FieldEditor from './FieldEditor';
 import TagPill from './TagPill';
 import AttachmentsSection from './AttachmentsSection';
 import { ChevronRight } from 'lucide-react';
 import { defaultValueForFieldType, isEmptyFieldValue } from '../utils/fieldValue';
+import { useSchema } from '../hooks/useSchema';
 
 interface InfoPanelProps {
   selectedNote: Note | null;
@@ -32,24 +33,6 @@ interface InfoPanelProps {
 
 function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMode, onEditDone, onLinkNavigate, onBack, backNoteTitle, refreshSignal }: InfoPanelProps) {
   const { t } = useTranslation();
-  const [schemaInfo, setSchemaInfo] = useState<SchemaInfo>({
-    fields: [],
-    titleCanView: true,
-    titleCanEdit: true,
-    childrenSort: 'none',
-    allowedParentSchemas: [],
-    allowedChildrenSchemas: [],
-    isLeaf: false,
-    hasViews: false,
-    hasHover: false,
-    allowAttachments: false,
-    attachmentTypes: [],
-    fieldGroups: [],
-  });
-  const [views, setViews] = useState<ViewInfo[]>([]);
-  const [activeTab, setActiveTab] = useState<string>("fields");
-  const [viewHtml, setViewHtml] = useState<Record<string, string>>({});
-  const [previousTab, setPreviousTab] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editedTitle, setEditedTitle] = useState('');
   const [editedFields, setEditedFields] = useState<Record<string, FieldValue>>({});
@@ -68,75 +51,25 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
   const panelRef = useRef<HTMLDivElement>(null);
   const viewHtmlRef = useRef<HTMLDivElement>(null);
   const pendingEditModeRef = useRef(false);
-  // Tracks whether the schema fetch for the current note has already resolved.
-  // Used by the requestEditMode effect to enter edit mode immediately when the
-  // schema is already available, rather than waiting for a .then() that already ran.
-  const schemaLoadedRef = useRef(false);
 
-  const emptySchemaInfo: SchemaInfo = {
-    fields: [], titleCanView: true, titleCanEdit: true, childrenSort: 'none',
-    allowedParentSchemas: [], allowedChildrenSchemas: [], isLeaf: false, hasViews: false, hasHover: false,
-    allowAttachments: false, attachmentTypes: [], fieldGroups: [],
-  };
-
-  useEffect(() => {
-    schemaLoadedRef.current = false;
-    if (!selectedNote) {
-      setSchemaInfo(emptySchemaInfo);
-      setViews([]);
-      setViewHtml({});
-      setActiveTab("fields");
-      setIsEditing(false);
+  const handleSchemaLoaded = useCallback((schema: SchemaInfo) => {
+    setEditedFields(prev => {
+      const merged = { ...prev };
+      for (const field of schema.fields) {
+        if (!(field.name in merged)) {
+          merged[field.name] = defaultValueForFieldType(field.fieldType);
+        }
+      }
+      return merged;
+    });
+    if (pendingEditModeRef.current) {
       pendingEditModeRef.current = false;
-      return;
+      setIsEditing(true);
     }
+  }, []);
 
-    invoke<SchemaInfo>('get_schema_fields', { schema: selectedNote.schema })
-      .then(info => {
-        setSchemaInfo(info);
-        setEditedFields(prev => {
-          const merged = { ...prev };
-          for (const field of info.fields) {
-            if (!(field.name in merged)) {
-              merged[field.name] = defaultValueForFieldType(field.fieldType);
-            }
-          }
-          return merged;
-        });
-        schemaLoadedRef.current = true;
-        if (pendingEditModeRef.current) {
-          setIsEditing(true);
-          pendingEditModeRef.current = false;
-        }
-        // Fetch registered views for this note type
-        invoke<ViewInfo[]>('get_views_for_type', { schemaName: selectedNote.schema })
-          .then(v => {
-            setViews(v);
-            setViewHtml({});
-            // Default tab: first displayFirst view, or first view, or "fields"
-            const sorted = [...v].sort((a, b) =>
-              (b.displayFirst ? 1 : 0) - (a.displayFirst ? 1 : 0)
-            );
-            setActiveTab(sorted.length > 0 ? sorted[0].label : "fields");
-          })
-          .catch(() => {
-            setViews([]);
-            setActiveTab("fields");
-          });
-      })
-      .catch(err => {
-        console.error('Failed to fetch schema fields:', err);
-        setSchemaInfo(emptySchemaInfo);
-        setViews([]);
-        setViewHtml({});
-        setActiveTab("fields");
-        schemaLoadedRef.current = true;
-        if (pendingEditModeRef.current) {
-          setIsEditing(true);
-          pendingEditModeRef.current = false;
-        }
-      });
-  }, [selectedNote?.id]);
+  const { schemaInfo, views, activeTab, setActiveTab, viewHtml, setViewHtml, previousTab, setPreviousTab, schemaLoadedRef } =
+    useSchema(selectedNote, isEditing, handleSchemaLoaded);
 
   useEffect(() => {
     if (selectedNote) {
@@ -151,6 +84,9 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
       setGroupVisible({});
       setFieldErrors({});
       setNoteErrors([]);
+    } else {
+      setIsEditing(false);
+      pendingEditModeRef.current = false;
     }
   }, [selectedNote?.id]);
 
@@ -174,19 +110,6 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
 
   // Fetch HTML for the active custom view tab
   const activeViewHtml = activeTab !== 'fields' ? viewHtml[activeTab] ?? null : null;
-
-  useEffect(() => {
-    if (activeTab !== 'fields' && selectedNote && !isEditing) {
-      invoke<string>('render_view', {
-        noteId: selectedNote.id,
-        viewLabel: activeTab,
-      }).then(html => {
-        setViewHtml(prev => ({ ...prev, [activeTab]: html }));
-      }).catch(err => {
-        console.error('Failed to render view:', err);
-      });
-    }
-  }, [activeTab, selectedNote?.id, isEditing]);
 
   // Hydrate img[data-kn-attach-id] placeholders with real base64 data after the view HTML renders
   useEffect(() => {
