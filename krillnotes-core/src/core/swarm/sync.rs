@@ -89,8 +89,9 @@ pub fn generate_delta(
         .map_err(|e| KrillnotesError::Swarm(format!("invalid recipient key: {e}")))?;
 
     // 5. Build delta bundle.
-    let source_device_id = crate::core::device::get_device_id()
-        .map_err(|e| KrillnotesError::Swarm(format!("cannot get device id: {e}")))?;
+    // Use the workspace's identity-based device_id (not the hardware device ID)
+    // so that multiple identities on the same machine have distinct source IDs.
+    let source_device_id = workspace.device_id().to_string();
 
     let bundle = create_delta_bundle(DeltaParams {
         workspace_id: workspace.workspace_id().to_string(),

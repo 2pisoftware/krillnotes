@@ -16,7 +16,7 @@ use crate::core::peer_registry::{PeerInfo, PeerRegistry};
 use crate::core::user_script;
 #[allow(unused_imports)]
 use crate::{
-    get_device_id, DeleteResult, DeleteStrategy, FieldValue, KrillnotesError, Note,
+    DeleteResult, DeleteStrategy, FieldValue, KrillnotesError, Note,
     Operation, OperationLog, PurgeStrategy, QueryContext, Result, RetractInverse, SaveResult,
     ScriptError, ScriptRegistry, Storage, UndoResult, UserScript,
 };
@@ -125,8 +125,9 @@ impl Workspace {
         let mut script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
 
-        // Get hardware-based device ID
-        let device_id = get_device_id()?;
+        // Use identity UUID as device ID so multiple identities on the same
+        // machine have distinct device IDs (hardware device ID is shared).
+        let device_id = identity_uuid.to_string();
 
         // Store metadata
         storage.connection().execute(
@@ -327,8 +328,9 @@ impl Workspace {
         let mut script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
 
-        // Get hardware-based device ID
-        let device_id = get_device_id()?;
+        // Use identity UUID as device ID so multiple identities on the same
+        // machine have distinct device IDs (hardware device ID is shared).
+        let device_id = identity_uuid.to_string();
 
         // Store metadata
         storage.connection().execute(
@@ -525,7 +527,9 @@ impl Workspace {
         let mut script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
 
-        let device_id = get_device_id()?;
+        // Use identity UUID as device ID so multiple identities on the same
+        // machine have distinct device IDs (hardware device ID is shared).
+        let device_id = identity_uuid.to_string();
 
         storage.connection().execute(
             "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
@@ -662,7 +666,9 @@ impl Workspace {
         let script_registry = ScriptRegistry::new()?;
         let operation_log = OperationLog::new(PurgeStrategy::LocalOnly { keep_last: 100 });
 
-        let device_id = get_device_id()?;
+        // Use identity UUID as device ID so multiple identities on the same
+        // machine have distinct device IDs (hardware device ID is shared).
+        let device_id = identity_uuid.to_string();
 
         storage.connection().execute(
             "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
@@ -888,6 +894,15 @@ impl Workspace {
     /// Returns the unique workspace UUID (stored in `workspace_meta`).
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id
+    }
+
+    /// Returns the device identifier used for this workspace's operations.
+    ///
+    /// This is the identity UUID of the workspace owner, not the hardware
+    /// device ID, so that two identities on the same machine have distinct
+    /// device IDs and echo prevention works correctly during delta sync.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
     }
 
     /// Returns the UUID of the identity bound to this workspace.

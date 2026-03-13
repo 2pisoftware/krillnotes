@@ -45,6 +45,7 @@ interface SnapshotInfo {
 interface DeltaInfo {
   mode: 'delta';
   workspaceName: string;
+  localWorkspaceName: string | null;
   senderDisplayName: string;
   senderFingerprint: string;
   sinceOperationId: string | null;
@@ -80,12 +81,18 @@ export default function SwarmOpenDialog({
     if (!isOpen || !swarmFilePath) return;
     setLoading(true); setError(''); setFileInfo(null); setSuccess('');
     invoke<SwarmFileInfo>('open_swarm_file_cmd', { path: swarmFilePath })
-      .then(info => {
+      .then(async info => {
         setFileInfo(info);
-        // If we know which local identity is required and it isn't already unlocked, prompt now.
+        // If we know which local identity is required, check if it's already unlocked.
+        // Only prompt the user if it genuinely needs to be unlocked.
         if ((info.mode === 'invite' || info.mode === 'snapshot' || info.mode === 'delta') &&
-            info.targetIdentityUuid && info.targetIdentityUuid !== unlockedIdentityUuid && info.targetIdentityName) {
-          setUnlockTarget({ uuid: info.targetIdentityUuid, name: info.targetIdentityName });
+            info.targetIdentityUuid && info.targetIdentityName) {
+          const alreadyUnlocked = await invoke<boolean>('is_identity_unlocked', {
+            identityUuid: info.targetIdentityUuid,
+          }).catch(() => false);
+          if (!alreadyUnlocked) {
+            setUnlockTarget({ uuid: info.targetIdentityUuid, name: info.targetIdentityName });
+          }
         }
         if (info.mode === 'snapshot') setWorkspaceName(info.workspaceName);
       })
@@ -112,7 +119,7 @@ export default function SwarmOpenDialog({
   const handleAcceptInvite = async (identityUuid?: string) => {
     if (!fileInfo || fileInfo.mode !== 'invite' || !swarmFilePath) return;
     if (!declaredName.trim()) { setError(t('swarm.contactNameLabel') + ' required'); return; }
-    const uuid = identityUuid ?? unlockedIdentityUuid;
+    const uuid = identityUuid ?? (fileInfo as InviteInfo).targetIdentityUuid ?? unlockedIdentityUuid;
     if (!uuid) {
       if (fileInfo.targetIdentityUuid && fileInfo.targetIdentityName) {
         setUnlockTarget({ uuid: fileInfo.targetIdentityUuid, name: fileInfo.targetIdentityName });
@@ -152,7 +159,7 @@ export default function SwarmOpenDialog({
 
   const handleApplyDelta = async (identityUuid?: string) => {
     if (!fileInfo || fileInfo.mode !== 'delta' || !swarmFilePath) return;
-    const uuid = identityUuid ?? unlockedIdentityUuid;
+    const uuid = identityUuid ?? (fileInfo as DeltaInfo).targetIdentityUuid ?? unlockedIdentityUuid;
     if (!uuid) {
       if (fileInfo.targetIdentityUuid && fileInfo.targetIdentityName) {
         setUnlockTarget({ uuid: fileInfo.targetIdentityUuid, name: fileInfo.targetIdentityName });
@@ -176,7 +183,7 @@ export default function SwarmOpenDialog({
 
   const handleCreateWorkspace = async (identityUuid?: string) => {
     if (!fileInfo || fileInfo.mode !== 'snapshot' || !swarmFilePath) return;
-    const uuid = identityUuid ?? unlockedIdentityUuid;
+    const uuid = identityUuid ?? (fileInfo as SnapshotInfo).targetIdentityUuid ?? unlockedIdentityUuid;
     if (!uuid) {
       // If we know which identity is needed, prompt to unlock it.
       if (fileInfo.targetIdentityUuid && fileInfo.targetIdentityName) {
@@ -292,7 +299,7 @@ export default function SwarmOpenDialog({
       <div className="space-y-3">
         <h3 className="font-medium">Delta from {fileInfo.senderDisplayName}</h3>
         <div className="text-sm space-y-1">
-          <p><span className="text-muted-foreground">Workspace: </span>{fileInfo.workspaceName}</p>
+          <p><span className="text-muted-foreground">Workspace: </span>{fileInfo.localWorkspaceName ?? fileInfo.workspaceName}</p>
           <p className="text-muted-foreground text-xs">Sender fingerprint:</p>
           <FingerprintBadge fp={fileInfo.senderFingerprint} />
         </div>

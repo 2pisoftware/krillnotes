@@ -39,6 +39,10 @@ pub struct AppState {
     pub workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
     /// Map from window label to the filesystem path of the open database.
     pub workspace_paths: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// Map from window label to the identity UUID that opened that workspace.
+    /// Used to route `.swarm` delta bundles to the correct workspace when
+    /// multiple workspaces are open simultaneously.
+    pub workspace_identities: Arc<Mutex<HashMap<String, Uuid>>>,
     /// Label of the window that most recently gained focus. Used to route
     /// native menu events to the correct window without relying on async
     /// focus checks in the frontend (which are unreliable on Windows).
@@ -384,20 +388,24 @@ fn rebuild_menus(app: &AppHandle, state: &AppState, lang: &str) -> std::result::
     Ok(())
 }
 
-/// Inserts `workspace` and its `path` into `state` under `label`.
+/// Inserts `workspace`, its `path`, and its `identity_uuid` into `state` under `label`.
 fn store_workspace(
     state: &AppState,
     label: String,
     workspace: Workspace,
     path: PathBuf,
+    identity_uuid: Uuid,
 ) {
     let mut workspaces = state.workspaces.lock()
         .expect("Mutex poisoned");
     let mut paths = state.workspace_paths.lock()
         .expect("Mutex poisoned");
+    let mut identities = state.workspace_identities.lock()
+        .expect("Mutex poisoned");
 
     workspaces.insert(label.clone(), workspace);
-    paths.insert(label, path);
+    paths.insert(label.clone(), path);
+    identities.insert(label, identity_uuid);
 }
 
 /// Assembles a [`WorkspaceInfo`] for the workspace registered under `label`.
@@ -517,7 +525,7 @@ async fn create_workspace(
             }
 
             let new_window = create_workspace_window(&app, &label, &window)?;
-            store_workspace(&state, label.clone(), workspace, folder.clone());
+            store_workspace(&state, label.clone(), workspace, folder.clone(), uuid);
 
             new_window.set_title(&format!("Krillnotes - {label}"))
                 .map_err(|e| e.to_string())?;
@@ -606,7 +614,7 @@ async fn open_workspace(
 
             let migration_results = std::mem::take(&mut workspace.pending_migration_results);
             let new_window = create_workspace_window(&app, &label, &window)?;
-            store_workspace(&state, label.clone(), workspace, folder.clone());
+            store_workspace(&state, label.clone(), workspace, folder.clone(), identity_uuid);
 
             // Emit one event per migrated schema type so the frontend can show a toast.
             for (schema_name, from_version, to_version, notes_migrated) in &migration_results {
@@ -1717,7 +1725,7 @@ async fn execute_import(
     let label = generate_unique_label(&state, &folder);
 
     let new_window = create_workspace_window(&app, &label, &window)?;
-    store_workspace(&state, label.clone(), workspace, folder);
+    store_workspace(&state, label.clone(), workspace, folder, uuid);
 
     new_window.set_title(&format!("Krillnotes - {label}"))
         .map_err(|e| e.to_string())?;
@@ -3132,6 +3140,11 @@ pub enum SwarmFileInfo {
     Delta {
         #[serde(rename = "workspaceName")]
         workspace_name: String,
+        /// Name of the local workspace this delta targets (folder name).
+        /// Present when the recipient identity has a workspace open;
+        /// falls back to `workspaceName` (sender's name) if None.
+        #[serde(rename = "localWorkspaceName")]
+        local_workspace_name: Option<String>,
         #[serde(rename = "senderDisplayName")]
         sender_display_name: String,
         #[serde(rename = "senderFingerprint")]
@@ -3282,8 +3295,22 @@ fn open_swarm_file_cmd(
                 }
                 (found_uuid, found_name)
             };
+            // Find the local workspace name for the recipient identity's open workspace.
+            let local_workspace_name = target_identity_uuid.as_deref()
+                .and_then(|uuid_str| Uuid::parse_str(uuid_str).ok())
+                .and_then(|uuid| {
+                    let identity_map = state.workspace_identities.lock().expect("Mutex poisoned");
+                    let paths = state.workspace_paths.lock().expect("Mutex poisoned");
+                    identity_map.iter()
+                        .find(|(_, id)| **id == uuid)
+                        .and_then(|(lbl, _)| paths.get(lbl))
+                        .and_then(|p| p.file_stem())
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                });
             Ok(SwarmFileInfo::Delta {
                 workspace_name: header.workspace_name,
+                local_workspace_name,
                 sender_display_name: header.source_display_name,
                 sender_fingerprint: fingerprint,
                 since_operation_id: header.since_operation_id,
@@ -3604,7 +3631,7 @@ async fn create_snapshot_for_peers(
     let identity_uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
 
     // 1. Sender signing key + display name.
-    let (signing_key, _source_display_name) = {
+    let (signing_key, source_display_name) = {
         let ids = state.unlocked_identities.lock().expect("Mutex poisoned");
         let id = ids.get(&identity_uuid).ok_or("Identity not unlocked")?;
         (
@@ -3664,6 +3691,7 @@ async fn create_snapshot_for_peers(
         workspace_id: workspace_id.clone(),
         workspace_name,
         source_device_id,
+        source_display_name,
         as_of_operation_id: as_of_op_id.clone(),
         workspace_json,
         sender_key: &signing_key,
@@ -3675,8 +3703,10 @@ async fn create_snapshot_for_peers(
     // 5. Write to file.
     std::fs::write(&save_path, &bundle_bytes).map_err(|e| e.to_string())?;
 
-    // 6. Update last_sent_op for each recipient.
-    if !as_of_op_id.is_empty() {
+    // 6. Update last_sent_op for each recipient — always, even for empty workspaces.
+    // An empty as_of_op_id ("") is a valid sentinel meaning "start of log": operations_since
+    // falls back to sending all ops, and the recipient's INSERT OR IGNORE handles duplicates.
+    {
         let workspaces = state.workspaces.lock().expect("Mutex poisoned");
         if let Some(ws) = workspaces.get(window.label()) {
             for pk in &peer_public_keys {
@@ -3791,6 +3821,23 @@ async fn apply_swarm_snapshot(
         Some(&parsed.as_of_operation_id),  // last_received_op
     );
 
+    // 7b. Register sender in the contact manager so generate_delta can resolve their
+    //     encryption key. Snapshot bundles carry no display name, so use a synthetic
+    //     Falls back to a key-prefix placeholder if the bundle has no display name.
+    {
+        use krillnotes_core::core::contact::TrustLevel;
+        let sender_key = &parsed.sender_public_key;
+        let name = if parsed.sender_display_name.is_empty() {
+            format!("{}…", &sender_key[..8.min(sender_key.len())])
+        } else {
+            parsed.sender_display_name.clone()
+        };
+        let cms = state.contact_managers.lock().expect("Mutex poisoned");
+        if let Some(cm) = cms.get(&identity_uuid_parsed) {
+            let _ = cm.find_or_create_by_public_key(&name, sender_key, TrustLevel::Tofu);
+        }
+    }
+
     // 8. Bind workspace to identity so it can be reopened on next launch.
     let workspace_uuid = ws.workspace_id().to_string();
     {
@@ -3811,7 +3858,7 @@ async fn apply_swarm_snapshot(
     // 9. Open the workspace in a new window (mirrors execute_import exactly).
     let label = generate_unique_label(&state, &folder);
     let new_window = create_workspace_window(&app, &label, &window)?;
-    store_workspace(&state, label.clone(), ws, folder);
+    store_workspace(&state, label.clone(), ws, folder, identity_uuid_parsed);
     new_window
         .set_title(&format!("Krillnotes - {ws_name}"))
         .map_err(|e| e.to_string())?;
@@ -3845,16 +3892,31 @@ async fn apply_swarm_delta(
         Ed25519SigningKey::from_bytes(&id.signing_key.to_bytes())
     };
 
+    // Find the workspace window that belongs to the recipient identity.
+    // Using window.label() would route to whichever window opened the file,
+    // which may be a different user's workspace in a multi-workspace session.
+    let target_label = {
+        let identity_map = state.workspace_identities.lock().expect("Mutex poisoned");
+        identity_map.iter()
+            .find(|(_, id)| **id == identity_uuid_parsed)
+            .map(|(lbl, _)| lbl.clone())
+            .ok_or("No open workspace for this identity")?
+    };
+
     let apply_result = {
         let mut cm_guard = state.contact_managers.lock().expect("Mutex poisoned");
         let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
-        let ws = workspaces.get_mut(window.label()).ok_or("Workspace not open")?;
+        let ws = workspaces.get_mut(&target_label).ok_or("Workspace not open")?;
         let cm = cm_guard.get_mut(&identity_uuid_parsed).ok_or("Contact manager not available")?;
         apply_delta(&bundle_bytes, ws, &recipient_key, cm).map_err(|e| e.to_string())?
     };
 
-    // Emit workspace-updated so the frontend refreshes the tree view.
-    let _ = window.emit("workspace-updated", ());
+    // Emit workspace-updated on the target workspace's window so it refreshes.
+    if let Some(target_win) = window.app_handle().get_webview_window(&target_label) {
+        let _ = target_win.emit("workspace-updated", ());
+    } else {
+        let _ = window.emit("workspace-updated", ());
+    }
 
     Ok(serde_json::json!({
         "mode": "delta",
@@ -4060,6 +4122,7 @@ pub fn run() {
         .manage(AppState {
             workspaces: Arc::new(Mutex::new(HashMap::new())),
             workspace_paths: Arc::new(Mutex::new(HashMap::new())),
+            workspace_identities: Arc::new(Mutex::new(HashMap::new())),
             focused_window: Arc::new(Mutex::new(None)),
             identity_manager: Arc::new(Mutex::new(
                 IdentityManager::new(settings::config_dir()).expect("Failed to init IdentityManager")
@@ -4084,6 +4147,7 @@ pub fn run() {
                     }
                     state.workspaces.lock().expect("Mutex poisoned").remove(&label);
                     state.workspace_paths.lock().expect("Mutex poisoned").remove(&label);
+                    state.workspace_identities.lock().expect("Mutex poisoned").remove(&label);
 
                     // On macOS the menu bar is global. If this was the last
                     // workspace window, disable workspace-specific items so

@@ -88,6 +88,7 @@ mod integration_tests {
             workspace_id: "ws-alpha".to_string(),
             workspace_name: "Project Alpha".to_string(),
             source_device_id: "dev-alice".to_string(),
+            source_display_name: "Alice".to_string(),
             as_of_operation_id: "op-baseline".to_string(),
             workspace_json: workspace_state.clone(),
             sender_key: &alice_key,
