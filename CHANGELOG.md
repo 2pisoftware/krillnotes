@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Delta bundle sync (A12 + A13)** — bidirectional delta sync between workspace peers. A workspace
+  owner can generate a `.swarm` delta file for one or more peers via the new "Create delta Swarm"
+  menu item, which opens `CreateDeltaDialog` listing accepted peers with their last-sync operation
+  ID. A recipient opens the file to apply the delta operations via `apply_swarm_delta`, which
+  decrypts and verifies the bundle, replays only new operations (skipping duplicates via HLC
+  ordering), and emits `workspace-updated` so the tree view refreshes automatically. New core
+  module `swarm/sync.rs` with `generate_delta` and `apply_delta`; new Tauri commands
+  `generate_delta_for_peers` and `apply_swarm_delta`; new `peer_registry` table tracks per-peer
+  last-seen operation ID. Localised in all 7 languages.
+
+### Fixed
+- **Tree view not refreshing after delta apply** — `WorkspaceView` now listens for the
+  `workspace-updated` event emitted by `apply_swarm_delta` and calls `loadNotes()` to reload the
+  tree automatically, eliminating the need to restart the app after receiving a delta bundle.
 - **Workspace Peers dialog (Phase B)** — new "Workspace Peers" item in the Edit menu opens a
   dedicated dialog listing all sync peers for the open workspace with resolved display name,
   4-word BIP-39 fingerprint, trust-level badge (from the contact book), and last-sync time.
