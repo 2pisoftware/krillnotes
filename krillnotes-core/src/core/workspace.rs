@@ -5147,6 +5147,12 @@ impl Workspace {
         registry.upsert_last_sent(&placeholder_device_id, identity_pk, op_id)
     }
 
+    /// Retrieve a sync peer by device ID.
+    pub fn get_sync_peer(&self, peer_device_id: &str) -> Result<Option<crate::core::peer_registry::SyncPeer>> {
+        crate::core::peer_registry::PeerRegistry::new(self.storage.connection())
+            .get_peer(peer_device_id)
+    }
+
     /// Insert or update a sync peer row. Pass `None` for watermark fields that
     /// should not overwrite an existing value.
     pub fn upsert_sync_peer(

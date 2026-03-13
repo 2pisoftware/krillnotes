@@ -12,6 +12,7 @@ pub mod header;
 pub mod invite;
 pub mod signature;
 pub mod snapshot;
+pub mod sync;
 
 #[cfg(test)]
 mod integration_tests {
