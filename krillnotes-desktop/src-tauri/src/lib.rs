@@ -3781,6 +3781,126 @@ async fn apply_swarm_snapshot(
     get_workspace_info_internal(&state, &label)
 }
 
+/// Serialisable result returned after one or more delta bundles are written.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateDeltasResult {
+    succeeded: Vec<String>,          // peer_device_ids that worked
+    failed: Vec<(String, String)>,   // (peer_device_id, error_message)
+    files_written: Vec<String>,      // absolute paths of written .swarm files
+}
+
+/// Batch-generates one delta .swarm per selected peer into `dir_path`.
+///
+/// Continues on per-peer errors so a single failure doesn't block the others.
+#[tauri::command]
+async fn generate_deltas_for_peers(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    dir_path: String,
+    peer_device_ids: Vec<String>,
+) -> std::result::Result<GenerateDeltasResult, String> {
+    use krillnotes_core::core::swarm::sync::generate_delta;
+
+    // Get signing key and workspace name upfront (before per-peer loop).
+    let (signing_key, workspace_name, identity_uuid) = {
+        let ids = state.unlocked_identities.lock().expect("Mutex poisoned");
+        let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+        let ws = workspaces.get(window.label()).ok_or("Workspace not open")?;
+        let identity_uuid_str = ws.identity_uuid().to_string();
+        let identity_uuid = Uuid::parse_str(&identity_uuid_str).map_err(|e| e.to_string())?;
+
+        let id = ids.get(&identity_uuid).ok_or("Identity not unlocked")?;
+        let key = Ed25519SigningKey::from_bytes(&id.signing_key.to_bytes());
+
+        let paths = state.workspace_paths.lock().expect("Mutex poisoned");
+        let ws_name = paths
+            .get(window.label())
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled")
+            .to_string();
+
+        (key, ws_name, identity_uuid)
+    };
+
+    let dir = std::path::Path::new(&dir_path);
+    if !dir.exists() {
+        return Err(format!("Directory does not exist: {dir_path}"));
+    }
+
+    let mut result = GenerateDeltasResult {
+        succeeded: Vec::new(),
+        failed: Vec::new(),
+        files_written: Vec::new(),
+    };
+
+    for peer_id in &peer_device_ids {
+        // Resolve display name for file naming.
+        let display_name = {
+            let cm_guard = state.contact_managers.lock().expect("Mutex poisoned");
+            let workspaces = state.workspaces.lock().expect("Mutex poisoned");
+            let ws = workspaces.get(window.label()).ok_or("Workspace not open")?;
+            if let Some(cm) = cm_guard.get(&identity_uuid) {
+                ws.list_peers_info(cm)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|p| &p.peer_device_id == peer_id)
+                    .map(|p| p.display_name)
+                    .unwrap_or_else(|| peer_id[..8.min(peer_id.len())].to_string())
+            } else {
+                peer_id[..8.min(peer_id.len())].to_string()
+            }
+        };
+
+        // Sanitise display name for use in file path.
+        let safe_name: String = display_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let base_name = format!("delta-{safe_name}-{date}.swarm");
+
+        // Avoid overwriting existing files.
+        let file_path = {
+            let mut p = dir.join(&base_name);
+            let mut n = 2u32;
+            while p.exists() {
+                let stem = format!("delta-{safe_name}-{date}-{n}.swarm");
+                p = dir.join(stem);
+                n += 1;
+            }
+            p
+        };
+
+        // Generate the delta.
+        let bundle_result = {
+            let cm_guard = state.contact_managers.lock().expect("Mutex poisoned");
+            let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
+            let ws = workspaces.get_mut(window.label()).ok_or("Workspace not open")?;
+            if let Some(cm) = cm_guard.get(&identity_uuid) {
+                generate_delta(ws, peer_id, &workspace_name, &signing_key, cm)
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("Contact manager not available".to_string())
+            }
+        };
+
+        match bundle_result {
+            Ok(bytes) => match std::fs::write(&file_path, &bytes) {
+                Ok(()) => {
+                    result.succeeded.push(peer_id.clone());
+                    result.files_written.push(file_path.to_string_lossy().to_string());
+                }
+                Err(e) => result.failed.push((peer_id.clone(), e.to_string())),
+            },
+            Err(e) => result.failed.push((peer_id.clone(), e)),
+        }
+    }
+
+    Ok(result)
+}
+
 /// Maps raw menu event IDs to the user-facing message strings emitted to the frontend.
 const MENU_MESSAGES: &[(&str, &str)] = &[
     ("file_new", "File > New Workspace clicked"),
@@ -4087,6 +4207,7 @@ pub fn run() {
             add_contact_as_peer,
             create_snapshot_for_peers,
             apply_swarm_snapshot,
+            generate_deltas_for_peers,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
