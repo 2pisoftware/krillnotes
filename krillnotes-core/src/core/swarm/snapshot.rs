@@ -46,6 +46,7 @@ pub struct ParsedSnapshot {
     /// Decrypted workspace.json bytes — caller parses with serde.
     pub workspace_json: Vec<u8>,
     pub attachment_blobs: Vec<(String, Vec<u8>)>,
+    pub owner_pubkey: Option<String>,
 }
 
 /// Generate a snapshot.swarm bundle.
@@ -203,6 +204,7 @@ pub fn parse_snapshot_bundle(data: &[u8], recipient_key: &SigningKey) -> Result<
         sender_display_name: header.source_display_name,
         workspace_json,
         attachment_blobs,
+        owner_pubkey: header.owner_pubkey,
     })
 }
 

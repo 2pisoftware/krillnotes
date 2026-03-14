@@ -45,6 +45,7 @@ pub struct ParsedDelta {
     pub sender_public_key: String,
     pub sender_device_id: String,
     pub operations: Vec<Operation>,
+    pub owner_pubkey: Option<String>,
 }
 
 /// Generate a delta.swarm bundle.
@@ -158,6 +159,7 @@ pub fn parse_delta_bundle(data: &[u8], recipient_key: &SigningKey) -> Result<Par
         sender_public_key: header.source_identity,
         sender_device_id: header.source_device_id,
         operations,
+        owner_pubkey: header.owner_pubkey,
     })
 }
 

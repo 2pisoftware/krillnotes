@@ -454,6 +454,12 @@ pub async fn apply_swarm_snapshot(
         }
     }
 
+    // Set the true workspace owner from the snapshot header
+    if let Some(ref snapshot_owner) = parsed.owner_pubkey {
+        ws.set_owner_pubkey(snapshot_owner)
+            .map_err(|e| e.to_string())?;
+    }
+
     // 7. Register the snapshot sender as a sync peer with last_received_op = snapshot watermark.
     let placeholder_device_id = format!("identity:{}", parsed.sender_public_key);
     let _ = ws.upsert_sync_peer(

@@ -147,6 +147,18 @@ pub fn apply_delta(
         )));
     }
 
+    // Cross-check owner_pubkey if present in the delta
+    if let Some(ref header_owner) = parsed.owner_pubkey {
+        let local_owner = workspace.owner_pubkey();
+        if header_owner != local_owner {
+            return Err(KrillnotesError::Swarm(format!(
+                "owner_pubkey mismatch: delta header={}, local={}",
+                &header_owner[..header_owner.len().min(8)],
+                &local_owner[..local_owner.len().min(8)],
+            )));
+        }
+    }
+
     let mut applied = 0usize;
     let mut skipped = 0usize;
     let mut new_tofu_contacts: Vec<String> = Vec::new();
