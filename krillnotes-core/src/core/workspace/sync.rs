@@ -428,12 +428,13 @@ impl Workspace {
 
                 PeerInfo {
                     peer_device_id: peer.peer_device_id,
-                    peer_identity_id: peer.peer_identity_id,
+                    peer_identity_id: peer.peer_identity_id.clone(),
                     display_name,
                     fingerprint,
                     trust_level,
                     contact_id: contact.map(|c| c.contact_id.to_string()),
                     last_sync: peer.last_sync,
+                    is_owner: peer.peer_identity_id == self.owner_pubkey,
                 }
             })
             .collect();
