@@ -113,10 +113,9 @@ export function CreateInviteDialog({ identityUuid, workspaceName, onCreated, onC
     }
   };
 
-  // Step 2: do both — copy relay link AND save file
+  // Step 2: do both — copy relay link AND save file concurrently
   const handleBoth = async () => {
-    await handleCopyLink();
-    await handleSaveFile();
+    await Promise.allSettled([handleCopyLink(), handleSaveFile()]);
   };
 
   if (step === 'share') {
