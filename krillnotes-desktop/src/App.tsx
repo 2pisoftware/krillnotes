@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { open, save, confirm } from '@tauri-apps/plugin-dialog';
+import { save, confirm } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import WorkspaceView from './components/WorkspaceView';
 import EmptyState from './components/EmptyState';
@@ -27,89 +27,13 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import i18n from './i18n';
 import { useTranslation } from 'react-i18next';
 import { slugify } from './utils/slugify';
+import { useMenuEvents } from './hooks/useMenuEvents';
 
 interface ImportState {
   zipPath: string;
   noteCount: number;
   scriptCount: number;
 }
-
-const createMenuHandlers = (
-  setStatus: (msg: string, isError?: boolean) => void,
-  setShowNewWorkspace: (show: boolean) => void,
-  setShowOpenWorkspace: (show: boolean) => void,
-  setShowSettings: (show: boolean) => void,
-  setShowExportPasswordDialog: (show: boolean) => void,
-  setShowIdentityManager: (show: boolean) => void,
-  doImport: (zipPath: string) => void,
-  setShowSwarmInvite: (show: boolean) => void,
-  openSwarmFile: (path: string) => void,
-  setShowWorkspacePeers: (show: boolean) => void,
-  setShowCreateDeltaDialog: (show: boolean) => void,
-) => ({
-  'File > New Workspace clicked': () => {
-    setShowNewWorkspace(true);
-  },
-
-  'File > Open Workspace clicked': () => {
-    setShowIdentityManager(false);
-    setShowOpenWorkspace(true);
-  },
-
-  'File > Export Workspace clicked': () => {
-    setShowExportPasswordDialog(true);
-  },
-
-  'File > Import Workspace clicked': async () => {
-    try {
-      const zipPath = await open({
-        filters: [{ name: 'Krillnotes Export', extensions: ['krillnotes'] }],
-        multiple: false,
-        title: 'Import Workspace',
-      });
-      if (!zipPath || Array.isArray(zipPath)) return;
-      doImport(zipPath as string);
-    } catch (error) {
-      setStatus(`Import failed: ${error}`, true);
-    }
-  },
-
-  'Edit > Settings clicked': () => {
-    setShowSettings(true);
-  },
-
-  'File > Manage Identities clicked': () => {
-    setShowOpenWorkspace(false);
-    setShowIdentityManager(true);
-  },
-
-  'File > Invite Peer clicked': () => {
-    setShowSwarmInvite(true);
-  },
-
-  'Edit > Workspace Peers clicked': () => {
-    setShowWorkspacePeers(true);
-  },
-
-  'Edit > Create delta Swarm clicked': () => {
-    setShowCreateDeltaDialog(true);
-  },
-
-  'File > Open Swarm File clicked': async () => {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const picked = await open({
-        filters: [{ name: 'Swarm Bundle', extensions: ['swarm'] }],
-        multiple: false,
-        title: 'Open .swarm file',
-      });
-      if (!picked || Array.isArray(picked)) return;
-      openSwarmFile(picked as string);
-    } catch {
-      // user cancelled
-    }
-  },
-});
 
 function App() {
   const { t } = useTranslation();
@@ -253,29 +177,6 @@ function App() {
     setTimeout(() => setStatus(''), 5000);
   };
 
-  useEffect(() => {
-    const handlers = createMenuHandlers(
-      statusSetter,
-      setShowNewWorkspace,
-      setShowOpenWorkspace,
-      setShowSettings,
-      setShowExportPasswordDialog,
-      setShowIdentityManager,
-      (zipPath) => proceedWithImport(zipPath, null),
-      setShowSwarmInvite,
-      openSwarmFile,
-      setShowWorkspacePeers,
-      setShowCreateDeltaDialog,
-    );
-
-    const unlisten = getCurrentWebviewWindow().listen<string>('menu-action', (event) => {
-      const handler = handlers[event.payload as keyof typeof handlers];
-      if (handler) handler();
-    });
-
-    return () => { unlisten.then(f => f()); };
-  }, [workspace]);
-
   // Reset import dialog state when it opens and load unlocked identities
   useEffect(() => {
     if (importState) {
@@ -397,6 +298,13 @@ function App() {
       }
     }
   };
+
+  useMenuEvents(workspace, {
+    setShowNewWorkspace, setShowOpenWorkspace, setShowSettings,
+    setShowExportPasswordDialog, setShowIdentityManager, setShowSwarmInvite,
+    setShowWorkspacePeers, setShowCreateDeltaDialog,
+    statusSetter, proceedWithImport, openSwarmFile,
+  });
 
   return (
     <ThemeProvider>
