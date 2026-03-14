@@ -3123,7 +3123,6 @@ schema("SameVerType", #{
 
     #[test]
     fn test_apply_incoming_create_note() {
-        use crate::core::hlc::HlcTimestamp;
         let temp = NamedTempFile::new().unwrap();
         let mut ws = Workspace::create(temp.path(), "", "local-device",
             ed25519_dalek::SigningKey::from_bytes(&[1u8; 32])).unwrap();
@@ -3210,7 +3209,7 @@ schema("SameVerType", #{
         ws.apply_incoming_operation(op).unwrap();
 
         // Now create a local note — its HLC timestamp must be >= far_future_ms.
-        let root = ws.list_all_notes().unwrap()[0].clone();
+        let _root = ws.list_all_notes().unwrap()[0].clone();
         // We can't call create_note easily because it may fail validation,
         // but we can check the HLC state directly from the operations log.
         // Instead, verify that the remote op's wall_ms is stored correctly.

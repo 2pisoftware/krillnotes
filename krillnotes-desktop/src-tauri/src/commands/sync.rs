@@ -20,9 +20,7 @@ use krillnotes_core::core::{
         save_relay_credentials,
     },
 };
-#[cfg(feature = "relay")]
 use krillnotes_core::core::sync::relay::{RelayChannel, RelayClient};
-#[cfg(feature = "relay")]
 use krillnotes_core::core::sync::relay::auth::decrypt_pop_challenge;
 
 /// Relay account info returned by `get_relay_info`.
@@ -109,27 +107,22 @@ pub async fn poll_sync(
         .get_mut(&workspace_label)
         .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?;
 
-    // Try to add relay channel if credentials exist for this identity.
-    // load_relay_credentials is NOT feature-gated (pure disk I/O in auth.rs).
-    // Only RelayClient/RelayChannel construction is gated.
+    // Add relay channel if credentials exist for this identity.
     let relay_dir = crate::settings::config_dir().join("relay");
     if let Ok(Some(creds)) = load_relay_credentials(
         &relay_dir,
         &identity_uuid.to_string(),
         &relay_key,
     ) {
-        #[cfg(feature = "relay")]
-        {
-            let relay_client = RelayClient::new(&creds.relay_url)
-                .with_session_token(&creds.session_token);
-            let workspace_id_str = workspace.workspace_id().to_string();
-            let relay_channel = RelayChannel::new(
-                relay_client,
-                workspace_id_str,
-                sender_device_key_hex.clone(),
-            );
-            engine.register_channel(Box::new(relay_channel));
-        }
+        let relay_client = RelayClient::new(&creds.relay_url)
+            .with_session_token(&creds.session_token);
+        let workspace_id_str = workspace.workspace_id().to_string();
+        let relay_channel = RelayChannel::new(
+            relay_client,
+            workspace_id_str,
+            sender_device_key_hex.clone(),
+        );
+        engine.register_channel(Box::new(relay_channel));
     }
 
     let mut ctx = SyncContext {
@@ -155,7 +148,6 @@ pub async fn poll_sync(
 /// Register with a relay server and store credentials, then create a
 /// `SyncEngine` with a `RelayChannel` for the given identity.
 #[tauri::command]
-#[cfg(feature = "relay")]
 pub async fn configure_relay(
     state: State<'_, AppState>,
     identity_uuid: String,
@@ -217,24 +209,11 @@ pub async fn configure_relay(
     Ok(())
 }
 
-#[tauri::command]
-#[cfg(not(feature = "relay"))]
-pub async fn configure_relay(
-    _state: State<'_, AppState>,
-    _identity_uuid: String,
-    _relay_url: String,
-    _email: String,
-    _password: String,
-) -> Result<(), String> {
-    Err("configure_relay not yet implemented".to_string())
-}
-
 // ── relay_login ────────────────────────────────────────────────────────────
 
 /// Re-authenticate with an existing relay account (e.g. after a token
 /// expiry).
 #[tauri::command]
-#[cfg(feature = "relay")]
 pub async fn relay_login(
     state: State<'_, AppState>,
     identity_uuid: String,
@@ -285,18 +264,6 @@ pub async fn relay_login(
         .map_err(|e| e.to_string())?;
 
     Ok(())
-}
-
-#[tauri::command]
-#[cfg(not(feature = "relay"))]
-pub async fn relay_login(
-    _state: State<'_, AppState>,
-    _identity_uuid: String,
-    _relay_url: String,
-    _email: String,
-    _password: String,
-) -> Result<(), String> {
-    Err("relay_login not yet implemented".to_string())
 }
 
 // ── create_relay_invite ────────────────────────────────────────────────────
