@@ -32,6 +32,7 @@ mimalloc = { version = "0.1", default-features = false }
 dirs = "6"
 mime_guess = "2"
 base64 = "0.22"
+hex = "0.4"
 rand = "0.8"
 tempfile = "3"
 uuid = { workspace = true }
