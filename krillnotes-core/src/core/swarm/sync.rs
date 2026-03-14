@@ -104,6 +104,7 @@ pub fn generate_delta(
         recipient_keys: vec![&recipient_vk],
         recipient_peer_ids: vec![peer_device_id.to_string()],
         recipient_identity_id: peer.peer_identity_id.clone(),
+        owner_pubkey: workspace.owner_pubkey().to_string(),
     })?;
 
     // 6. Update watermark only if we sent at least one operation.
@@ -144,6 +145,18 @@ pub fn apply_delta(
             parsed.workspace_id,
             workspace.workspace_id()
         )));
+    }
+
+    // Cross-check owner_pubkey if present in the delta
+    if let Some(ref header_owner) = parsed.owner_pubkey {
+        let local_owner = workspace.owner_pubkey();
+        if header_owner != local_owner {
+            return Err(KrillnotesError::Swarm(format!(
+                "owner_pubkey mismatch: delta header={}, local={}",
+                &header_owner[..header_owner.len().min(8)],
+                &local_owner[..local_owner.len().min(8)],
+            )));
+        }
     }
 
     let mut applied = 0usize;

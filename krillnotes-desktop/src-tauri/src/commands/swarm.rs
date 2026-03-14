@@ -293,7 +293,7 @@ pub async fn create_snapshot_for_peers(
         .collect::<std::result::Result<_, _>>()?;
 
     // 3. Collect workspace data (hold lock only briefly).
-    let (workspace_id, workspace_name, workspace_json, attachment_blobs, as_of_op_id) = {
+    let (workspace_id, workspace_name, workspace_json, attachment_blobs, as_of_op_id, owner_pubkey) = {
         let workspaces = state.workspaces.lock().expect("Mutex poisoned");
         let paths = state.workspace_paths.lock().expect("Mutex poisoned");
         let ws = workspaces.get(window.label()).ok_or("Workspace not open")?;
@@ -305,6 +305,7 @@ pub async fn create_snapshot_for_peers(
             .to_string();
 
         let workspace_id = ws.workspace_id().to_string();
+        let owner_pubkey = ws.owner_pubkey().to_string();
 
         let workspace_json = ws.to_snapshot_json().map_err(|e| e.to_string())?;
 
@@ -321,7 +322,7 @@ pub async fn create_snapshot_for_peers(
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
 
-        (workspace_id, workspace_name, workspace_json, attachment_blobs, as_of_op_id)
+        (workspace_id, workspace_name, workspace_json, attachment_blobs, as_of_op_id, owner_pubkey)
     };
 
     // 4. Build the bundle.
@@ -337,6 +338,7 @@ pub async fn create_snapshot_for_peers(
         recipient_keys: recipient_refs,
         recipient_peer_ids: peer_public_keys.clone(),
         attachment_blobs,
+        owner_pubkey,
     }).map_err(|e| e.to_string())?;
 
     // 5. Write to file.
@@ -450,6 +452,12 @@ pub async fn apply_swarm_snapshot(
             )
             .map_err(|e| e.to_string())?;
         }
+    }
+
+    // Set the true workspace owner from the snapshot header
+    if let Some(ref snapshot_owner) = parsed.owner_pubkey {
+        ws.set_owner_pubkey(snapshot_owner)
+            .map_err(|e| e.to_string())?;
     }
 
     // 7. Register the snapshot sender as a sync peer with last_received_op = snapshot watermark.

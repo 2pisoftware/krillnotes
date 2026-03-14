@@ -242,6 +242,7 @@ export interface PeerInfo {
   trustLevel?: string;    // undefined if peer is not in the contact book
   contactId?: string;     // UUID string, undefined if not in contacts
   lastSync?: string;      // ISO 8601, undefined if never synced
+  isOwner?: boolean;
 }
 
 export interface InviteInfo {

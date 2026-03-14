@@ -52,6 +52,8 @@ pub struct PeerInfo {
     pub contact_id: Option<String>,
     /// ISO 8601 timestamp of last .swarm bundle exchange. None if never synced.
     pub last_sync: Option<String>,
+    /// True if this peer's identity is the workspace owner.
+    pub is_owner: bool,
 }
 
 /// Manages the `sync_peers` table for one workspace connection.

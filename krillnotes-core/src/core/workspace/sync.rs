@@ -166,6 +166,7 @@ impl Workspace {
         }
 
         // 5. Apply the state change to working tables.
+        let mut scripts_changed = false;
         let tx = self.storage.connection_mut().transaction()?;
         match &op {
             Operation::CreateNote {
@@ -243,40 +244,49 @@ impl Workspace {
             }
 
             Operation::CreateUserScript {
-                script_id, name, description, source_code, load_order, enabled, ..
+                created_by, script_id, name, description, source_code, load_order, enabled, ..
             } => {
-                let now_ms = ts.wall_ms as i64;
-                tx.execute(
-                    "INSERT OR IGNORE INTO user_scripts \
-                     (id, name, description, source_code, load_order, enabled, \
-                      created_at, modified_at, category) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user')",
-                    rusqlite::params![
-                        script_id, name, description, source_code,
-                        load_order, *enabled as i32, now_ms, now_ms,
-                    ],
-                )?;
+                if created_by == &self.owner_pubkey {
+                    let now_ms = ts.wall_ms as i64;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO user_scripts \
+                         (id, name, description, source_code, load_order, enabled, \
+                          created_at, modified_at, category) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user')",
+                        rusqlite::params![
+                            script_id, name, description, source_code,
+                            load_order, *enabled as i32, now_ms, now_ms,
+                        ],
+                    )?;
+                    scripts_changed = true;
+                }
             }
 
             Operation::UpdateUserScript {
-                script_id, name, description, source_code, load_order, enabled, ..
+                modified_by, script_id, name, description, source_code, load_order, enabled, ..
             } => {
-                let now_ms = ts.wall_ms as i64;
-                tx.execute(
-                    "UPDATE user_scripts SET name = ?1, description = ?2, source_code = ?3, \
-                     load_order = ?4, enabled = ?5, modified_at = ?6 WHERE id = ?7",
-                    rusqlite::params![
-                        name, description, source_code,
-                        load_order, *enabled as i32, now_ms, script_id,
-                    ],
-                )?;
+                if modified_by == &self.owner_pubkey {
+                    let now_ms = ts.wall_ms as i64;
+                    tx.execute(
+                        "UPDATE user_scripts SET name = ?1, description = ?2, source_code = ?3, \
+                         load_order = ?4, enabled = ?5, modified_at = ?6 WHERE id = ?7",
+                        rusqlite::params![
+                            name, description, source_code,
+                            load_order, *enabled as i32, now_ms, script_id,
+                        ],
+                    )?;
+                    scripts_changed = true;
+                }
             }
 
-            Operation::DeleteUserScript { script_id, .. } => {
-                tx.execute(
-                    "DELETE FROM user_scripts WHERE id = ?1",
-                    [script_id],
-                )?;
+            Operation::DeleteUserScript { deleted_by, script_id, .. } => {
+                if deleted_by == &self.owner_pubkey {
+                    tx.execute(
+                        "DELETE FROM user_scripts WHERE id = ?1",
+                        [script_id],
+                    )?;
+                    scripts_changed = true;
+                }
             }
 
             // Log-only variants — no working table change in this phase.
@@ -287,6 +297,11 @@ impl Workspace {
             | Operation::RevokePermission { .. } => {}
         }
         tx.commit()?;
+
+        // Re-register scripts with the Rhai engine after applying script ops.
+        if scripts_changed {
+            self.reload_scripts()?;
+        }
 
         Ok(true)
     }
@@ -379,6 +394,9 @@ impl Workspace {
                 )?;
             }
             tx.commit()?;
+
+            // Re-register imported scripts with the Rhai engine.
+            self.reload_scripts()?;
         }
 
         Ok(note_count)
@@ -422,12 +440,13 @@ impl Workspace {
 
                 PeerInfo {
                     peer_device_id: peer.peer_device_id,
-                    peer_identity_id: peer.peer_identity_id,
+                    peer_identity_id: peer.peer_identity_id.clone(),
                     display_name,
                     fingerprint,
                     trust_level,
                     contact_id: contact.map(|c| c.contact_id.to_string()),
                     last_sync: peer.last_sync,
+                    is_owner: peer.peer_identity_id == self.owner_pubkey,
                 }
             })
             .collect();

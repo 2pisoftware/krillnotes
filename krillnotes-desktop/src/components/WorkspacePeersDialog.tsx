@@ -150,6 +150,11 @@ export default function WorkspacePeersDialog({
                         {t('peers.notInContacts', 'not in contacts')}
                       </span>
                     )}
+                    {peer.isOwner && (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full font-medium bg-amber-500/20 text-amber-400">
+                        Owner
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-[var(--color-muted-foreground)] font-mono mt-0.5">
                     {peer.fingerprint}

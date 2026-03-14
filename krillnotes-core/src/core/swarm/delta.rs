@@ -35,6 +35,8 @@ pub struct DeltaParams<'a> {
     pub recipient_peer_ids: Vec<String>,
     /// Base64 public key of the intended recipient (for target_peer in header).
     pub recipient_identity_id: String,
+    /// Base64 public key of the workspace owner.
+    pub owner_pubkey: String,
 }
 
 pub struct ParsedDelta {
@@ -43,6 +45,7 @@ pub struct ParsedDelta {
     pub sender_public_key: String,
     pub sender_device_id: String,
     pub operations: Vec<Operation>,
+    pub owner_pubkey: Option<String>,
 }
 
 /// Generate a delta.swarm bundle.
@@ -78,6 +81,7 @@ pub fn create_delta_bundle(params: DeltaParams<'_>) -> Result<Vec<u8>> {
         target_peer: Some(params.recipient_identity_id),
         recipients: Some(entries),
         has_attachments: false,
+        owner_pubkey: Some(params.owner_pubkey.clone()),
     };
     header.validate()?;
 
@@ -155,6 +159,7 @@ pub fn parse_delta_bundle(data: &[u8], recipient_key: &SigningKey) -> Result<Par
         sender_public_key: header.source_identity,
         sender_device_id: header.source_device_id,
         operations,
+        owner_pubkey: header.owner_pubkey,
     })
 }
 
@@ -197,6 +202,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["dev-2".to_string()],
             recipient_identity_id: "pk-dev-2".to_string(),
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         let parsed = parse_delta_bundle(&bundle, &recipient_key).unwrap();
@@ -222,6 +228,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["dev-2".to_string()],
             recipient_identity_id: "pk-dev-2".to_string(),
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         let parsed = parse_delta_bundle(&bundle, &recipient_key).unwrap();

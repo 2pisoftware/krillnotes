@@ -86,6 +86,9 @@ pub struct Workspace {
     /// Included in `info.json` so the workspace manager can resolve identity
     /// bindings without opening the encrypted database.
     workspace_id: String,
+    /// Base64-encoded Ed25519 public key of the workspace creator (owner).
+    /// Only the owner may create, update, or delete scripts.
+    owner_pubkey: String,
     /// ChaCha20-Poly1305 attachment key derived from password + workspace_id.
     /// `None` for unencrypted workspaces (empty password).
     attachment_key: Option<[u8; 32]>,
@@ -241,6 +244,12 @@ impl Workspace {
             base64::engine::general_purpose::STANDARD.encode(pubkey.as_bytes())
         };
 
+        // Store the creator as workspace owner
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            rusqlite::params!["owner_pubkey", &identity_pubkey_b64],
+        )?;
+
         let root = Note {
             id: Uuid::new_v4().to_string(),
             title,
@@ -295,9 +304,10 @@ impl Workspace {
             operation_log,
             device_id,
             identity_uuid: identity_uuid.to_string(),
-            current_identity_pubkey: identity_pubkey_b64,
+            current_identity_pubkey: identity_pubkey_b64.clone(),
             workspace_root,
             workspace_id,
+            owner_pubkey: identity_pubkey_b64,
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -444,6 +454,12 @@ impl Workspace {
             base64::engine::general_purpose::STANDARD.encode(pubkey.as_bytes())
         };
 
+        // Store the creator as workspace owner
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            rusqlite::params!["owner_pubkey", &identity_pubkey_b64],
+        )?;
+
         let root = Note {
             id: Uuid::new_v4().to_string(),
             title,
@@ -498,9 +514,10 @@ impl Workspace {
             operation_log,
             device_id,
             identity_uuid: identity_uuid.to_string(),
-            current_identity_pubkey: identity_pubkey_b64,
+            current_identity_pubkey: identity_pubkey_b64.clone(),
             workspace_root,
             workspace_id,
+            owner_pubkey: identity_pubkey_b64,
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -613,6 +630,12 @@ impl Workspace {
             base64::engine::general_purpose::STANDARD.encode(pubkey.as_bytes())
         };
 
+        // Store the creator as workspace owner
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            rusqlite::params!["owner_pubkey", &identity_pubkey_b64],
+        )?;
+
         // No default root note — content will come from the imported snapshot.
 
         storage.connection().execute(
@@ -632,9 +655,10 @@ impl Workspace {
             operation_log,
             device_id,
             identity_uuid: identity_uuid.to_string(),
-            current_identity_pubkey: identity_pubkey_b64,
+            current_identity_pubkey: identity_pubkey_b64.clone(),
             workspace_root,
             workspace_id,
+            owner_pubkey: identity_pubkey_b64,
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -708,6 +732,12 @@ impl Workspace {
             base64::engine::general_purpose::STANDARD.encode(pubkey.as_bytes())
         };
 
+        // Store the creator as workspace owner
+        storage.connection().execute(
+            "INSERT INTO workspace_meta (key, value) VALUES (?, ?)",
+            rusqlite::params!["owner_pubkey", &identity_pubkey_b64],
+        )?;
+
         // No default root note — content will come from the imported snapshot.
 
         storage.connection().execute(
@@ -727,9 +757,10 @@ impl Workspace {
             operation_log,
             device_id,
             identity_uuid: identity_uuid.to_string(),
-            current_identity_pubkey: identity_pubkey_b64,
+            current_identity_pubkey: identity_pubkey_b64.clone(),
             workspace_root,
             workspace_id,
+            owner_pubkey: identity_pubkey_b64,
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -832,6 +863,27 @@ impl Workspace {
             rusqlite::params!["identity_uuid", identity_uuid],
         );
 
+        // Read owner_pubkey from workspace_meta. If absent (pre-existing workspace),
+        // the current opener becomes the owner.
+        let owner_pubkey: String = {
+            let existing: std::result::Result<String, rusqlite::Error> = storage.connection().query_row(
+                "SELECT value FROM workspace_meta WHERE key = 'owner_pubkey'",
+                [],
+                |row| row.get(0),
+            );
+            match existing {
+                Ok(pk) => pk,
+                Err(_) => {
+                    let pk = identity_pubkey_b64.clone();
+                    let _ = storage.connection().execute(
+                        "INSERT OR IGNORE INTO workspace_meta (key, value) VALUES (?, ?)",
+                        rusqlite::params!["owner_pubkey", &pk],
+                    );
+                    pk
+                }
+            }
+        };
+
         let mut ws = Self {
             storage,
             script_registry,
@@ -841,6 +893,7 @@ impl Workspace {
             current_identity_pubkey: identity_pubkey_b64,
             workspace_root,
             workspace_id,
+            owner_pubkey,
             attachment_key,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -914,6 +967,28 @@ impl Workspace {
     /// This value is stamped onto every note as `created_by` / `modified_by`.
     pub fn identity_pubkey(&self) -> &str {
         &self.current_identity_pubkey
+    }
+
+    /// Returns the base64-encoded Ed25519 public key of the workspace owner (creator).
+    pub fn owner_pubkey(&self) -> &str {
+        &self.owner_pubkey
+    }
+
+    /// Returns `true` if the currently bound identity is the workspace owner.
+    pub fn is_owner(&self) -> bool {
+        self.current_identity_pubkey == self.owner_pubkey
+    }
+
+    /// Overwrites the cached owner pubkey and persists it to `workspace_meta`.
+    /// Used when applying a snapshot bundle — the new workspace is created with
+    /// the opener's identity as owner, then overwritten with the snapshot's true owner.
+    pub fn set_owner_pubkey(&mut self, pubkey: &str) -> crate::Result<()> {
+        self.storage.connection().execute(
+            "INSERT OR REPLACE INTO workspace_meta (key, value) VALUES ('owner_pubkey', ?)",
+            [pubkey],
+        )?;
+        self.owner_pubkey = pubkey.to_string();
+        Ok(())
     }
 
     /// Writes `info.json` to the workspace root with cached metadata.
