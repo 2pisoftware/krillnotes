@@ -70,6 +70,8 @@ pub struct PeerInfo {
     pub sync_status: String,
     /// Optional human-readable detail about the current status.
     pub sync_status_detail: Option<String>,
+    /// Last sync error message, if any.
+    pub last_sync_error: Option<String>,
 }
 
 /// Manages the `sync_peers` table for one workspace connection.

@@ -452,6 +452,7 @@ impl Workspace {
                     channel_type: peer.channel_type,
                     sync_status: peer.sync_status,
                     sync_status_detail: peer.sync_status_detail,
+                    last_sync_error: peer.last_sync_error,
                 }
             })
             .collect();
