@@ -166,6 +166,7 @@ impl Workspace {
         }
 
         // 5. Apply the state change to working tables.
+        let mut scripts_changed = false;
         let tx = self.storage.connection_mut().transaction()?;
         match &op {
             Operation::CreateNote {
@@ -257,6 +258,7 @@ impl Workspace {
                             load_order, *enabled as i32, now_ms, now_ms,
                         ],
                     )?;
+                    scripts_changed = true;
                 }
             }
 
@@ -273,6 +275,7 @@ impl Workspace {
                             load_order, *enabled as i32, now_ms, script_id,
                         ],
                     )?;
+                    scripts_changed = true;
                 }
             }
 
@@ -282,6 +285,7 @@ impl Workspace {
                         "DELETE FROM user_scripts WHERE id = ?1",
                         [script_id],
                     )?;
+                    scripts_changed = true;
                 }
             }
 
@@ -293,6 +297,11 @@ impl Workspace {
             | Operation::RevokePermission { .. } => {}
         }
         tx.commit()?;
+
+        // Re-register scripts with the Rhai engine after applying script ops.
+        if scripts_changed {
+            self.reload_scripts()?;
+        }
 
         Ok(true)
     }
@@ -385,6 +394,9 @@ impl Workspace {
                 )?;
             }
             tx.commit()?;
+
+            // Re-register imported scripts with the Rhai engine.
+            self.reload_scripts()?;
         }
 
         Ok(note_count)
