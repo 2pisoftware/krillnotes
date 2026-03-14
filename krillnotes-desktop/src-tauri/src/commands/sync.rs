@@ -76,11 +76,13 @@ pub async fn poll_sync(
         *m.get(&workspace_label).ok_or("No identity bound to this workspace")?
     };
 
-    let (signing_key, sender_display_name, identity_pubkey) = {
+    let (signing_key, sender_display_name, identity_pubkey, relay_key, sender_device_key_hex) = {
         let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
         let id = m.get(&identity_uuid).ok_or("Identity not unlocked")?;
-        let pubkey = BASE64.encode(id.verifying_key.as_bytes());
-        (id.signing_key.clone(), id.display_name.clone(), pubkey)
+        let pubkey_b64 = BASE64.encode(id.verifying_key.as_bytes()); // FolderChannel uses Base64
+        let pubkey_hex = hex::encode(id.verifying_key.to_bytes());   // RelayChannel uses hex
+        let rk = id.relay_key();
+        (id.signing_key.clone(), id.display_name.clone(), pubkey_b64, rk, pubkey_hex)
     };
 
     let workspace_name = {
@@ -106,6 +108,29 @@ pub async fn poll_sync(
     let workspace = workspaces
         .get_mut(&workspace_label)
         .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?;
+
+    // Try to add relay channel if credentials exist for this identity.
+    // load_relay_credentials is NOT feature-gated (pure disk I/O in auth.rs).
+    // Only RelayClient/RelayChannel construction is gated.
+    let relay_dir = crate::settings::config_dir().join("relay");
+    if let Ok(Some(creds)) = load_relay_credentials(
+        &relay_dir,
+        &identity_uuid.to_string(),
+        &relay_key,
+    ) {
+        #[cfg(feature = "relay")]
+        {
+            let relay_client = RelayClient::new(&creds.relay_url)
+                .with_session_token(&creds.session_token);
+            let workspace_id_str = workspace.workspace_id().to_string();
+            let relay_channel = RelayChannel::new(
+                relay_client,
+                workspace_id_str,
+                sender_device_key_hex.clone(),
+            );
+            engine.register_channel(Box::new(relay_channel));
+        }
+    }
 
     let mut ctx = SyncContext {
         signing_key: &signing_key,
