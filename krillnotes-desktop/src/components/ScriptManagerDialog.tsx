@@ -11,6 +11,7 @@ import { open, confirm } from '@tauri-apps/plugin-dialog';
 import ScriptEditor from './ScriptEditor';
 import type { UserScript, ScriptError, ScriptMutationResult, ScriptWarning } from '../types';
 import { useTranslation } from 'react-i18next';
+import { parseFrontMatterName } from '../utils/scriptHelpers';
 
 interface ScriptManagerDialogProps {
   isOpen: boolean;
@@ -41,21 +42,6 @@ register_view("MyType", "Summary", |note| {
 `;
 
 type View = 'list' | 'editor';
-
-function parseFrontMatterName(source: string): string {
-  for (const line of source.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('//')) {
-      if (trimmed === '') continue;
-      break;
-    }
-    const body = trimmed.replace(/^\/\/\s*/, '');
-    if (body.startsWith('@name:')) {
-      return body.slice('@name:'.length).trim();
-    }
-  }
-  return '';
-}
 
 function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManagerDialogProps) {
   const { t } = useTranslation();

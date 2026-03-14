@@ -5,6 +5,11 @@
 // Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useResizablePanels } from '../hooks/useResizablePanels';
+import { useHoverTooltip } from '../hooks/useHoverTooltip';
+import { useUndoRedo } from '../hooks/useUndoRedo';
+import { useTagCloud } from '../hooks/useTagCloud';
+import { useTreeState } from '../hooks/useTreeState';
 import { Undo2, Redo2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -19,9 +24,9 @@ import HoverTooltip from './HoverTooltip';
 import ScriptManagerDialog from './ScriptManagerDialog';
 import OperationsLogDialog from './OperationsLogDialog';
 import WorkspacePropertiesDialog from './WorkspacePropertiesDialog';
-import type { Note, TreeNode, WorkspaceInfo, DeleteResult, SchemaInfo, DropIndicator, UndoResult, SchemaMigratedEvent } from '../types';
+import type { Note, TreeNode, WorkspaceInfo, DeleteResult, SchemaInfo, DropIndicator, SchemaMigratedEvent } from '../types';
 import { DeleteStrategy } from '../types';
-import { buildTree, flattenVisibleTree, findNoteInTree, getAncestorIds, getDescendantIds } from '../utils/tree';
+import { buildTree, getDescendantIds } from '../utils/tree';
 import { getAvailableTypes, type NotePosition } from '../utils/noteTypes';
 import TagPill from './TagPill';
 
@@ -35,17 +40,16 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
   const [schemas, setSchemas] = useState<Record<string, SchemaInfo>>({});
   const [treeActionMap, setTreeActionMap] = useState<Record<string, string[]>>({});
   const [tree, setTree] = useState<TreeNode[]>([]);
-  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [copiedNoteId, setCopiedNoteId] = useState<string | null>(null);
-  const [viewHistory, setViewHistory] = useState<string[]>([]);
-  const selectedNoteIdRef = useRef(selectedNoteId);
   const treePanelRef = useRef<HTMLDivElement>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [addDialogNoteId, setAddDialogNoteId] = useState<string | null>(null);
   const [addDialogPosition, setAddDialogPosition] = useState<NotePosition>('child');
   const [error, setError] = useState<string>('');
-  const selectionInitialized = useRef(false);
   const isRefreshing = useRef(false);
+  // Ref used to break the circular dep between useTreeState (needs closePendingUndoGroup)
+  // and useUndoRedo (needs setSelectedNoteId). Populated after both hooks have run.
+  const closePendingUndoGroupRef = useRef<(() => Promise<void>) | undefined>(undefined);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; noteId: string | null; noteType: string } | null>(null);
@@ -79,128 +83,17 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
     [notes, draggedNoteId]
   );
 
-  // Hover tooltip state
-  const [hoveredNoteId, setHoveredNoteId] = useState<string | null>(null);
-  const [tooltipAnchorY, setTooltipAnchorY] = useState(0);
-  const [hoverHtml, setHoverHtml] = useState<string | null>(null);
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Hover tooltip
+  const { hoveredNoteId, tooltipAnchorY, hoverHtml, handleHoverStart, handleHoverEnd } =
+    useHoverTooltip(draggedNoteId, notes, schemas);
 
-  // Resizable tree panel
-  const [treeWidth, setTreeWidth] = useState(300);
-  const isDragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(0);
-
-  // Undo/redo state
-  const [canUndo, setCanUndo] = useState(false);
-  const [canRedo, setCanRedo] = useState(false);
-  const [noteRefreshSignal, setNoteRefreshSignal] = useState(0);
-  // Tracks whether a note-creation undo group is currently open.
-  // Set to true just before create_note_with_type; cleared when edit mode ends.
-  const pendingUndoGroupRef = useRef(false);
+  // Resizable panels
+  const { treeWidth, tagCloudHeight, handleDividerMouseDown, handleTagDividerMouseDown } =
+    useResizablePanels();
 
   // Tag cloud
-  const [workspaceTags, setWorkspaceTags] = useState<string[]>([]);
-  const [tagCloudHeight, setTagCloudHeight] = useState(120);
-  const [tagFilterQuery, setTagFilterQuery] = useState<string | undefined>(undefined);
-  const isTagDragging = useRef(false);
-  const tagDragStartY = useRef(0);
-  const tagDragStartHeight = useRef(0);
-
-  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    isDragging.current = true;
-    dragStartX.current = e.clientX;
-    dragStartWidth.current = treeWidth;
-    e.preventDefault();
-  }, [treeWidth]);
-
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isDragging.current) return;
-      const delta = e.clientX - dragStartX.current;
-      setTreeWidth(Math.max(180, Math.min(600, dragStartWidth.current + delta)));
-    };
-    const onMouseUp = () => { isDragging.current = false; };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  const handleTagDividerMouseDown = useCallback((e: React.MouseEvent) => {
-    isTagDragging.current = true;
-    tagDragStartY.current = e.clientY;
-    tagDragStartHeight.current = tagCloudHeight;
-    e.preventDefault();
-  }, [tagCloudHeight]);
-
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isTagDragging.current) return;
-      const delta = tagDragStartY.current - e.clientY;
-      setTagCloudHeight(Math.max(0, Math.min(400, tagDragStartHeight.current + delta)));
-    };
-    const onMouseUp = () => { isTagDragging.current = false; };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-  }, []);
-
-  selectedNoteIdRef.current = selectedNoteId;
-
-  const refreshUndoState = useCallback(async () => {
-    const [u, r] = await Promise.all([
-      invoke<boolean>('can_undo'),
-      invoke<boolean>('can_redo'),
-    ]);
-    setCanUndo(u);
-    setCanRedo(r);
-  }, []);
-
-  const performUndo = useCallback(async () => {
-    try {
-      const result = await invoke<UndoResult>('undo');
-      await loadNotes();
-      if (result.affectedNoteId) setSelectedNoteId(result.affectedNoteId);
-      setNoteRefreshSignal(s => s + 1);
-      await refreshUndoState();
-    } catch (e) {
-      const msg = String(e);
-      if (!msg.includes('Nothing to undo') && !msg.includes('Nothing to redo')) {
-        console.error('[undo/redo]', e);
-      }
-    }
-  }, [refreshUndoState]);
-
-  const performRedo = useCallback(async () => {
-    try {
-      const result = await invoke<UndoResult>('redo');
-      await loadNotes();
-      if (result.affectedNoteId) setSelectedNoteId(result.affectedNoteId);
-      setNoteRefreshSignal(s => s + 1);
-      await refreshUndoState();
-    } catch (e) {
-      const msg = String(e);
-      if (!msg.includes('Nothing to undo') && !msg.includes('Nothing to redo')) {
-        console.error('[undo/redo]', e);
-      }
-    }
-  }, [refreshUndoState]);
-
-  // Closes the pending note-creation undo group (if one is open) and refreshes state.
-  // Safe to call at any time — if no group is open, end_undo_group is a no-op.
-  const closePendingUndoGroup = useCallback(async () => {
-    if (pendingUndoGroupRef.current) {
-      pendingUndoGroupRef.current = false;
-      await invoke('end_undo_group');
-      await refreshUndoState();
-    }
-  }, [refreshUndoState]);
+  const { workspaceTags, setWorkspaceTags, tagFilterQuery, handleTagClick } =
+    useTagCloud();
 
   // Load notes on mount
   useEffect(() => {
@@ -288,6 +181,26 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
       return [];
     }
   };
+
+  // Tree state — selection, expansion, keyboard navigation, link navigation.
+  // Placed after loadNotes because the hook receives loadNotes as a parameter and
+  // TypeScript enforces const TDZ. loadNotes in turn closes over selectionInitialized
+  // and setSelectedNoteId from this hook — this is safe because loadNotes is only
+  // ever called from effects/event handlers, never synchronously during render.
+  // TODO: Convert loadNotes to useCallback (or ref pattern) to make this ordering explicit.
+  const {
+    selectedNoteId, setSelectedNoteId, selectedNoteIdRef, viewHistory,
+    handleSelectNote, handleToggleExpand, handleLinkNavigate, handleBack,
+    handleSearchSelect, handleTreeKeyDown, selectionInitialized,
+  } = useTreeState(notes, tree, schemas, closePendingUndoGroupRef, loadNotes, setRequestEditMode);
+
+  // Undo/redo state — placed after useTreeState so setSelectedNoteId is available.
+  const { canUndo, canRedo, noteRefreshSignal, refreshUndoState, performUndo, performRedo, closePendingUndoGroup, pendingUndoGroupRef } =
+    useUndoRedo(loadNotes, setSelectedNoteId);
+
+  // Keep the ref in sync so useTreeState can call closePendingUndoGroup without
+  // creating a circular dependency between the two hooks.
+  closePendingUndoGroupRef.current = closePendingUndoGroup;
 
   const copyNote = useCallback((noteId: string) => {
     setCopiedNoteId(noteId);
@@ -403,97 +316,6 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
     return () => { unlisten.then(f => f()); };
   }, [selectedNoteId, copiedNoteId, copyNote, pasteNote]);
 
-  const handleHoverEnd = useCallback(() => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = null;
-    setHoveredNoteId(null);
-    setHoverHtml(null);
-  }, []);
-
-  const handleHoverStart = useCallback((noteId: string, anchorY: number) => {
-    if (draggedNoteId !== null) return;
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = setTimeout(async () => {
-      const noteSchema = notes.find(n => n.id === noteId)?.schema ?? '';
-      const schema = schemas[noteSchema] ?? null;
-      if (schema?.hasHover) {
-        try {
-          const html = await invoke<string | null>('get_note_hover', { noteId });
-          setHoverHtml(html);
-        } catch {
-          setHoverHtml(null);
-        }
-      } else {
-        setHoverHtml(null);
-      }
-      setHoveredNoteId(noteId);
-      setTooltipAnchorY(anchorY);
-    }, 600);
-  }, [draggedNoteId, notes, schemas]);
-
-  // Dismiss tooltip immediately when a drag starts
-  useEffect(() => {
-    if (draggedNoteId !== null) handleHoverEnd();
-  }, [draggedNoteId, handleHoverEnd]);
-
-  const handleSelectNote = async (noteId: string) => {
-    // Close any pending note-creation undo group before switching notes.
-    await closePendingUndoGroup();
-    setViewHistory([]);
-    setSelectedNoteId(noteId);
-    try {
-      await invoke('set_selected_note', { noteId });
-    } catch (err) {
-      console.error('Failed to save selection:', err);
-    }
-  };
-
-  const handleLinkNavigate = async (noteId: string) => {
-    if (selectedNoteId) {
-      setViewHistory(h => [...h, selectedNoteId]);
-    }
-
-    // Expand any collapsed ancestors so the note becomes visible in the tree
-    const ancestors = getAncestorIds(notes, noteId);
-    const collapsedAncestors = ancestors.filter(
-      id => notes.find(n => n.id === id)?.isExpanded === false
-    );
-    for (const ancestorId of collapsedAncestors) {
-      await invoke('toggle_note_expansion', { noteId: ancestorId });
-    }
-    if (collapsedAncestors.length > 0) {
-      await loadNotes();
-    }
-
-    setSelectedNoteId(noteId);
-    invoke('set_selected_note', { noteId }).catch(err =>
-      console.error('Failed to save selection:', err)
-    );
-
-    requestAnimationFrame(() => {
-      document.querySelector(`[data-note-id="${noteId}"]`)?.scrollIntoView({ block: 'nearest' });
-    });
-  };
-
-  const handleBack = () => {
-    if (viewHistory.length === 0) return;
-    const prev = viewHistory[viewHistory.length - 1];
-    setViewHistory(h => h.slice(0, -1));
-    setSelectedNoteId(prev);
-    invoke('set_selected_note', { noteId: prev }).catch(err =>
-      console.error('Failed to save selection:', err)
-    );
-  };
-
-  const handleToggleExpand = async (noteId: string) => {
-    try {
-      await invoke('toggle_note_expansion', { noteId });
-      await loadNotes();
-    } catch (err) {
-      console.error('Failed to toggle expansion:', err);
-    }
-  };
-
   const handleMoveNote = async (noteId: string, newParentId: string | null, newPosition: number) => {
     try {
       await invoke('move_note', { noteId, newParentId, newPosition });
@@ -501,84 +323,6 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
       await refreshUndoState();
     } catch (err) {
       console.error('Failed to move note:', err);
-    }
-  };
-
-  const handleSearchSelect = async (noteId: string) => {
-    // Expand any collapsed ancestors so the note becomes visible in the tree
-    const ancestors = getAncestorIds(notes, noteId);
-    const collapsedAncestors = ancestors.filter(
-      id => notes.find(n => n.id === id)?.isExpanded === false
-    );
-
-    for (const ancestorId of collapsedAncestors) {
-      await invoke('toggle_note_expansion', { noteId: ancestorId });
-    }
-
-    if (collapsedAncestors.length > 0) {
-      await loadNotes();
-    }
-
-    await handleSelectNote(noteId);
-
-    // Scroll the note into view in the tree
-    requestAnimationFrame(() => {
-      document.querySelector(`[data-note-id="${noteId}"]`)?.scrollIntoView({ block: 'nearest' });
-    });
-  };
-
-  const handleTreeKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.target as HTMLElement).closest('button') !== null) return;
-    if (!selectedNoteId) return;
-    const flat = flattenVisibleTree(tree);
-    const idx = flat.findIndex(n => n.note.id === selectedNoteId);
-    if (idx === -1) return;
-    const current = flat[idx];
-
-    const selectAndScroll = (noteId: string) => {
-      handleSelectNote(noteId);
-      requestAnimationFrame(() => {
-        document.querySelector(`[data-note-id="${noteId}"]`)?.scrollIntoView({ block: 'nearest' });
-      });
-    };
-
-    switch (e.key) {
-      case 'ArrowDown': {
-        e.preventDefault();
-        if (idx < flat.length - 1) selectAndScroll(flat[idx + 1].note.id);
-        break;
-      }
-      case 'ArrowUp': {
-        e.preventDefault();
-        if (idx > 0) selectAndScroll(flat[idx - 1].note.id);
-        break;
-      }
-      case 'ArrowRight': {
-        e.preventDefault();
-        if (current.children.length > 0) {
-          if (!current.note.isExpanded) {
-            handleToggleExpand(current.note.id);
-          } else {
-            selectAndScroll(current.children[0].note.id);
-          }
-        }
-        break;
-      }
-      case 'ArrowLeft': {
-        e.preventDefault();
-        if (current.note.isExpanded) {
-          handleToggleExpand(current.note.id);
-        } else if (current.note.parentId) {
-          const parent = findNoteInTree(tree, current.note.parentId);
-          if (parent) selectAndScroll(parent.note.id);
-        }
-        break;
-      }
-      case 'Enter': {
-        e.preventDefault();
-        setRequestEditMode(prev => prev + 1);
-        break;
-      }
     }
   };
 
@@ -795,7 +539,7 @@ function WorkspaceView({ workspaceInfo }: WorkspaceViewProps) {
             <TagPill
               key={tag}
               tag={tag}
-              onClick={() => setTagFilterQuery(tag)}
+              onClick={() => handleTagClick(tag)}
             />
           ))}
           {workspaceTags.length === 0 && (
