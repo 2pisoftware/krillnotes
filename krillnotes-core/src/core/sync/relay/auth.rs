@@ -131,6 +131,53 @@ pub fn delete_relay_credentials(
     Ok(())
 }
 
+/// Decrypt a proof-of-possession challenge nonce sent by the relay server.
+///
+/// The relay server encrypts a nonce using NaCl `crypto_box` (X25519 + XSalsa20-Poly1305)
+/// addressed to the client's X25519 public key (derived from their Ed25519 key).
+///
+/// The `encrypted_nonce_hex` is a hex-encoded byte string with a 24-byte nonce
+/// prepended to the ciphertext.
+///
+/// Returns the plaintext nonce bytes on success.
+#[cfg(feature = "relay")]
+pub fn decrypt_pop_challenge(
+    client_signing_key: &ed25519_dalek::SigningKey,
+    encrypted_nonce_hex: &str,
+    server_public_key_hex: &str,
+) -> Result<Vec<u8>, KrillnotesError> {
+    use crate::core::swarm::crypto::ed25519_sk_to_x25519;
+    use crypto_box::{aead::Aead, PublicKey, SalsaBox, SecretKey};
+
+    // 1. Convert Ed25519 signing key to X25519 secret key.
+    let x25519_sk = ed25519_sk_to_x25519(client_signing_key);
+    let client_sk = SecretKey::from(x25519_sk.to_bytes());
+
+    // 2. Decode server's ephemeral public key.
+    let server_pk_bytes: [u8; 32] = hex::decode(server_public_key_hex)
+        .map_err(|e| KrillnotesError::Crypto(format!("Invalid server pubkey hex: {}", e)))?
+        .try_into()
+        .map_err(|_| KrillnotesError::Crypto("Server public key must be 32 bytes".to_string()))?;
+    let server_pk = PublicKey::from(server_pk_bytes);
+
+    // 3. Decode encrypted nonce (24-byte nonce prefix + ciphertext).
+    let encrypted_bytes = hex::decode(encrypted_nonce_hex)
+        .map_err(|e| KrillnotesError::Crypto(format!("Invalid encrypted nonce hex: {}", e)))?;
+    if encrypted_bytes.len() < 24 {
+        return Err(KrillnotesError::Crypto(
+            "Encrypted nonce too short".to_string(),
+        ));
+    }
+    let (nonce_bytes, ciphertext) = encrypted_bytes.split_at(24);
+    let nonce = crypto_box::Nonce::from_slice(nonce_bytes);
+
+    // 4. Decrypt using SalsaBox (X25519 + XSalsa20-Poly1305, NaCl-compatible).
+    let salsa_box = SalsaBox::new(&server_pk, &client_sk);
+    salsa_box
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| KrillnotesError::Crypto("PoP challenge decryption failed".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +246,64 @@ mod tests {
         let relay_dir = dir.path().join("relay");
         // Should not error if file doesn't exist
         delete_relay_credentials(&relay_dir, "never-existed").unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "relay"))]
+mod pop_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    /// Simulate what the relay server does to create a PoP challenge.
+    /// Returns (encrypted_nonce_hex, server_public_key_hex).
+    fn simulate_server_challenge(
+        client_ed25519_vk: &ed25519_dalek::VerifyingKey,
+        nonce_plaintext: &[u8],
+    ) -> (String, String) {
+        use crypto_box::{aead::{Aead, AeadCore}, PublicKey, SalsaBox, SecretKey};
+        use rand::rngs::OsRng;
+
+        // 1. Convert client's Ed25519 verifying key to X25519 public key.
+        let client_x25519_pk_bytes = ed25519_vk_to_x25519_pk_bytes(client_ed25519_vk);
+        let client_pk = PublicKey::from(client_x25519_pk_bytes);
+
+        // 2. Generate server ephemeral keypair.
+        let server_sk = SecretKey::generate(&mut OsRng);
+        let server_pk = server_sk.public_key();
+
+        // 3. Encrypt nonce using SalsaBox (NaCl crypto_box).
+        let salsa_box = SalsaBox::new(&client_pk, &server_sk);
+        let nonce = SalsaBox::generate_nonce(&mut OsRng);
+        let ciphertext = salsa_box.encrypt(&nonce, nonce_plaintext).unwrap();
+
+        // 4. Return 24-byte nonce prefix + ciphertext as hex, server pubkey as hex.
+        let mut encrypted = nonce.to_vec();
+        encrypted.extend_from_slice(&ciphertext);
+        (hex::encode(encrypted), hex::encode(server_pk.as_bytes()))
+    }
+
+    fn ed25519_vk_to_x25519_pk_bytes(vk: &ed25519_dalek::VerifyingKey) -> [u8; 32] {
+        // Convert Ed25519 verifying key to X25519 public key (Montgomery form).
+        vk.to_montgomery().to_bytes()
+    }
+
+    #[test]
+    fn test_pop_challenge_decrypt() {
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        let client_verifying_key = client_signing_key.verifying_key();
+
+        let nonce_plaintext = b"test-challenge-nonce-1234567890ab";
+        let (encrypted_nonce, server_public_key) =
+            simulate_server_challenge(&client_verifying_key, nonce_plaintext);
+
+        let decrypted = decrypt_pop_challenge(
+            &client_signing_key,
+            &encrypted_nonce,
+            &server_public_key,
+        )
+        .unwrap();
+
+        assert_eq!(decrypted, nonce_plaintext);
     }
 }
