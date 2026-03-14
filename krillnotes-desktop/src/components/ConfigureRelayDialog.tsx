@@ -21,14 +21,11 @@ function mapError(raw: string): string {
   const s = raw.toLowerCase();
   if (s.includes('identity') && (s.includes('lock') || s.includes('unlock')))
     return 'Please unlock your identity before configuring relay.';
-  if (s.includes('http 409') || s.includes('already') || s.includes('conflict'))
+  if (s.includes('http 409'))
     return 'Email already registered — try the Login tab.';
-  if (s.includes('http 401') || s.includes('invalid') || s.includes('unauthorized'))
+  if (s.includes('http 401'))
     return 'Invalid credentials. Please check your email and password.';
-  if (s.includes('http 404') || s.includes('not found'))
-    return 'Relay server not found at this URL.';
-  if (s.includes('http 4') || s.includes('http 5') || s.includes('unavailable') || s.includes('connect'))
-    return 'Cannot reach relay server. Check the URL and try again.';
+  // Fall back to the raw error so the user always sees what went wrong.
   return raw;
 }
 
