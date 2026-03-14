@@ -28,10 +28,13 @@ export function CreateInviteDialog({ identityUuid, workspaceName, onCreated, onC
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdInvite, setCreatedInvite] = useState<InviteInfo | null>(null);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
   const [hasRelay, setHasRelay] = useState(false);
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
   const [copyingLink, setCopyingLink] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [savingFile, setSavingFile] = useState(false);
+  const [fileSaved, setFileSaved] = useState(false);
 
   const effectiveDays =
     expiryDays === -1 ? (parseInt(customDays) || null) : expiryDays;
@@ -54,6 +57,7 @@ export function CreateInviteDialog({ identityUuid, workspaceName, onCreated, onC
         savePath,
       });
       setCreatedInvite(invite);
+      setSavedPath(savePath);
       onCreated(invite);
       setStep('share');
     } catch (e) {
@@ -87,6 +91,34 @@ export function CreateInviteDialog({ identityUuid, workspaceName, onCreated, onC
     }
   };
 
+  // Step 2: save (or re-save) the .swarm file
+  const handleSaveFile = async () => {
+    if (!createdInvite) return;
+    setSavingFile(true);
+    setError(null);
+    try {
+      const defaultPath = savedPath ?? `invite_${workspaceName.replace(/\s+/g, '_')}.swarm`;
+      const newSavePath = await save({
+        defaultPath,
+        filters: [{ name: 'Swarm Invite', extensions: ['swarm'] }],
+      });
+      if (!newSavePath) { setSavingFile(false); return; }
+      await invoke('save_invite_file', { inviteId: createdInvite.inviteId, savePath: newSavePath });
+      setSavedPath(newSavePath);
+      setFileSaved(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingFile(false);
+    }
+  };
+
+  // Step 2: do both — copy relay link AND save file
+  const handleBoth = async () => {
+    await handleCopyLink();
+    await handleSaveFile();
+  };
+
   if (step === 'share') {
     return (
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -96,11 +128,11 @@ export function CreateInviteDialog({ identityUuid, workspaceName, onCreated, onC
             {t('invite.shareDescription', 'Your invite file has been saved. You can also share it via a relay link.')}
           </p>
 
-          {hasRelay && (
-            <div className="flex flex-col gap-3 mb-4">
+          <div className="flex flex-col gap-3 mb-4">
+            {hasRelay && (
               <button
                 onClick={handleCopyLink}
-                disabled={copyingLink || linkCopied}
+                disabled={copyingLink || savingFile || linkCopied}
                 className="flex items-center justify-center gap-2 px-4 py-2.5 text-sm rounded border dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
               >
                 {linkCopied
@@ -109,8 +141,32 @@ export function CreateInviteDialog({ identityUuid, workspaceName, onCreated, onC
                     ? t('common.saving', 'Saving…')
                     : t('invite.copyLink', 'Copy link')}
               </button>
-            </div>
-          )}
+            )}
+
+            <button
+              onClick={handleSaveFile}
+              disabled={savingFile || copyingLink}
+              className="flex items-center justify-center gap-2 px-4 py-2.5 text-sm rounded border dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
+            >
+              {fileSaved
+                ? t('invite.fileSaved', 'File saved!')
+                : savingFile
+                  ? t('common.saving', 'Saving…')
+                  : t('invite.saveFile', 'Save .swarm file')}
+            </button>
+
+            {hasRelay && (
+              <button
+                onClick={handleBoth}
+                disabled={copyingLink || savingFile || (linkCopied && fileSaved)}
+                className="flex items-center justify-center gap-2 px-4 py-2.5 text-sm rounded border dark:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50"
+              >
+                {copyingLink || savingFile
+                  ? t('common.saving', 'Saving…')
+                  : t('invite.both', 'Copy link & Save file')}
+              </button>
+            )}
+          </div>
 
           {relayUrl && (
             <p className="text-xs font-mono text-zinc-500 break-all mb-3">{relayUrl}</p>
