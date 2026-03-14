@@ -8,6 +8,7 @@
 
 use crate::AppState;
 use chrono::Utc;
+use std::sync::Arc;
 use tauri::{Emitter, State, Window};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use uuid::Uuid;
@@ -68,7 +69,7 @@ pub async fn poll_sync(
 ) -> Result<Vec<SyncEvent>, String> {
     let workspace_label = window.label().to_string();
 
-    // -- Collect context data under brief locks --------------------------------
+    // -- Collect context data under brief locks (all guards released before spawn) --
     let identity_uuid = {
         let m = state.workspace_identities.lock().map_err(|e| e.to_string())?;
         *m.get(&workspace_label).ok_or("No identity bound to this workspace")?
@@ -92,47 +93,64 @@ pub async fn poll_sync(
 
     let device_id = get_device_id().map_err(|e| e.to_string())?;
 
-    // -- Build a fresh engine (FolderChannel is stateless; state is in the DB) -
-    let mut engine = SyncEngine::new();
-    engine.register_channel(Box::new(FolderChannel::new(identity_pubkey, device_id)));
-
-    // -- Hold contact_managers + workspaces for the poll ----------------------
-    let mut contact_managers = state.contact_managers.lock().map_err(|e| e.to_string())?;
-    let contact_manager = contact_managers
-        .get_mut(&identity_uuid)
-        .ok_or("Contact manager not found — is the identity unlocked?")?;
-
-    let mut workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
-    let workspace = workspaces
-        .get_mut(&workspace_label)
-        .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?;
-
-    // Add relay channel if credentials exist for this identity.
+    // Load relay credentials and workspace_id while we can still briefly lock.
     let relay_dir = crate::settings::config_dir().join("relay");
-    if let Ok(Some(creds)) = load_relay_credentials(
-        &relay_dir,
-        &identity_uuid.to_string(),
-        &relay_key,
-    ) {
-        let relay_client = RelayClient::new(&creds.relay_url)
-            .with_session_token(&creds.session_token);
-        let workspace_id_str = workspace.workspace_id().to_string();
-        let relay_channel = RelayChannel::new(
-            relay_client,
-            workspace_id_str,
-            sender_device_key_hex.clone(),
-        );
-        engine.register_channel(Box::new(relay_channel));
-    }
+    let relay_creds = load_relay_credentials(&relay_dir, &identity_uuid.to_string(), &relay_key)
+        .map_err(|e| e.to_string())?;
 
-    let mut ctx = SyncContext {
-        signing_key: &signing_key,
-        contact_manager,
-        workspace_name: &workspace_name,
-        sender_display_name: &sender_display_name,
+    let workspace_id_str = {
+        let workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
+        workspaces
+            .get(&workspace_label)
+            .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?
+            .workspace_id()
+            .to_string()
     };
 
-    let events = engine.poll(workspace, &mut ctx).map_err(|e| e.to_string())?;
+    // Clone Arcs so the spawn_blocking closure can own them (guards are NOT held).
+    // RelayChannel holds a reqwest::blocking::Client which owns an internal Tokio
+    // runtime. Creating, using, and dropping it must happen on a spawn_blocking
+    // thread (no outer tokio context) — block_in_place is insufficient because the
+    // outer runtime context is still present on the thread, causing a panic on drop.
+    let workspaces_arc = Arc::clone(&state.workspaces);
+    let contact_managers_arc = Arc::clone(&state.contact_managers);
+
+    let events = tokio::task::spawn_blocking(move || -> Result<Vec<SyncEvent>, String> {
+        let mut engine = SyncEngine::new();
+        engine.register_channel(Box::new(FolderChannel::new(identity_pubkey, device_id)));
+
+        if let Some(creds) = relay_creds {
+            let relay_client = RelayClient::new(&creds.relay_url)
+                .with_session_token(&creds.session_token);
+            engine.register_channel(Box::new(RelayChannel::new(
+                relay_client,
+                workspace_id_str,
+                sender_device_key_hex,
+            )));
+        }
+
+        let mut contact_managers = contact_managers_arc.lock().map_err(|e| e.to_string())?;
+        let contact_manager = contact_managers
+            .get_mut(&identity_uuid)
+            .ok_or("Contact manager not found — is the identity unlocked?")?;
+
+        let mut workspaces = workspaces_arc.lock().map_err(|e| e.to_string())?;
+        let workspace = workspaces
+            .get_mut(&workspace_label)
+            .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?;
+
+        let mut ctx = SyncContext {
+            signing_key: &signing_key,
+            contact_manager,
+            workspace_name: &workspace_name,
+            sender_display_name: &sender_display_name,
+        };
+
+        engine.poll(workspace, &mut ctx).map_err(|e| e.to_string())
+        // engine (and RelayClient) dropped here — safe on a spawn_blocking thread
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     // If any bundles were applied, notify WorkspaceView to reload the note tree.
     let bundles_applied = events.iter().any(|e| matches!(e, SyncEvent::BundleApplied { .. }));

@@ -174,12 +174,14 @@ pub fn run() {
                 // file can be reopened after its window has been closed.
                 tauri::WindowEvent::Destroyed => {
                     // Persist cached metadata before dropping the workspace.
-                    if let Some(ws) = state.workspaces.lock().expect("Mutex poisoned").get(&label) {
+                    // Use unwrap_or_else to recover from a poisoned mutex (e.g. after a panic
+                    // in a command that held the lock) rather than double-panicking on destroy.
+                    if let Some(ws) = state.workspaces.lock().unwrap_or_else(|e| e.into_inner()).get(&label) {
                         let _ = ws.write_info_json();
                     }
-                    state.workspaces.lock().expect("Mutex poisoned").remove(&label);
-                    state.workspace_paths.lock().expect("Mutex poisoned").remove(&label);
-                    state.workspace_identities.lock().expect("Mutex poisoned").remove(&label);
+                    state.workspaces.lock().unwrap_or_else(|e| e.into_inner()).remove(&label);
+                    state.workspace_paths.lock().unwrap_or_else(|e| e.into_inner()).remove(&label);
+                    state.workspace_identities.lock().unwrap_or_else(|e| e.into_inner()).remove(&label);
 
                     // On macOS the menu bar is global. If this was the last
                     // workspace window, disable workspace-specific items so

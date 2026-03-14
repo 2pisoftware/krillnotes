@@ -185,7 +185,10 @@ impl RelayClient {
     /// Create a new `RelayClient` for the given base URL (no trailing slash).
     pub fn new(base_url: &str) -> Self {
         Self {
-            http: reqwest::blocking::Client::new(),
+            http: reqwest::blocking::Client::builder()
+                .user_agent(concat!("KrillNotes/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("failed to build HTTP client"),
             base_url: base_url.to_string(),
             session_token: None,
         }
