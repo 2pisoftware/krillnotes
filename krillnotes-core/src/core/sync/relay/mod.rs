@@ -15,3 +15,80 @@ pub use auth::{
 
 #[cfg(feature = "relay")]
 pub use client::RelayClient;
+
+#[cfg(feature = "relay")]
+use crate::core::error::KrillnotesError;
+#[cfg(feature = "relay")]
+use crate::core::sync::channel::{BundleRef, ChannelType, PeerSyncInfo, SyncChannel};
+
+#[cfg(feature = "relay")]
+pub struct RelayChannel {
+    client: RelayClient,
+}
+
+#[cfg(feature = "relay")]
+impl RelayChannel {
+    pub fn new(client: RelayClient) -> Self {
+        Self { client }
+    }
+
+    pub fn client(&self) -> &RelayClient {
+        &self.client
+    }
+
+    pub fn client_mut(&mut self) -> &mut RelayClient {
+        &mut self.client
+    }
+}
+
+#[cfg(feature = "relay")]
+impl SyncChannel for RelayChannel {
+    fn send_bundle(&self, _peer: &PeerSyncInfo, bundle_bytes: &[u8]) -> Result<(), KrillnotesError> {
+        self.client.upload_bundle(bundle_bytes)?;
+        Ok(())
+    }
+
+    fn receive_bundles(&self, _workspace_id: &str) -> Result<Vec<BundleRef>, KrillnotesError> {
+        let metas = self.client.list_bundles()?;
+        let mut bundles = Vec::new();
+        for meta in metas {
+            match self.client.download_bundle(&meta.bundle_id) {
+                Ok(data) => bundles.push(BundleRef {
+                    id: meta.bundle_id,
+                    data,
+                }),
+                Err(e) => {
+                    // Log but continue — don't fail the whole receive for one bad bundle
+                    eprintln!("Failed to download bundle {}: {}", meta.bundle_id, e);
+                }
+            }
+        }
+        Ok(bundles)
+    }
+
+    fn acknowledge(&self, bundle_ref: &BundleRef) -> Result<(), KrillnotesError> {
+        self.client.delete_bundle(&bundle_ref.id)
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Relay
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(all(test, feature = "relay"))]
+mod tests {
+    use super::*;
+    use crate::core::sync::channel::ChannelType;
+
+    #[test]
+    fn test_relay_channel_construction() {
+        let client = RelayClient::new("https://relay.example.com")
+            .with_session_token("tok_test");
+        let channel = RelayChannel::new(client);
+        assert_eq!(channel.channel_type(), ChannelType::Relay);
+    }
+}
