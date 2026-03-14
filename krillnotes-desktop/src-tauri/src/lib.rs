@@ -402,6 +402,7 @@ pub fn run() {
             create_relay_invite,
             fetch_relay_invite,
             has_relay_credentials,
+            get_relay_info,
             parse_invite_bytes,
             write_temp_swarm_bytes,
         ])
