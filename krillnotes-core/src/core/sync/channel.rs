@@ -43,6 +43,7 @@ pub struct PeerSyncInfo {
 }
 
 /// A reference to a bundle received from a channel.
+#[derive(Debug, Clone)]
 pub struct BundleRef {
     /// Channel-specific identifier (relay bundle_id, file path, etc.)
     pub id: String,
