@@ -259,7 +259,7 @@ pub async fn relay_login(
     tokio::task::spawn_blocking(move || {
         let client = RelayClient::new(&relay_url);
         let session = client
-            .login(&email, &password)
+            .login(&email, &password, &device_public_key)
             .map_err(|e| e.to_string())?;
 
         let creds = RelayCredentials {

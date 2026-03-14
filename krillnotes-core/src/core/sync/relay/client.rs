@@ -115,6 +115,7 @@ struct RegisterVerifyRequest<'a> {
 struct LoginRequest<'a> {
     email: &'a str,
     password: &'a str,
+    device_public_key: &'a str,
 }
 
 #[derive(Serialize)]
@@ -303,9 +304,9 @@ impl RelayClient {
         Self::handle_response(resp)
     }
 
-    /// Log in with email and password. Returns a session token.
-    pub fn login(&self, email: &str, password: &str) -> Result<SessionResponse, KrillnotesError> {
-        let body = LoginRequest { email, password };
+    /// Log in with email, password, and device key. Returns a session token.
+    pub fn login(&self, email: &str, password: &str, device_public_key: &str) -> Result<SessionResponse, KrillnotesError> {
+        let body = LoginRequest { email, password, device_public_key };
         let resp = self
             .http
             .post(self.url("/auth/login"))
