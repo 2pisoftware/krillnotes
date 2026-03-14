@@ -208,12 +208,66 @@ pub async fn configure_relay(
 
 /// Re-authenticate with an existing relay account (e.g. after a token
 /// expiry).
-///
-/// TODO: Re-login with existing credentials.
 #[tauri::command]
+#[cfg(feature = "relay")]
+pub async fn relay_login(
+    state: State<'_, AppState>,
+    identity_uuid: String,
+    relay_url: String,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
+
+    let relay_key = {
+        let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
+        m.get(&uuid)
+            .ok_or("Identity is not unlocked — please unlock your identity first")?
+            .relay_key()
+    };
+
+    let relay_dir = crate::settings::config_dir().join("relay");
+
+    // Reuse existing device_public_key if credentials are already stored,
+    // otherwise derive it fresh from the verifying key.
+    let device_public_key = {
+        match load_relay_credentials(&relay_dir, &identity_uuid, &relay_key)
+            .map_err(|e| e.to_string())?
+        {
+            Some(existing) => existing.device_public_key,
+            None => {
+                let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
+                let id = m.get(&uuid)
+                    .ok_or("Identity is not unlocked")?;
+                hex::encode(id.verifying_key.to_bytes())
+            }
+        }
+    };
+
+    let client = RelayClient::new(&relay_url);
+    let session = client
+        .login(&email, &password)
+        .map_err(|e| e.to_string())?;
+
+    let creds = RelayCredentials {
+        relay_url,
+        email,
+        session_token: session.session_token,
+        session_expires_at: Utc::now() + chrono::Duration::days(30),
+        device_public_key,
+    };
+    save_relay_credentials(&relay_dir, &identity_uuid, &creds, &relay_key)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+#[cfg(not(feature = "relay"))]
 pub async fn relay_login(
     _state: State<'_, AppState>,
     _identity_uuid: String,
+    _relay_url: String,
     _email: String,
     _password: String,
 ) -> Result<(), String> {
