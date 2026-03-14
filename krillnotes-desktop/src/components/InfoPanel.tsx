@@ -97,7 +97,7 @@ function InfoPanel({ selectedNote, onNoteUpdated, onDeleteRequest, requestEditMo
         pendingEditModeRef.current = true;
       }
     }
-  }, [requestEditMode]);
+  }, [requestEditMode, selectedNote]);
 
   // Fetch HTML for the active custom view tab
   const activeViewHtml = activeTab !== 'fields' ? viewHtml[activeTab] ?? null : null;

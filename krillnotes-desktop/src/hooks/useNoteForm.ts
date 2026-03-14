@@ -88,39 +88,28 @@ export function useNoteForm(
     }
   }, [selectedNote, schemaInfo.fieldGroups]);
 
-  const handleFormKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!isEditing) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      handleCancel();
-    } else if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
-      e.preventDefault();
-      handleSave();
-    }
-  };
-
-  const handleEdit = () => {
+  const handleEdit = useCallback(() => {
     invoke<string[]>('get_all_tags').then(setAllTags).catch(console.error);
     setPreviousTab(activeTab);
     setActiveTab('fields');
     setIsEditing(true);
-  };
+  }, [activeTab, setPreviousTab, setActiveTab, setIsEditing]);
 
-  function addTag(tag: string) {
+  const addTag = useCallback((tag: string) => {
     const normalised = tag.trim().toLowerCase();
     if (!normalised || editedTags.includes(normalised)) return;
     setEditedTags(prev => [...prev, normalised].sort());
     setTagInput('');
     setTagSuggestions([]);
     setIsDirty(true);
-  }
+  }, [editedTags, setEditedTags, setTagInput, setTagSuggestions]);
 
-  function removeTag(tag: string) {
+  const removeTag = useCallback((tag: string) => {
     setEditedTags(prev => prev.filter(t => t !== tag));
     setIsDirty(true);
-  }
+  }, [setEditedTags]);
 
-  function handleTagInputChange(value: string) {
+  const handleTagInputChange = useCallback((value: string) => {
     setTagInput(value);
     if (!value.trim()) {
       setTagSuggestions([]);
@@ -130,9 +119,9 @@ export function useNoteForm(
     setTagSuggestions(
       allTags.filter(t => t.includes(lower) && !editedTags.includes(t)).slice(0, 8)
     );
-  }
+  }, [allTags, editedTags, setTagSuggestions, setTagInput]);
 
-  const handleFieldBlur = async (fieldName: string, fieldDef: FieldDefinition) => {
+  const handleFieldBlur = useCallback(async (fieldName: string, fieldDef: FieldDefinition) => {
     if (!selectedNote || !fieldDef.hasValidate) return;
     try {
       const error = await invoke<string | null>('validate_field', {
@@ -148,31 +137,35 @@ export function useNoteForm(
     } catch {
       // ignore validation errors silently
     }
-  };
+  }, [selectedNote, schemaInfo, editedFields, setFieldErrors, t]);
 
-  const handleCancel = async () => {
+  const handleCancel = useCallback(async () => {
     if (isDirty) {
       if (!await confirm(t('notes.discardChanges'))) {
         return;
       }
     }
+    // selectedNote may have changed while the confirm dialog was open
+    if (!selectedNote) return;
     setIsEditing(false);
     if (previousTab) {
       setActiveTab(previousTab);
       setPreviousTab(null);
     }
-    setEditedTitle(selectedNote!.title);
-    setEditedFields({ ...selectedNote!.fields });
-    setEditedTags(selectedNote!.tags ?? []);
+    setEditedTitle(selectedNote.title);
+    setEditedFields({ ...selectedNote.fields });
+    setEditedTags(selectedNote.tags ?? []);
     setTagInput('');
     setTagSuggestions([]);
     setIsDirty(false);
     setFieldErrors({});
     setNoteErrors([]);
     onEditDone();
-  };
+  }, [isDirty, selectedNote, previousTab, setIsEditing, setActiveTab, setPreviousTab,
+      setEditedTitle, setEditedFields, setEditedTags, setTagInput, setTagSuggestions,
+      setIsDirty, setFieldErrors, setNoteErrors, onEditDone, t]);
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!selectedNote) return;
     setFieldErrors({});
     setNoteErrors([]);
@@ -215,16 +208,31 @@ export function useNoteForm(
     } catch (err) {
       alert(t('notes.saveFailed', { error: String(err) }));
     }
-  };
+  }, [selectedNote, schemaInfo, editedTitle, editedFields, editedTags, activeTab, previousTab,
+      setActiveTab, setPreviousTab, setIsEditing, setIsDirty, setViewHtml,
+      setEditedTitle, setEditedFields, setEditedTags, setFieldErrors, setNoteErrors,
+      onNoteUpdated, onEditDone, t]);
 
-  const handleFieldChange = (fieldName: string, value: FieldValue) => {
+  // handleFormKeyDown depends on handleCancel and handleSave — defined after them
+  const handleFormKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!isEditing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancel();
+    } else if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
+      e.preventDefault();
+      handleSave();
+    }
+  }, [isEditing, handleCancel, handleSave]);
+
+  const handleFieldChange = useCallback((fieldName: string, value: FieldValue) => {
     setEditedFields(prev => {
       const next = { ...prev, [fieldName]: value };
       evaluateGroupVisibility(next);
       return next;
     });
     setIsDirty(true);
-  };
+  }, [setEditedFields, evaluateGroupVisibility]);
 
   return {
     isEditing,
