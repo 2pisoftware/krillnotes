@@ -243,6 +243,20 @@ export interface PeerInfo {
   contactId?: string;     // UUID string, undefined if not in contacts
   lastSync?: string;      // ISO 8601, undefined if never synced
   isOwner?: boolean;
+  channelType: string;          // "relay" | "folder" | "manual"
+  syncStatus: string;           // "idle" | "syncing" | "error" | "auth_expired"
+  syncStatusDetail: string | null;
+  lastSyncError: string | null;
+}
+
+export interface SyncEvent {
+  type: "delta_sent" | "bundle_applied" | "auth_expired" | "sync_error" | "ingest_error" | "unexpected_bundle_mode";
+  workspaceId?: string;
+  peerDeviceId?: string;
+  opCount?: number;
+  relayUrl?: string;
+  error?: string;
+  mode?: string;
 }
 
 export interface InviteInfo {
