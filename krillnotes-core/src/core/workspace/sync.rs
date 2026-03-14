@@ -450,6 +450,7 @@ impl Workspace {
                     last_sync: peer.last_sync,
                     is_owner: peer.peer_identity_id == self.owner_pubkey,
                     channel_type: peer.channel_type,
+                    channel_params: peer.channel_params,
                     sync_status: peer.sync_status,
                     sync_status_detail: peer.sync_status_detail,
                     last_sync_error: peer.last_sync_error,

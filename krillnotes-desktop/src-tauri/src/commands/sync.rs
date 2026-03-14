@@ -7,7 +7,12 @@
 //! Tauri commands for relay-based sync operations.
 
 use crate::AppState;
-use tauri::{State, Window};
+use tauri::{Emitter, State, Window};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use krillnotes_core::core::{
+    device::get_device_id,
+    sync::{FolderChannel, SyncContext, SyncEngine, SyncEvent},
+};
 
 // ── update_peer_channel ────────────────────────────────────────────────────
 
@@ -34,18 +39,70 @@ pub async fn update_peer_channel(
 
 // ── poll_sync ──────────────────────────────────────────────────────────────
 
-/// Run one sync poll cycle for the given workspace.
+/// Run one sync poll cycle for the current workspace window.
 ///
-/// TODO: Get workspace, identity, and contact manager.
-/// TODO: Call sync_engine.poll(workspace, ctx).
-/// TODO: Emit events to the window and return them.
+/// Builds a fresh `SyncEngine` with the `FolderChannel` registered, runs one
+/// `poll()` cycle, and returns the resulting `SyncEvent` list as JSON.
 #[tauri::command]
 pub async fn poll_sync(
-    _window: Window,
-    _state: State<'_, AppState>,
-    _workspace_label: String,
-) -> Result<Vec<serde_json::Value>, String> {
-    Err("poll_sync not yet implemented".to_string())
+    window: Window,
+    state: State<'_, AppState>,
+) -> Result<Vec<SyncEvent>, String> {
+    let workspace_label = window.label().to_string();
+
+    // -- Collect context data under brief locks --------------------------------
+    let identity_uuid = {
+        let m = state.workspace_identities.lock().map_err(|e| e.to_string())?;
+        *m.get(&workspace_label).ok_or("No identity bound to this workspace")?
+    };
+
+    let (signing_key, sender_display_name, identity_pubkey) = {
+        let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
+        let id = m.get(&identity_uuid).ok_or("Identity not unlocked")?;
+        let pubkey = BASE64.encode(id.verifying_key.as_bytes());
+        (id.signing_key.clone(), id.display_name.clone(), pubkey)
+    };
+
+    let workspace_name = {
+        let m = state.workspace_paths.lock().map_err(|e| e.to_string())?;
+        m.get(&workspace_label)
+            .and_then(|p| p.file_stem().and_then(|n| n.to_str()).map(String::from))
+            .unwrap_or_else(|| workspace_label.clone())
+    };
+
+    let device_id = get_device_id().map_err(|e| e.to_string())?;
+
+    // -- Build a fresh engine (FolderChannel is stateless; state is in the DB) -
+    let mut engine = SyncEngine::new();
+    engine.register_channel(Box::new(FolderChannel::new(identity_pubkey, device_id)));
+
+    // -- Hold contact_managers + workspaces for the poll ----------------------
+    let mut contact_managers = state.contact_managers.lock().map_err(|e| e.to_string())?;
+    let contact_manager = contact_managers
+        .get_mut(&identity_uuid)
+        .ok_or("Contact manager not found — is the identity unlocked?")?;
+
+    let mut workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
+    let workspace = workspaces
+        .get_mut(&workspace_label)
+        .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?;
+
+    let mut ctx = SyncContext {
+        signing_key: &signing_key,
+        contact_manager,
+        workspace_name: &workspace_name,
+        sender_display_name: &sender_display_name,
+    };
+
+    let events = engine.poll(workspace, &mut ctx).map_err(|e| e.to_string())?;
+
+    // If any bundles were applied, notify WorkspaceView to reload the note tree.
+    let bundles_applied = events.iter().any(|e| matches!(e, SyncEvent::BundleApplied { .. }));
+    if bundles_applied {
+        let _ = window.emit("workspace-updated", ());
+    }
+
+    Ok(events)
 }
 
 // ── configure_relay ────────────────────────────────────────────────────────

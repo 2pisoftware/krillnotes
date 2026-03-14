@@ -66,6 +66,8 @@ pub struct PeerInfo {
     pub is_owner: bool,
     /// How this peer is reached: "manual", "relay", etc.
     pub channel_type: String,
+    /// JSON-encoded channel configuration (e.g. `{"path":"/shared/folder"}`).
+    pub channel_params: String,
     /// Current sync status: "idle", "syncing", "error".
     pub sync_status: String,
     /// Optional human-readable detail about the current status.

@@ -244,6 +244,7 @@ export interface PeerInfo {
   lastSync?: string;      // ISO 8601, undefined if never synced
   isOwner?: boolean;
   channelType: string;          // "relay" | "folder" | "manual"
+  channelParams: string;        // JSON-encoded channel config, e.g. {"path":"/shared/folder"}
   syncStatus: string;           // "idle" | "syncing" | "error" | "auth_expired"
   syncStatusDetail: string | null;
   lastSyncError: string | null;

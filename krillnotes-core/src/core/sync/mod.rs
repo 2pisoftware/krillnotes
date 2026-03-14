@@ -31,7 +31,8 @@ use crate::core::workspace::Workspace;
 ///
 /// The caller (Tauri command layer) can forward these to the frontend via
 /// Tauri events, display toasts, or log them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SyncEvent {
     /// A delta bundle was successfully sent to a peer.
     DeltaSent {

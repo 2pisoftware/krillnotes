@@ -5,9 +5,10 @@
 // Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
 
 import { useState, useEffect, useCallback } from 'react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import type { PeerInfo, WorkspaceInfo, PendingPeer, ContactInfo } from '../types';
+import type { PeerInfo, WorkspaceInfo, PendingPeer, ContactInfo, SyncEvent } from '../types';
 import AddPeerFromContactsDialog from './AddPeerFromContactsDialog';
 import AddContactDialog from './AddContactDialog';
 import { InviteManagerDialog } from './InviteManagerDialog';
@@ -67,6 +68,8 @@ export default function WorkspacePeersDialog({
   const [sendSnapshotFor, setSendSnapshotFor] = useState<string[]>([]);
   // Per-peer pending channel type selection (before "Configure" is clicked)
   const [pendingChannelType, setPendingChannelType] = useState<Record<string, string>>({});
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
 
   const loadPeers = useCallback(async () => {
     setLoading(true);
@@ -106,11 +109,17 @@ export default function WorkspacePeersDialog({
   };
 
   const handleUpdateChannel = async (peer: PeerInfo, channelType: string) => {
+    let channelParams = '{}';
+    if (channelType === 'folder') {
+      const selected = await openDialog({ directory: true, multiple: false });
+      if (typeof selected !== 'string') return; // user cancelled
+      channelParams = JSON.stringify({ path: selected });
+    }
     try {
       await invoke('update_peer_channel', {
         peerDeviceId: peer.peerDeviceId,
         channelType,
-        channelParams: '{}',
+        channelParams,
       });
       // Clear the pending selection for this peer and refresh
       setPendingChannelType(prev => {
@@ -121,6 +130,27 @@ export default function WorkspacePeersDialog({
       await loadPeers();
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const events = await invoke<SyncEvent[]>('poll_sync');
+      const sent = events.filter(e => e.type === 'delta_sent').length;
+      const applied = events.filter(e => e.type === 'bundle_applied').length;
+      const errors = events.filter(e => e.type === 'sync_error' || e.type === 'ingest_error');
+      if (errors.length > 0) {
+        setSyncResult(`Errors: ${errors.map(e => e.error).join(', ')}`);
+      } else {
+        setSyncResult(`Sent ${sent} bundle(s), applied ${applied} bundle(s)`);
+      }
+      await loadPeers();
+    } catch (e) {
+      setSyncResult(`Error: ${String(e)}`);
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -174,6 +204,7 @@ export default function WorkspacePeersDialog({
             const channelBadge = CHANNEL_BADGE[peer.channelType] ?? { label: peer.channelType, class: 'bg-gray-500/20 text-gray-400' };
             const dotClass = syncStatusDotClass(peer.syncStatus);
             const selectedChannelType = pendingChannelType[peer.peerDeviceId] ?? peer.channelType;
+            const currentFolderPath = peer.channelType === 'folder' ? (() => { try { return JSON.parse(peer.channelParams).path as string ?? null; } catch { return null; } })() : null;
             return (
               <div
                 key={peer.peerDeviceId}
@@ -213,23 +244,30 @@ export default function WorkspacePeersDialog({
                     {formatLastSync(peer.lastSync)}
                   </div>
                   {/* Channel config controls */}
-                  <div className="flex items-center gap-1.5 mt-1.5">
-                    <select
-                      value={selectedChannelType}
-                      onChange={e => setPendingChannelType(prev => ({ ...prev, [peer.peerDeviceId]: e.target.value }))}
-                      className="text-xs px-1.5 py-0.5 rounded border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-foreground)]"
-                    >
-                      <option value="relay">Relay</option>
-                      <option value="folder">Folder</option>
-                      <option value="manual">Manual</option>
-                    </select>
-                    <button
-                      onClick={() => handleUpdateChannel(peer, selectedChannelType)}
-                      disabled={selectedChannelType === peer.channelType && !(peer.peerDeviceId in pendingChannelType)}
-                      className="text-xs px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-secondary)] disabled:opacity-40"
-                    >
-                      {t('peers.configure', 'Configure')}
-                    </button>
+                  <div className="flex flex-col gap-1 mt-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={selectedChannelType}
+                        onChange={e => setPendingChannelType(prev => ({ ...prev, [peer.peerDeviceId]: e.target.value }))}
+                        className="text-xs px-1.5 py-0.5 rounded border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-foreground)]"
+                      >
+                        <option value="relay">Relay</option>
+                        <option value="folder">Folder</option>
+                        <option value="manual">Manual</option>
+                      </select>
+                      <button
+                        onClick={() => handleUpdateChannel(peer, selectedChannelType)}
+                        disabled={selectedChannelType !== 'folder' && selectedChannelType === peer.channelType && !(peer.peerDeviceId in pendingChannelType)}
+                        className="text-xs px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-secondary)] disabled:opacity-40"
+                      >
+                        {t('peers.configure', 'Configure')}
+                      </button>
+                    </div>
+                    {currentFolderPath && (
+                      <span className="text-xs text-[var(--color-muted-foreground)] truncate font-mono" title={currentFolderPath}>
+                        {currentFolderPath}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -276,6 +314,9 @@ export default function WorkspacePeersDialog({
         </div>
 
         {/* Footer buttons */}
+        {syncResult && (
+          <p className="px-4 pb-1 text-xs text-[var(--color-muted-foreground)]">{syncResult}</p>
+        )}
         <div className="flex items-center gap-2 p-4 border-t border-[var(--color-border)]">
           <button
             onClick={() => setShowAddFromContacts(true)}
@@ -297,6 +338,13 @@ export default function WorkspacePeersDialog({
             className="flex-1 px-3 py-1.5 text-sm rounded-md border border-[var(--color-border)]"
           >
             Create Snapshot…
+          </button>
+          <button
+            onClick={handleSyncNow}
+            disabled={syncing || peers.filter(p => p.channelType !== 'manual').length === 0}
+            className="flex-1 px-3 py-1.5 text-sm rounded-md border border-[var(--color-border)] hover:bg-[var(--color-secondary)] disabled:opacity-40"
+          >
+            {syncing ? t('peers.syncing', 'Syncing…') : t('peers.syncNow', 'Sync Now')}
           </button>
         </div>
       </div>
