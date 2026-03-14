@@ -33,6 +33,8 @@ pub struct SnapshotParams<'a> {
     pub recipient_peer_ids: Vec<String>,
     /// (attachment_id, plaintext_bytes). Encrypted into the bundle with the same key as the payload.
     pub attachment_blobs: Vec<(String, Vec<u8>)>,
+    /// Base64 public key of the workspace owner.
+    pub owner_pubkey: String,
 }
 
 pub struct ParsedSnapshot {
@@ -97,7 +99,7 @@ pub fn create_snapshot_bundle(params: SnapshotParams<'_>) -> Result<Vec<u8>> {
         target_peer: None,
         recipients: Some(entries),
         has_attachments,
-        owner_pubkey: None,
+        owner_pubkey: Some(params.owner_pubkey.clone()),
     };
     header.validate()?;
 
@@ -230,6 +232,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["dev-2".to_string()],
             attachment_blobs: vec![],
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         let result = parse_snapshot_bundle(&bundle, &recipient_key).unwrap();
@@ -256,6 +259,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["dev-2".to_string()],
             attachment_blobs: vec![],
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         assert!(parse_snapshot_bundle(&bundle, &wrong_key).is_err());
@@ -280,6 +284,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["peer-pub-key".to_string()],
             attachment_blobs: vec![(att_id.to_string(), att_blob.to_vec())],
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         let parsed = parse_snapshot_bundle(&bundle, &recipient_key).unwrap();
@@ -305,6 +310,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["p1".to_string()],
             attachment_blobs: vec![],
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
         let parsed = parse_snapshot_bundle(&bundle, &recipient_key).unwrap();
         assert_eq!(parsed.attachment_blobs.len(), 0);
@@ -331,6 +337,7 @@ mod tests {
             recipient_keys: vec![&recipient_key.verifying_key()],
             recipient_peer_ids: vec!["p1".to_string()],
             attachment_blobs: blobs.clone(),
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
         let parsed = parse_snapshot_bundle(&bundle, &recipient_key).unwrap();
         assert_eq!(parsed.attachment_blobs.len(), 3);

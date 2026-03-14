@@ -104,6 +104,7 @@ pub fn generate_delta(
         recipient_keys: vec![&recipient_vk],
         recipient_peer_ids: vec![peer_device_id.to_string()],
         recipient_identity_id: peer.peer_identity_id.clone(),
+        owner_pubkey: workspace.owner_pubkey().to_string(),
     })?;
 
     // 6. Update watermark only if we sent at least one operation.

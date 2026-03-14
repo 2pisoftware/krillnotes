@@ -33,6 +33,8 @@ pub struct InviteParams<'a> {
     pub offered_scope: Option<String>,
     pub contact_public_key: Option<String>,
     pub inviter_key: &'a SigningKey,
+    /// Base64 public key of the workspace owner.
+    pub owner_pubkey: String,
 }
 
 pub struct ParsedInvite {
@@ -45,6 +47,8 @@ pub struct ParsedInvite {
     /// Base64-encoded 32-byte pairing token.
     pub pairing_token: String,
     pub set_permission_op: Operation,
+    /// Base64 public key of the workspace owner (if present in the bundle).
+    pub owner_pubkey: Option<String>,
 }
 
 /// Generate an invite.swarm bundle (signed, unencrypted).
@@ -79,7 +83,7 @@ pub fn create_invite_bundle(params: InviteParams<'_>) -> Result<Vec<u8>> {
         target_peer: params.contact_public_key.clone(),
         recipients: None,
         has_attachments: false,
-        owner_pubkey: None,
+        owner_pubkey: Some(params.owner_pubkey.clone()),
     };
     header.validate()?;
 
@@ -160,6 +164,7 @@ pub fn parse_invite_bundle(data: &[u8]) -> Result<ParsedInvite> {
         inviter_public_key: header.source_identity,
         pairing_token: header.pairing_token.unwrap_or_default(),
         set_permission_op: op,
+        owner_pubkey: header.owner_pubkey,
     })
 }
 
@@ -174,6 +179,8 @@ pub struct AcceptParams<'a> {
     pub declared_name: String,
     pub pairing_token: String,
     pub acceptor_key: &'a SigningKey,
+    /// Base64 public key of the workspace owner (propagated from the invite).
+    pub owner_pubkey: Option<String>,
 }
 
 pub struct ParsedAccept {
@@ -211,7 +218,7 @@ pub fn create_accept_bundle(params: AcceptParams<'_>) -> Result<Vec<u8>> {
         target_peer: None,
         recipients: None,
         has_attachments: false,
-        owner_pubkey: None,
+        owner_pubkey: params.owner_pubkey.clone(),
     };
     header.validate()?;
 
@@ -322,6 +329,7 @@ mod tests {
             offered_scope: None,
             contact_public_key: None,
             inviter_key: &inviter_key,
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         let parsed = parse_invite_bundle(&bundle).unwrap();
@@ -342,6 +350,7 @@ mod tests {
             offered_scope: None,
             contact_public_key: None,
             inviter_key: &inviter_key,
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
 
         let parsed_invite = parse_invite_bundle(&invite).unwrap();
@@ -353,6 +362,7 @@ mod tests {
             declared_name: "Bob".to_string(),
             pairing_token: parsed_invite.pairing_token.clone(),
             acceptor_key: &acceptor_key,
+            owner_pubkey: parsed_invite.owner_pubkey.clone(),
         }).unwrap();
 
         let parsed_accept = parse_accept_bundle(&accept_bundle).unwrap();
@@ -372,6 +382,7 @@ mod tests {
             offered_scope: None,
             contact_public_key: None,
             inviter_key: &inviter_key,
+            owner_pubkey: "owner-pk".to_string(),
         }).unwrap();
         // Flip a byte in the middle of the bundle
         let len = bundle.len();

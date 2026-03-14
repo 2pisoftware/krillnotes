@@ -55,6 +55,7 @@ mod integration_tests {
             offered_scope: None,
             contact_public_key: None,
             inviter_key: &alice_key,
+            owner_pubkey: "owner-pk-alice".to_string(),
         }).unwrap();
 
         // === Step 2: Bob reads invite ===
@@ -71,6 +72,7 @@ mod integration_tests {
             declared_name: "Bob".to_string(),
             pairing_token: pairing_token.clone(),
             acceptor_key: &bob_key,
+            owner_pubkey: parsed_invite.owner_pubkey.clone(),
         }).unwrap();
 
         // === Step 4: Alice processes accept ===
@@ -95,6 +97,7 @@ mod integration_tests {
             recipient_keys: vec![&bob_key.verifying_key()],
             recipient_peer_ids: vec!["dev-bob".to_string()],
             attachment_blobs: vec![],
+            owner_pubkey: "owner-pk-alice".to_string(),
         }).unwrap();
 
         // === Step 6: Bob imports snapshot ===
@@ -116,6 +119,7 @@ mod integration_tests {
             recipient_keys: vec![&bob_key.verifying_key()],
             recipient_peer_ids: vec!["dev-bob".to_string()],
             recipient_identity_id: "pk-bob".to_string(),
+            owner_pubkey: "owner-pk-alice".to_string(),
         }).unwrap();
 
         // === Step 8: Bob applies delta ===
