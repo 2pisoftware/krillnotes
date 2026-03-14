@@ -6,7 +6,6 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useTranslation } from 'react-i18next';
 import type { PeerInfo, WorkspaceInfo, PendingPeer, ContactInfo } from '../types';
 import AddPeerFromContactsDialog from './AddPeerFromContactsDialog';
@@ -108,9 +107,7 @@ export default function WorkspacePeersDialog({
 
   const handleUpdateChannel = async (peer: PeerInfo, channelType: string) => {
     try {
-      const workspaceLabel = getCurrentWebviewWindow().label;
       await invoke('update_peer_channel', {
-        workspaceLabel,
         peerDeviceId: peer.peerDeviceId,
         channelType,
         channelParams: '{}',

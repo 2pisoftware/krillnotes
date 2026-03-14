@@ -17,13 +17,13 @@ use tauri::{State, Window};
 /// `channel_params` is a JSON string containing channel-specific parameters.
 #[tauri::command]
 pub async fn update_peer_channel(
-    _window: Window,
+    window: Window,
     state: State<'_, AppState>,
-    workspace_label: String,
     peer_device_id: String,
     channel_type: String,
     channel_params: String,
 ) -> Result<(), String> {
+    let workspace_label = window.label().to_string();
     let workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
     let ws = workspaces
         .get(&workspace_label)
