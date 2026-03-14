@@ -200,10 +200,56 @@ pub async fn fetch_relay_invite(
 /// TODO: Check relay credentials for the active identity.
 #[tauri::command]
 pub async fn has_relay_credentials(
-    _window: Window,
-    _state: State<'_, AppState>,
+    window: Window,
+    state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    Ok(false)
+    let workspace_label = window.label().to_string();
+    let identity_uuid: Uuid = {
+        let m = state.workspace_identities.lock().map_err(|e| e.to_string())?;
+        *m.get(&workspace_label).ok_or("No identity bound to this workspace")?
+    };
+    let relay_key = {
+        let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
+        m.get(&identity_uuid)
+            .ok_or("Identity not unlocked")?
+            .relay_key()
+    };
+    let relay_dir = crate::settings::config_dir().join("relay");
+    let creds = load_relay_credentials(&relay_dir, &identity_uuid.to_string(), &relay_key)
+        .map_err(|e| e.to_string())?;
+    Ok(creds.is_some())
+}
+
+// ── get_relay_info ──────────────────────────────────────────────────────────
+
+/// Return relay account info (URL + email) if credentials are stored for the
+/// identity bound to this workspace window. Returns `null` if not configured.
+#[tauri::command]
+pub async fn get_relay_info(
+    window: Window,
+    state: State<'_, AppState>,
+) -> Result<Option<RelayInfo>, String> {
+    let workspace_label = window.label().to_string();
+    let identity_uuid: Uuid = {
+        let m = state.workspace_identities.lock().map_err(|e| e.to_string())?;
+        *m.get(&workspace_label).ok_or("No identity bound to this workspace")?
+    };
+    let relay_key = {
+        let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
+        m.get(&identity_uuid)
+            .ok_or("Identity not unlocked")?
+            .relay_key()
+    };
+    let relay_dir = crate::settings::config_dir().join("relay");
+    match load_relay_credentials(&relay_dir, &identity_uuid.to_string(), &relay_key)
+        .map_err(|e| e.to_string())?
+    {
+        Some(creds) => Ok(Some(RelayInfo {
+            relay_url: creds.relay_url,
+            email: creds.email,
+        })),
+        None => Ok(None),
+    }
 }
 
 // ── parse_invite_bytes ─────────────────────────────────────────────────────
