@@ -4,10 +4,14 @@
 //
 // Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
 
-pub mod channel;
-pub mod manual;
+pub mod auth;
 
 #[cfg(feature = "relay")]
-pub mod relay;
+pub mod client;
 
-pub use channel::{BundleRef, ChannelType, PeerSyncInfo, SyncChannel};
+pub use auth::{
+    delete_relay_credentials, load_relay_credentials, save_relay_credentials, RelayCredentials,
+};
+
+#[cfg(feature = "relay")]
+pub use client::RelayClient;
