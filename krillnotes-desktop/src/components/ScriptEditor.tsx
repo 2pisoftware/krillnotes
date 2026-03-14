@@ -18,9 +18,10 @@ import { systemVariant } from '../utils/themeManager';
 interface ScriptEditorProps {
   value: string;
   onChange: (value: string) => void;
+  readOnly?: boolean;
 }
 
-function ScriptEditor({ value, onChange }: ScriptEditorProps) {
+function ScriptEditor({ value, onChange, readOnly = false }: ScriptEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
@@ -45,6 +46,7 @@ function ScriptEditor({ value, onChange }: ScriptEditorProps) {
         rust(),
         keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         ...(isDark ? [oneDark] : []),
+        ...(readOnly ? [EditorState.readOnly.of(true)] : []),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             onChangeRef.current(update.state.doc.toString());
@@ -76,7 +78,7 @@ function ScriptEditor({ value, onChange }: ScriptEditorProps) {
       view.destroy();
       viewRef.current = null;
     };
-  }, [isDark]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isDark, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update editor content when value changes externally (e.g. switching scripts)
   useEffect(() => {

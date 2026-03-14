@@ -58,6 +58,7 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
   const [canScriptRedo, setCanScriptRedo] = useState(false);
   const [newScriptCategory, setNewScriptCategory] = useState<string>('schema');
   const [warnings, setWarnings] = useState<ScriptWarning[]>([]);
+  const [isOwner, setIsOwner] = useState(true); // optimistic default
 
   const loadScripts = useCallback(async () => {
     try {
@@ -82,6 +83,7 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
       loadScripts();
       refreshScriptUndoState();
       invoke<ScriptWarning[]>('get_script_warnings').then(setWarnings).catch(() => setWarnings([]));
+      invoke<boolean>('is_workspace_owner').then(setIsOwner).catch(() => setIsOwner(false));
       setView('list');
       setError('');
       setImportConflict(null);
@@ -305,6 +307,7 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                       name="newCategory"
                       checked={newScriptCategory === 'schema'}
                       onChange={() => setNewScriptCategory('schema')}
+                      disabled={!isOwner}
                     />
                     {t('scripts.schema')}
                   </label>
@@ -314,24 +317,33 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                       name="newCategory"
                       checked={newScriptCategory === 'presentation'}
                       onChange={() => setNewScriptCategory('presentation')}
+                      disabled={!isOwner}
                     />
                     {t('scripts.library')}
                   </label>
                 </div>
                 <button
                   onClick={handleAdd}
-                  className="px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 text-sm"
+                  disabled={!isOwner}
+                  className="px-3 py-1.5 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {t('common.add')}
                 </button>
                 <button
                   onClick={handleImportFromFile}
-                  className="px-3 py-1.5 border border-border rounded-md hover:bg-secondary text-sm"
+                  disabled={!isOwner}
+                  className="px-3 py-1.5 border border-border rounded-md hover:bg-secondary text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {t('scripts.importFromFile')}
                 </button>
               </div>
             </div>
+
+            {!isOwner && (
+              <div className="mx-4 mt-3 p-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs">
+                {t('scripts.ownerOnly', 'Only the workspace owner can modify scripts.')}
+              </div>
+            )}
 
             {/* Script List */}
             <div className="flex-1 overflow-y-auto p-4">
@@ -344,11 +356,11 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                   {scripts.map((script, index) => (
                     <div
                       key={script.id}
-                      draggable
-                      onDragStart={() => handleDragStart(index)}
-                      onDragOver={(e) => handleDragOver(e, index)}
-                      onDrop={(e) => handleDrop(e, index)}
-                      onDragEnd={handleDragEnd}
+                      draggable={isOwner}
+                      onDragStart={isOwner ? () => handleDragStart(index) : undefined}
+                      onDragOver={isOwner ? (e) => handleDragOver(e, index) : undefined}
+                      onDrop={isOwner ? (e) => handleDrop(e, index) : undefined}
+                      onDragEnd={isOwner ? handleDragEnd : undefined}
                       className={[
                         'flex items-center gap-3 p-3 border border-border rounded-md hover:bg-secondary/50 transition-opacity',
                         dragIndex === index ? 'opacity-40' : '',
@@ -357,13 +369,14 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                     >
                       <GripVertical
                         size={16}
-                        className="shrink-0 text-muted-foreground cursor-grab active:cursor-grabbing"
+                        className={`shrink-0 text-muted-foreground ${isOwner ? 'cursor-grab active:cursor-grabbing' : 'opacity-40'}`}
                       />
                       <input
                         type="checkbox"
                         checked={script.enabled}
                         onChange={() => handleToggle(script)}
                         className="shrink-0"
+                        disabled={!isOwner}
                         title={script.enabled ? t('scripts.disableScript') : t('scripts.enableScript')}
                       />
                       <div className="flex-1 min-w-0">
@@ -417,7 +430,7 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
               <div className="flex gap-2">
                 <button
                   onClick={handleScriptUndo}
-                  disabled={!canScriptUndo}
+                  disabled={!canScriptUndo || !isOwner}
                   title={t('scripts.undoLastSave')}
                   className="px-3 py-1.5 text-sm border border-border rounded-md hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                 >
@@ -425,7 +438,7 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                 </button>
                 <button
                   onClick={handleScriptRedo}
-                  disabled={!canScriptRedo}
+                  disabled={!canScriptRedo || !isOwner}
                   title={t('scripts.redoLastSave')}
                   className="px-3 py-1.5 text-sm border border-border rounded-md hover:bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
                 >
@@ -457,7 +470,7 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
 
             {/* Editor */}
             <div className="flex-1 min-h-0 overflow-hidden p-4 flex flex-col">
-              <ScriptEditor value={editorContent} onChange={setEditorContent} />
+              <ScriptEditor value={editorContent} onChange={setEditorContent} readOnly={!isOwner} />
             </div>
 
             {/* Error display */}
@@ -475,8 +488,8 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                 {editingScript && (
                   <button
                     onClick={handleDelete}
-                    className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600"
-                    disabled={saving}
+                    className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                    disabled={saving || !isOwner}
                   >
                     {t('common.delete')}
                   </button>
@@ -492,8 +505,8 @@ function ScriptManagerDialog({ isOpen, onClose, onScriptsChanged }: ScriptManage
                 </button>
                 <button
                   onClick={handleSaveOrReplace}
-                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
-                  disabled={saving}
+                  className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  disabled={saving || !isOwner}
                 >
                   {saving ? t('common.saving') : (importConflict ? t('common.replace') : t('common.save'))}
                 </button>
