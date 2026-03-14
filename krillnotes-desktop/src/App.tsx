@@ -4,7 +4,6 @@
 //
 // Copyright (c) 2024-2026 TripleACS Pty Ltd t/a 2pi Software
 
-import { useEffect, useState } from 'react';
 import { save, confirm } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import WorkspaceView from './components/WorkspaceView';
@@ -13,7 +12,7 @@ import StatusMessage from './components/StatusMessage';
 import NewWorkspaceDialog from './components/NewWorkspaceDialog';
 import WorkspaceManagerDialog from './components/WorkspaceManagerDialog';
 import SettingsDialog from './components/SettingsDialog';
-import type { WorkspaceInfo as WorkspaceInfoType, AppSettings, IdentityRef, InviteFileData } from './types';
+import type { AppSettings, WorkspaceInfo as WorkspaceInfoType } from './types';
 import CreateIdentityDialog from './components/CreateIdentityDialog';
 import IdentityManagerDialog from './components/IdentityManagerDialog';
 import SwarmInviteDialog from './components/SwarmInviteDialog';
@@ -27,66 +26,42 @@ import { useTranslation } from 'react-i18next';
 import { slugify } from './utils/slugify';
 import { useMenuEvents } from './hooks/useMenuEvents';
 import { useWorkspaceLifecycle } from './hooks/useWorkspaceLifecycle';
-
-interface ImportState {
-  zipPath: string;
-  noteCount: number;
-  scriptCount: number;
-}
+import { useDialogState } from './hooks/useDialogState';
 
 function App() {
   const { t } = useTranslation();
-  const [status, setStatus] = useState('');
-  const [isError, setIsError] = useState(false);
-  const [showNewWorkspace, setShowNewWorkspace] = useState(false);
-  const [showOpenWorkspace, setShowOpenWorkspace] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [importState, setImportState] = useState<ImportState | null>(null);
-  const [importName, setImportName] = useState('');
-  const [importError, setImportError] = useState('');
-  const [importing, setImporting] = useState(false);
-  const [importIdentities, setImportIdentities] = useState<IdentityRef[]>([]);
-  const [importSelectedIdentity, setImportSelectedIdentity] = useState<string>('');
-  const [showImportPasswordDialog, setShowImportPasswordDialog] = useState(false);
-  const [importPassword, setImportPassword] = useState('');
-  const [importPasswordError, setImportPasswordError] = useState('');
-  const [pendingImportZipPath, setPendingImportZipPath] = useState<string | null>(null);
-  const [pendingImportPassword, setPendingImportPassword] = useState<string | null>(null);
-  const [showExportPasswordDialog, setShowExportPasswordDialog] = useState(false);
-  const [exportPassword, setExportPassword] = useState('');
-  const [exportPasswordConfirm, setExportPasswordConfirm] = useState('');
-  const [showCreateFirstIdentity, setShowCreateFirstIdentity] = useState(false);
-  const [showIdentityManager, setShowIdentityManager] = useState(false);
-  const [showSwarmInvite, setShowSwarmInvite] = useState(false);
-  const [showSwarmOpen, setShowSwarmOpen] = useState(false);
-  const [swarmFilePath, setSwarmFilePath] = useState<string | null>(null);
-  const [pendingInvitePath, setPendingInvitePath] = useState<string | null>(null);
-  const [pendingInviteData, setPendingInviteData] = useState<InviteFileData | null>(null);
-  const [showWorkspacePeers, setShowWorkspacePeers] = useState(false);
-  const [showCreateDeltaDialog, setShowCreateDeltaDialog] = useState(false);
 
-  const statusSetter = (msg: string, error = false) => {
-    setStatus(msg);
-    setIsError(error);
-    setTimeout(() => setStatus(''), 5000);
-  };
-
-  // Reset import dialog state when it opens and load unlocked identities
-  useEffect(() => {
-    if (importState) {
-      setImportName('imported-workspace');
-      setImportError('');
-      setImporting(false);
-      Promise.all([
-        invoke<IdentityRef[]>('list_identities'),
-        invoke<string[]>('get_unlocked_identities'),
-      ]).then(([ids, unlocked]) => {
-        const unlockedIds = ids.filter(i => unlocked.includes(i.uuid));
-        setImportIdentities(unlockedIds);
-        setImportSelectedIdentity(unlockedIds.length > 0 ? unlockedIds[0].uuid : '');
-      }).catch(() => {});
-    }
-  }, [importState]);
+  const {
+    status,
+    isError,
+    showNewWorkspace, setShowNewWorkspace,
+    showOpenWorkspace, setShowOpenWorkspace,
+    showSettings, setShowSettings,
+    importState, setImportState,
+    importName, setImportName,
+    importError, setImportError,
+    importing, setImporting,
+    importIdentities,
+    importSelectedIdentity, setImportSelectedIdentity,
+    showImportPasswordDialog, setShowImportPasswordDialog,
+    importPassword, setImportPassword,
+    importPasswordError, setImportPasswordError,
+    pendingImportZipPath, setPendingImportZipPath,
+    pendingImportPassword, setPendingImportPassword,
+    showExportPasswordDialog, setShowExportPasswordDialog,
+    exportPassword, setExportPassword,
+    exportPasswordConfirm, setExportPasswordConfirm,
+    showCreateFirstIdentity, setShowCreateFirstIdentity,
+    showIdentityManager, setShowIdentityManager,
+    showSwarmInvite, setShowSwarmInvite,
+    showSwarmOpen, setShowSwarmOpen,
+    swarmFilePath, setSwarmFilePath,
+    pendingInvitePath, setPendingInvitePath,
+    pendingInviteData, setPendingInviteData,
+    showWorkspacePeers, setShowWorkspacePeers,
+    showCreateDeltaDialog, setShowCreateDeltaDialog,
+    statusSetter,
+  } = useDialogState();
 
   const handleImportConfirm = async () => {
     if (!importState) return;
