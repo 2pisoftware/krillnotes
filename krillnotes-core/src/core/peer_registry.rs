@@ -347,10 +347,15 @@ impl<'a> PeerRegistry<'a> {
         channel_type: &str,
         channel_params: &str,
     ) -> Result<()> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             "UPDATE sync_peers SET channel_type = ?1, channel_params = ?2 WHERE peer_device_id = ?3",
             rusqlite::params![channel_type, channel_params, peer_device_id],
         )?;
+        if rows == 0 {
+            return Err(crate::KrillnotesError::Swarm(format!(
+                "peer not found: {peer_device_id}"
+            )));
+        }
         Ok(())
     }
 
@@ -478,6 +483,19 @@ mod tests {
         let peer = reg.get_peer("dev-1").unwrap().unwrap();
         assert_eq!(peer.channel_type, "relay");
         assert_eq!(peer.channel_params, r#"{"url":"https://relay.example.com"}"#);
+    }
+
+    #[test]
+    fn test_update_channel_config_unknown_peer_returns_error() {
+        let (_f, s) = open_db();
+        let reg = PeerRegistry::new(s.connection());
+        // No peer was added — update should fail, not silently succeed
+        let result = reg.update_channel_config(
+            "nonexistent-device",
+            "folder",
+            r#"{"path":"/tmp"}"#,
+        );
+        assert!(result.is_err(), "expected Err when device_id not found");
     }
 
     #[test]
