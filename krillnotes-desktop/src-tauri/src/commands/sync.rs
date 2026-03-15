@@ -21,7 +21,7 @@ use krillnotes_core::core::{
         save_relay_credentials,
     },
 };
-use krillnotes_core::core::sync::relay::{RelayChannel, RelayClient};
+use krillnotes_core::core::sync::relay::{RelayAccount, RelayChannel, RelayClient};
 use krillnotes_core::core::sync::relay::auth::decrypt_pop_challenge;
 
 /// Relay account info returned by `get_relay_info`.
@@ -80,13 +80,11 @@ pub async fn poll_sync(
         *m.get(&workspace_label).ok_or("No identity bound to this workspace")?
     };
 
-    let (signing_key, sender_display_name, identity_pubkey, relay_key, sender_device_key_hex) = {
+    let (signing_key, sender_display_name, identity_pubkey) = {
         let m = state.unlocked_identities.lock().map_err(|e| e.to_string())?;
         let id = m.get(&identity_uuid).ok_or("Identity not unlocked")?;
         let pubkey_b64 = BASE64.encode(id.verifying_key.as_bytes()); // FolderChannel uses Base64
-        let pubkey_hex = hex::encode(id.verifying_key.to_bytes());   // RelayChannel uses hex
-        let rk = id.relay_key();
-        (id.signing_key.clone(), id.display_name.clone(), pubkey_b64, rk, pubkey_hex)
+        (id.signing_key.clone(), id.display_name.clone(), pubkey_b64)
     };
 
     let workspace_name = {
@@ -98,10 +96,15 @@ pub async fn poll_sync(
 
     let device_id = get_device_id().map_err(|e| e.to_string())?;
 
-    // Load relay credentials and workspace_id while we can still briefly lock.
-    let relay_dir = crate::settings::config_dir().join("relay");
-    let relay_creds = load_relay_credentials(&relay_dir, &identity_uuid.to_string(), &relay_key)
-        .map_err(|e| e.to_string())?;
+    // Load all relay accounts from RelayAccountManager (clone before spawn_blocking)
+    let relay_accounts: Vec<RelayAccount> = {
+        let ram = state.relay_account_managers.lock().map_err(|e| e.to_string())?;
+        if let Some(mgr) = ram.get(&identity_uuid) {
+            mgr.list_relay_accounts().unwrap_or_default()
+        } else {
+            vec![]
+        }
+    };
 
     let workspace_id_str = {
         let workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
@@ -111,6 +114,54 @@ pub async fn poll_sync(
             .workspace_id()
             .to_string()
     };
+
+    // Migrate old-format channel_params for relay peers.
+    // Old format: {"relay_url": "..."} → New format: {"relay_account_id": "<uuid>"}
+    {
+        let workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
+        if let Some(ws) = workspaces.get(&workspace_label) {
+            if let Ok(relay_peers) = ws.list_peers_with_channel("relay") {
+                for peer in relay_peers {
+                    // Skip already-migrated peers
+                    if peer.channel_params.contains("relay_account_id") {
+                        continue;
+                    }
+                    // Try to parse old format with relay_url
+                    if let Ok(params) = serde_json::from_str::<serde_json::Value>(&peer.channel_params) {
+                        if let Some(url) = params.get("relay_url").and_then(|v| v.as_str()) {
+                            // Look up matching relay account by URL
+                            let matched = relay_accounts.iter().find(|a| a.relay_url == url);
+                            match matched {
+                                Some(acct) => {
+                                    let new_params = serde_json::json!({
+                                        "relay_account_id": acct.relay_account_id.to_string()
+                                    });
+                                    if let Err(e) = ws.update_peer_channel(
+                                        &peer.peer_device_id,
+                                        "relay",
+                                        &new_params.to_string(),
+                                    ) {
+                                        log::warn!("Failed to migrate channel_params for peer {}: {e}", peer.peer_device_id);
+                                    } else {
+                                        log::info!("Migrated channel_params for peer {} to relay_account_id {}", peer.peer_device_id, acct.relay_account_id);
+                                    }
+                                }
+                                None => {
+                                    // No matching relay account — set to manual
+                                    log::warn!("No relay account found for URL {url}, setting peer {} to manual", peer.peer_device_id);
+                                    let _ = ws.update_peer_channel(
+                                        &peer.peer_device_id,
+                                        "manual",
+                                        "{}",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Clone Arcs so the spawn_blocking closure can own them (guards are NOT held).
     // RelayChannel holds a reqwest::blocking::Client which owns an internal Tokio
@@ -124,13 +175,21 @@ pub async fn poll_sync(
         let mut engine = SyncEngine::new();
         engine.register_channel(Box::new(FolderChannel::new(identity_pubkey, device_id)));
 
-        if let Some(creds) = relay_creds {
-            let relay_client = RelayClient::new(&creds.relay_url)
-                .with_session_token(&creds.session_token);
+        for acct in &relay_accounts {
+            let mut token = acct.session_token.clone();
+            // Auto-login if session expired and password stored
+            if acct.session_expires_at < chrono::Utc::now() && !acct.password.is_empty() {
+                let client = RelayClient::new(&acct.relay_url);
+                if let Ok(session) = client.login(&acct.email, &acct.password, &acct.device_public_key) {
+                    token = session.session_token;
+                }
+            }
+            let relay_client = RelayClient::new(&acct.relay_url)
+                .with_session_token(&token);
             engine.register_channel(Box::new(RelayChannel::new(
                 relay_client,
-                workspace_id_str,
-                sender_device_key_hex,
+                workspace_id_str.clone(),
+                acct.device_public_key.clone(),
             )));
         }
 
