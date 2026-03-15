@@ -260,11 +260,6 @@ export interface SyncEvent {
   mode?: string;
 }
 
-export interface RelayInfo {
-  relayUrl: string;
-  email: string;
-}
-
 export interface RelayAccountInfo {
   relayAccountId: string;
   relayUrl: string;
