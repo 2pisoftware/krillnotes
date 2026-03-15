@@ -361,8 +361,10 @@ fn folder_channel_delta_roundtrip() {
     assert_eq!(files_in_dir.len(), 1, "exactly one .swarm file should exist");
 
     // ── Step 5: Bob's FolderChannel picks up the bundle ────────────────────
+    // Bob must use the same identity_id that Alice used as peer_identity_id
+    // so that the inbox-prefix filter matches the filename Alice wrote.
     let bob_folder_ch = FolderChannel::new(
-        "bob-identity-uuid".to_string(),
+        bob_pubkey_b64.clone(),
         "bob-device-uuid".to_string(),
     );
     let received = bob_folder_ch
