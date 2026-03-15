@@ -208,13 +208,13 @@ impl Workspace {
         for script in scripts.iter().filter(|s| s.enabled && s.category == "presentation") {
             script_registry.set_loading_category(Some("presentation".to_string()));
             if let Err(e) = script_registry.load_script(&script.source_code, &script.name) {
-                eprintln!("Failed to load starter script '{}': {}", script.name, e);
+                log::warn!("Failed to load starter script '{}': {}", script.name, e);
             }
         }
         for script in scripts.iter().filter(|s| s.enabled && s.category == "schema") {
             script_registry.set_loading_category(Some("schema".to_string()));
             if let Err(e) = script_registry.load_script(&script.source_code, &script.name) {
-                eprintln!("Failed to load starter script '{}': {}", script.name, e);
+                log::warn!("Failed to load starter script '{}': {}", script.name, e);
             }
         }
         script_registry.resolve_bindings();
@@ -418,13 +418,13 @@ impl Workspace {
         for script in scripts.iter().filter(|s| s.enabled && s.category == "presentation") {
             script_registry.set_loading_category(Some("presentation".to_string()));
             if let Err(e) = script_registry.load_script(&script.source_code, &script.name) {
-                eprintln!("Failed to load starter script '{}': {}", script.name, e);
+                log::warn!("Failed to load starter script '{}': {}", script.name, e);
             }
         }
         for script in scripts.iter().filter(|s| s.enabled && s.category == "schema") {
             script_registry.set_loading_category(Some("schema".to_string()));
             if let Err(e) = script_registry.load_script(&script.source_code, &script.name) {
-                eprintln!("Failed to load starter script '{}': {}", script.name, e);
+                log::warn!("Failed to load starter script '{}': {}", script.name, e);
             }
         }
         script_registry.resolve_bindings();
@@ -912,13 +912,13 @@ impl Workspace {
         for script in scripts.iter().filter(|s| s.enabled && s.category == "presentation") {
             ws.script_registry.set_loading_category(Some("presentation".to_string()));
             if let Err(e) = ws.script_registry.load_script(&script.source_code, &script.name) {
-                eprintln!("Failed to load script '{}': {}", script.name, e);
+                log::warn!("Failed to load script '{}': {}", script.name, e);
             }
         }
         for script in scripts.iter().filter(|s| s.enabled && s.category == "schema") {
             ws.script_registry.set_loading_category(Some("schema".to_string()));
             if let Err(e) = ws.script_registry.load_script(&script.source_code, &script.name) {
-                eprintln!("Failed to load script '{}': {}", script.name, e);
+                log::warn!("Failed to load script '{}': {}", script.name, e);
             }
         }
         ws.script_registry.resolve_bindings();

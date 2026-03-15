@@ -32,7 +32,7 @@ pub fn attach_file(
     let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {e}"))?;
     workspace
         .attach_file(&note_id, &filename, mime_type.as_deref(), &data)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("attach_file failed: {e}"); e.to_string() })
 }
 
 /// Attaches a file to a note from raw bytes (used for drag-and-drop, where only
@@ -83,7 +83,7 @@ pub fn attach_file_bytes(
         .map(|m| m.to_string());
     workspace
         .attach_file(&note_id, &filename, mime_type.as_deref(), data)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("attach_file_bytes failed: {e}"); e.to_string() })
 }
 
 /// Returns attachment metadata for all attachments on a note.
@@ -96,7 +96,7 @@ pub fn get_attachments(
     let label = window.label();
     let workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let workspace = workspaces.get(label).ok_or("No workspace open")?;
-    workspace.get_attachments(&note_id).map_err(|e| e.to_string())
+    workspace.get_attachments(&note_id).map_err(|e| { log::error!("get_attachments failed: {e}"); e.to_string() })
 }
 
 /// Returns the decrypted base64-encoded bytes of an attachment together with its MIME type.
@@ -118,7 +118,7 @@ pub fn get_attachment_data(
     let workspace = workspaces.get(label).ok_or("No workspace open")?;
     let (bytes, mime_type) = workspace
         .get_attachment_bytes_and_mime(&attachment_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::error!("get_attachment_data failed: {e}"); e.to_string() })?;
     Ok(AttachmentDataResponse {
         data: base64::engine::general_purpose::STANDARD.encode(&bytes),
         mime_type,
@@ -137,7 +137,7 @@ pub fn delete_attachment(
     let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
     workspace
         .delete_attachment(&attachment_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("delete_attachment failed: {e}"); e.to_string() })
 }
 
 /// Restores a previously soft-deleted attachment (moves `.enc.trash` → `.enc`, re-inserts DB row).
@@ -153,7 +153,7 @@ pub fn restore_attachment(
     let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
     workspace
         .restore_attachment(&meta)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("restore_attachment failed: {e}"); e.to_string() })
 }
 
 /// Decrypts an attachment to a temp file and opens it with the default system application.

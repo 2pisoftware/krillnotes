@@ -32,7 +32,7 @@ pub fn themes_dir() -> PathBuf {
     };
     let dir = base.join("themes");
     if let Err(e) = fs::create_dir_all(&dir) {
-        eprintln!("krillnotes: failed to create themes directory {:?}: {e}", dir);
+        log::warn!("Failed to create themes directory {:?}: {e}", dir);
     }
     dir
 }

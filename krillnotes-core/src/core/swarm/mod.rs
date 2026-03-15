@@ -56,6 +56,7 @@ mod integration_tests {
             contact_public_key: None,
             inviter_key: &alice_key,
             owner_pubkey: "owner-pk-alice".to_string(),
+            reply_channels: vec![],
         }).unwrap();
 
         // === Step 2: Bob reads invite ===
@@ -73,6 +74,7 @@ mod integration_tests {
             pairing_token: pairing_token.clone(),
             acceptor_key: &bob_key,
             owner_pubkey: parsed_invite.owner_pubkey.clone(),
+            channel_preference: ChannelPreference::default(),
         }).unwrap();
 
         // === Step 4: Alice processes accept ===
@@ -120,6 +122,7 @@ mod integration_tests {
             recipient_peer_ids: vec!["dev-bob".to_string()],
             recipient_identity_id: "pk-bob".to_string(),
             owner_pubkey: "owner-pk-alice".to_string(),
+            ack_operation_id: None,
         }).unwrap();
 
         // === Step 8: Bob applies delta ===

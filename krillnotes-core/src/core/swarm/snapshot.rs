@@ -98,6 +98,7 @@ pub fn create_snapshot_bundle(params: SnapshotParams<'_>) -> Result<Vec<u8>> {
         as_of_operation_id: Some(params.as_of_operation_id),
         since_operation_id: None,
         target_peer: None,
+        ack_operation_id: None,
         recipients: Some(entries),
         has_attachments,
         owner_pubkey: Some(params.owner_pubkey.clone()),

@@ -7,15 +7,19 @@
 //! Snapshot sync, delta operations, and peer registry management.
 
 use super::*;
+use crate::core::peer_registry::SyncPeer;
+use crate::core::sync::channel::{ChannelType, PeerSyncInfo};
 
 impl Workspace {
     // ── Snapshot (peer sync) ───────────────────────────────────────
 
     /// Serialise all notes, user scripts, and attachment metadata to JSON bytes for a snapshot bundle.
     pub fn to_snapshot_json(&self) -> Result<Vec<u8>> {
+        log::info!(target: "krillnotes::sync", "generating snapshot JSON");
         let notes = self.list_all_notes()?;
         let user_scripts = self.list_user_scripts()?;
         let attachments = self.list_all_attachments()?;
+        log::debug!(target: "krillnotes::sync", "snapshot: {} notes, {} scripts, {} attachments", notes.len(), user_scripts.len(), attachments.len());
         let snapshot = WorkspaceSnapshot {
             version: 1,
             notes,
@@ -127,8 +131,10 @@ impl Workspace {
     pub fn apply_incoming_operation(&mut self, op: Operation) -> Result<bool> {
         // 1. Skip local-only retracts — they must never cross device boundaries.
         if matches!(op, Operation::RetractOperation { propagate: false, .. }) {
+            log::debug!(target: "krillnotes::sync", "skipping local-only retract operation {}", op.operation_id());
             return Ok(false);
         }
+        log::debug!(target: "krillnotes::sync", "applying incoming operation {} ({})", op.operation_id(), Self::operation_type_str(&op));
 
         // 2. Advance the local HLC by observing the incoming timestamp.
         self.hlc.observe(op.timestamp());
@@ -162,6 +168,7 @@ impl Workspace {
 
         // 4. Duplicate — already applied.
         if rows == 0 {
+            log::debug!(target: "krillnotes::sync", "duplicate operation {}, skipping", op.operation_id());
             return Ok(false);
         }
 
@@ -300,9 +307,11 @@ impl Workspace {
 
         // Re-register scripts with the Rhai engine after applying script ops.
         if scripts_changed {
+            log::info!(target: "krillnotes::sync", "scripts changed, reloading Rhai engine");
             self.reload_scripts()?;
         }
 
+        log::debug!(target: "krillnotes::sync", "operation {} applied successfully", op.operation_id());
         Ok(true)
     }
 
@@ -331,10 +340,12 @@ impl Workspace {
     /// Notes and user scripts are inserted. Returns the number of notes imported.
     /// Designed for freshly created workspaces — duplicates will be skipped via INSERT OR IGNORE.
     pub fn import_snapshot_json(&mut self, data: &[u8]) -> Result<usize> {
+        log::info!(target: "krillnotes::sync", "importing snapshot ({} bytes)", data.len());
         let snapshot: WorkspaceSnapshot = serde_json::from_slice(data)
             .map_err(|e| KrillnotesError::Json(e))?;
 
         let note_count = snapshot.notes.len();
+        log::debug!(target: "krillnotes::sync", "snapshot contains {} notes, {} scripts", note_count, snapshot.user_scripts.len());
 
         // Bulk-insert notes preserving original IDs.
         // Defer foreign-key checks so children can be inserted before parents.
@@ -396,9 +407,11 @@ impl Workspace {
             tx.commit()?;
 
             // Re-register imported scripts with the Rhai engine.
+            log::info!(target: "krillnotes::sync", "reloading scripts after snapshot import");
             self.reload_scripts()?;
         }
 
+        log::info!(target: "krillnotes::sync", "snapshot import complete: {} notes", note_count);
         Ok(note_count)
     }
 
@@ -447,6 +460,11 @@ impl Workspace {
                     contact_id: contact.map(|c| c.contact_id.to_string()),
                     last_sync: peer.last_sync,
                     is_owner: peer.peer_identity_id == self.owner_pubkey,
+                    channel_type: peer.channel_type,
+                    channel_params: peer.channel_params,
+                    sync_status: peer.sync_status,
+                    sync_status_detail: peer.sync_status_detail,
+                    last_sync_error: peer.last_sync_error,
                 }
             })
             .collect();
@@ -516,6 +534,127 @@ impl Workspace {
         let conn = self.storage.connection();
         let registry = PeerRegistry::new(conn);
         registry.upsert_sync_peer(device_id, identity_id, last_sent_op, last_received_op)
+    }
+
+    /// Update a peer's channel configuration.
+    pub fn update_peer_channel(
+        &self,
+        peer_device_id: &str,
+        channel_type: &str,
+        channel_params: &str,
+    ) -> Result<()> {
+        PeerRegistry::new(self.storage.connection())
+            .update_channel_config(peer_device_id, channel_type, channel_params)
+    }
+
+    /// Update a peer's sync status.
+    pub fn update_peer_sync_status(
+        &self,
+        peer_device_id: &str,
+        sync_status: &str,
+        detail: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        PeerRegistry::new(self.storage.connection())
+            .update_sync_status(peer_device_id, sync_status, detail, error)
+    }
+
+    /// List peers filtered by channel type.
+    pub fn list_peers_with_channel(&self, channel_type: &str) -> Result<Vec<SyncPeer>> {
+        PeerRegistry::new(self.storage.connection())
+            .list_peers_by_channel(channel_type)
+    }
+
+    /// Reset `last_sent_op` for a peer to a specific op ID, or `None` to trigger full resend.
+    pub fn reset_peer_watermark(&self, peer_device_id: &str, to_op: Option<&str>) -> Result<()> {
+        PeerRegistry::new(self.storage.connection())
+            .reset_last_sent(peer_device_id, to_op)
+    }
+
+    /// Returns true if `op_a` is strictly before `op_b` in HLC order.
+    /// Returns false if either operation is not found in the log.
+    pub fn is_operation_before(&self, op_a: &str, op_b: &str) -> Result<bool> {
+        let conn = self.storage.connection();
+        let get_hlc = |op_id: &str| -> Result<Option<(i64, i64, i64)>> {
+            conn.query_row(
+                "SELECT timestamp_wall_ms, timestamp_counter, timestamp_node_id \
+                 FROM operations WHERE operation_id = ?1",
+                [op_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            ).optional().map_err(KrillnotesError::Database)
+        };
+        let Some(hlc_a) = get_hlc(op_a)? else { return Ok(false) };
+        let Some(hlc_b) = get_hlc(op_b)? else { return Ok(false) };
+        Ok(hlc_a < hlc_b)
+    }
+
+    /// Returns true if the given operation_id exists in the operations log.
+    pub fn operation_exists(&self, operation_id: &str) -> Result<bool> {
+        let conn = self.storage.connection();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| row.get(0),
+        ).map_err(KrillnotesError::Database)?;
+        Ok(count > 0)
+    }
+
+    /// Returns true if there are operations to send to at least one non-manual peer.
+    ///
+    /// Returns true if:
+    /// - A peer has no watermark at all (needs a snapshot), OR
+    /// - A peer's watermark is set but newer ops exist after it (needs a delta).
+    pub fn has_pending_ops_for_any_peer(&self) -> Result<bool> {
+        let peers = self.get_active_sync_peers()?;
+        let conn = self.storage.connection();
+        for peer in &peers {
+            if peer.last_sent_op.is_none() {
+                // Peer hasn't received a snapshot yet — work is needed.
+                return Ok(true);
+            }
+            if let Some(ref op_id) = peer.last_sent_op {
+                // Check if any ops exist after the watermark using HLC comparison.
+                let hlc = conn.query_row(
+                    "SELECT timestamp_wall_ms, timestamp_counter, timestamp_node_id \
+                     FROM operations WHERE operation_id = ?1",
+                    [op_id.as_str()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                ).optional().map_err(KrillnotesError::Database)?;
+                if let Some((wall_ms, counter, node_id)) = hlc {
+                    let count: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM operations WHERE \
+                         (timestamp_wall_ms > ?1 \
+                          OR (timestamp_wall_ms = ?1 AND timestamp_counter > ?2) \
+                          OR (timestamp_wall_ms = ?1 AND timestamp_counter = ?2 AND timestamp_node_id > ?3))",
+                        rusqlite::params![wall_ms, counter, node_id],
+                        |row| row.get(0),
+                    ).unwrap_or(0);
+                    if count > 0 {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Get `PeerSyncInfo` for all non-manual peers (used by the SyncEngine).
+    pub fn get_active_sync_peers(&self) -> Result<Vec<PeerSyncInfo>> {
+        let peers = PeerRegistry::new(self.storage.connection())
+            .list_peers_by_channel_not("manual")?;
+        Ok(peers.into_iter().map(|p| PeerSyncInfo {
+            peer_device_id: p.peer_device_id,
+            peer_identity_id: p.peer_identity_id,
+            channel_type: match p.channel_type.as_str() {
+                "relay" => ChannelType::Relay,
+                "folder" => ChannelType::Folder,
+                _ => ChannelType::Manual,
+            },
+            channel_params: serde_json::from_str(&p.channel_params)
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+            last_sent_op: p.last_sent_op,
+            last_received_op: p.last_received_op,
+        }).collect())
     }
 
 }

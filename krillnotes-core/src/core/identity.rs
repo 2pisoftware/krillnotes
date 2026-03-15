@@ -143,6 +143,16 @@ impl UnlockedIdentity {
             .expect("HKDF expand failed — output length is valid");
         okm
     }
+
+    /// Derives a 32-byte encryption key for this identity's relay credentials.
+    /// Uses HKDF-SHA256 with the Ed25519 seed as IKM.
+    pub fn relay_key(&self) -> [u8; 32] {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, self.signing_key.as_bytes());
+        let mut okm = [0u8; 32];
+        hk.expand(b"krillnotes-relay-v1", &mut okm)
+            .expect("HKDF expand failed — output length is valid");
+        okm
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +226,7 @@ impl IdentityManager {
             let workspace_dir = match workspace_dir {
                 Some(d) if d.is_dir() => d,
                 _ => {
-                    eprintln!("[migration] Workspace folder missing for {ws_uuid}, dropping binding");
+                    log::warn!("Workspace folder missing for {ws_uuid}, dropping binding");
                     continue;
                 }
             };
@@ -230,10 +240,10 @@ impl IdentityManager {
             match serde_json::to_string_pretty(&binding) {
                 Ok(json) => {
                     if let Err(e) = std::fs::write(&binding_path, json) {
-                        eprintln!("[migration] Cannot write binding.json to {binding_path:?}: {e}");
+                        log::warn!("Cannot write binding.json to {binding_path:?}: {e}");
                     }
                 }
-                Err(e) => eprintln!("[migration] Cannot serialise binding for {ws_uuid}: {e}"),
+                Err(e) => log::warn!("Cannot serialise binding for {ws_uuid}: {e}"),
             }
         }
 
@@ -291,11 +301,11 @@ impl IdentityManager {
             }
 
             if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-                eprintln!("[migration] Cannot create {dest_dir:?}: {e}");
+                log::warn!("Cannot create {dest_dir:?}: {e}");
                 continue;
             }
             if let Err(e) = std::fs::rename(&src_path, &dest_path) {
-                eprintln!("[migration] Cannot move {src_path:?}: {e}");
+                log::warn!("Cannot move {src_path:?}: {e}");
                 continue;
             }
 

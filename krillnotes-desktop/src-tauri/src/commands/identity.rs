@@ -33,7 +33,7 @@ pub fn list_identities(
     state: State<'_, AppState>,
 ) -> std::result::Result<Vec<crate::IdentityRef>, String> {
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    mgr.list_identities().map_err(|e| e.to_string())
+    mgr.list_identities().map_err(|e| { log::error!("list_identities failed: {e}"); e.to_string() })
 }
 
 /// Resolves a public key to a display name.
@@ -75,7 +75,7 @@ pub fn create_identity(
 ) -> std::result::Result<crate::IdentityRef, String> {
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
     let file = mgr.create_identity(&display_name, &passphrase)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::error!("create_identity failed: {e}"); e.to_string() })?;
     let uuid = file.identity_uuid;
 
     // Auto-unlock after creation
@@ -96,7 +96,7 @@ pub fn create_identity(
         }
         Err(e) => {
             // Non-fatal: log but don't fail creation
-            eprintln!("Warning: failed to initialize contact manager for {uuid}: {e}");
+            log::warn!("Failed to initialize contact manager for {uuid}: {e}");
         }
     }
     let invites_dir = crate::settings::config_dir()
@@ -105,7 +105,7 @@ pub fn create_identity(
         .join("invites");
     match krillnotes_core::core::invite::InviteManager::new(invites_dir) {
         Ok(im) => { state.invite_managers.lock().expect("Mutex poisoned").insert(uuid, im); }
-        Err(e) => { eprintln!("Warning: failed to initialize invite manager for {uuid}: {e}"); }
+        Err(e) => { log::warn!("Failed to initialize invite manager for {uuid}: {e}"); }
     }
 
     // Return the IdentityRef
@@ -127,7 +127,10 @@ pub fn unlock_identity(
     let unlocked = mgr.unlock_identity(&uuid, &passphrase)
         .map_err(|e| match e {
             crate::KrillnotesError::IdentityWrongPassphrase => "WRONG_PASSPHRASE".to_string(),
-            other => other.to_string(),
+            other => {
+                log::error!("unlock_identity(identity={identity_uuid}) failed: {other}");
+                other.to_string()
+            }
         })?;
     drop(mgr);
     // Derive contacts key before consuming `unlocked` via insert
@@ -145,7 +148,7 @@ pub fn unlock_identity(
         }
         Err(e) => {
             // Non-fatal: log but don't fail unlock
-            eprintln!("Warning: failed to initialize contact manager for {uuid}: {e}");
+            log::warn!("Failed to initialize contact manager for {uuid}: {e}");
         }
     }
     let invites_dir = crate::settings::config_dir()
@@ -154,7 +157,7 @@ pub fn unlock_identity(
         .join("invites");
     match krillnotes_core::core::invite::InviteManager::new(invites_dir) {
         Ok(im) => { state.invite_managers.lock().expect("Mutex poisoned").insert(uuid, im); }
-        Err(e) => { eprintln!("Warning: failed to initialize invite manager for {uuid}: {e}"); }
+        Err(e) => { log::warn!("Failed to initialize invite manager for {uuid}: {e}"); }
     }
     Ok(())
 }
@@ -218,7 +221,7 @@ pub fn delete_identity(
 
     let workspace_base_dir = PathBuf::from(&crate::settings::load_settings().workspace_directory);
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    mgr.delete_identity(&uuid, &workspace_base_dir).map_err(|e| e.to_string())
+    mgr.delete_identity(&uuid, &workspace_base_dir).map_err(|e| { log::error!("delete_identity(identity={identity_uuid}) failed: {e}"); e.to_string() })
 }
 
 /// Renames an identity.
@@ -237,7 +240,7 @@ pub fn rename_identity(
     }
 
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    mgr.rename_identity(&uuid, &new_name).map_err(|e| e.to_string())
+    mgr.rename_identity(&uuid, &new_name).map_err(|e| { log::error!("rename_identity(identity={identity_uuid}) failed: {e}"); e.to_string() })
 }
 
 /// Changes an identity's passphrase.
@@ -260,7 +263,10 @@ pub fn change_identity_passphrase(
     mgr.change_passphrase(&uuid, &old_passphrase, &new_passphrase)
         .map_err(|e| match e {
             crate::KrillnotesError::IdentityWrongPassphrase => "WRONG_PASSPHRASE".to_string(),
-            other => other.to_string(),
+            other => {
+                log::error!("change_identity_passphrase(identity={identity_uuid}) failed: {other}");
+                other.to_string()
+            }
         })
 }
 
@@ -371,7 +377,10 @@ pub fn import_swarmid_cmd(
     mgr.import_swarmid(file).map_err(|e| {
         match e {
             crate::KrillnotesError::IdentityAlreadyExists(uuid) => format!("IDENTITY_EXISTS:{uuid}"),
-            other => other.to_string(),
+            other => {
+                log::error!("import_swarmid failed: {other}");
+                other.to_string()
+            }
         }
     })
 }
@@ -386,5 +395,5 @@ pub fn import_swarmid_overwrite_cmd(
     let file: crate::SwarmIdFile = serde_json::from_str(&data)
         .map_err(|e| format!("Invalid .swarmid file: {e}"))?;
     let mgr = state.identity_manager.lock().expect("Mutex poisoned");
-    mgr.import_swarmid_overwrite(file).map_err(|e| e.to_string())
+    mgr.import_swarmid_overwrite(file).map_err(|e| { log::error!("import_swarmid_overwrite failed: {e}"); e.to_string() })
 }

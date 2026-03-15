@@ -25,6 +25,18 @@ use crate::core::swarm::delta::{create_delta_bundle, parse_delta_bundle, DeltaPa
 use crate::core::workspace::Workspace;
 use crate::{KrillnotesError, Result};
 
+/// Result of generating a delta bundle.
+/// Bundles the encoded bytes with metadata needed by the poll loop.
+#[derive(Debug)]
+pub struct DeltaBundle {
+    pub bundle_bytes: Vec<u8>,
+    /// The operation ID of the last op included, if any.
+    /// The poll loop advances the watermark only after confirmed delivery.
+    pub last_included_op: Option<String>,
+    /// Number of operations included.
+    pub op_count: usize,
+}
+
 /// Result of applying a received delta bundle.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,12 +51,14 @@ pub struct ApplyResult {
 
 /// Generate a delta `.swarm` bundle for a specific peer.
 ///
-/// Queries all operations since `last_sent_op` for `peer_device_id`, encrypts them
-/// for the peer's public key, and updates the `last_sent_op` watermark.
+/// Queries all operations since `last_sent_op` for `peer_device_id` and encrypts
+/// them for the peer's public key. The poll loop advances the watermark after delivery.
 ///
 /// # Errors
 /// - `KrillnotesError::Swarm("peer not found")` if the peer is not registered.
-/// - `KrillnotesError::Swarm("snapshot must precede delta")` if `last_sent_op` is `None`.
+///
+/// When `last_sent_op` is `None` (e.g. after a force-resync reset), all operations
+/// are included in the delta so the peer can catch up from scratch.
 pub fn generate_delta(
     workspace: &mut Workspace,
     peer_device_id: &str,
@@ -52,7 +66,7 @@ pub fn generate_delta(
     signing_key: &SigningKey,
     sender_display_name: &str,
     contact_manager: &ContactManager,
-) -> Result<Vec<u8>> {
+) -> Result<DeltaBundle> {
     // 1. Look up peer.
     let peer = workspace
         .get_sync_peer(peer_device_id)?
@@ -60,15 +74,9 @@ pub fn generate_delta(
             KrillnotesError::Swarm(format!("peer {peer_device_id} not found in registry"))
         })?;
 
-    // 2. Require snapshot baseline.
-    let last_sent_op = peer.last_sent_op.as_deref().ok_or_else(|| {
-        KrillnotesError::Swarm(
-            "snapshot must precede delta — no last_sent_op for this peer".to_string(),
-        )
-    })?;
-
-    // 3. Collect operations since watermark, excluding this peer's own ops.
-    let ops = workspace.operations_since(Some(last_sent_op), &peer.peer_device_id)?;
+    // 2. Collect operations since watermark, excluding this peer's own ops.
+    //    When last_sent_op is None (force-resync), operations_since(None) returns all ops.
+    let ops = workspace.operations_since(peer.last_sent_op.as_deref(), &peer.peer_device_id)?;
 
     // 4. Resolve peer's public key from contacts.
     let contact = contact_manager
@@ -93,31 +101,30 @@ pub fn generate_delta(
     // so that multiple identities on the same machine have distinct source IDs.
     let source_device_id = workspace.device_id().to_string();
 
-    let bundle = create_delta_bundle(DeltaParams {
+    let op_count = ops.len();
+    let last_included_op = ops.last().map(|op| op.operation_id().to_string());
+
+    let bundle_bytes = create_delta_bundle(DeltaParams {
         workspace_id: workspace.workspace_id().to_string(),
         workspace_name: workspace_name.to_string(),
         source_device_id,
         source_display_name: sender_display_name.to_string(),
-        since_operation_id: last_sent_op.to_string(),
-        operations: ops.clone(),
+        since_operation_id: peer.last_sent_op.clone().unwrap_or_default(),
+        operations: ops,
         sender_key: signing_key,
         recipient_keys: vec![&recipient_vk],
         recipient_peer_ids: vec![peer_device_id.to_string()],
         recipient_identity_id: peer.peer_identity_id.clone(),
         owner_pubkey: workspace.owner_pubkey().to_string(),
+        // ACK: tell the peer the last operation we received FROM them.
+        // They can compare it with their last_sent_op to detect missed deltas.
+        ack_operation_id: peer.last_received_op.clone(),
     })?;
 
-    // 6. Update watermark only if we sent at least one operation.
-    if let Some(last_op) = ops.last() {
-        workspace.upsert_sync_peer(
-            peer_device_id,
-            &peer.peer_identity_id,
-            Some(last_op.operation_id()),
-            None,
-        )?;
-    }
+    // NOTE: watermark is NOT advanced here.
+    // The poll loop advances it only after confirmed delivery (SendResult::Delivered).
 
-    Ok(bundle)
+    Ok(DeltaBundle { bundle_bytes, last_included_op, op_count })
 }
 
 /// Apply a received delta `.swarm` bundle to the local workspace.
@@ -199,6 +206,42 @@ pub fn apply_delta(
         last_received,
     )?;
 
+    // 5. Process inbound ACK: if the sender tells us the last op they received FROM us,
+    //    and that's behind our last_sent_op for them, reset our watermark so we resend.
+    let sender_device_id = &parsed.sender_device_id;
+    if let Some(ref ack_op_id) = parsed.ack_operation_id {
+        if let Some(peer) = workspace.get_sync_peer(sender_device_id)? {
+            if let Some(ref our_last_sent) = peer.last_sent_op {
+                if workspace.is_operation_before(ack_op_id, our_last_sent)? {
+                    log::warn!(target: "krillnotes::sync",
+                        "peer {} ACK ({}) is behind our last_sent ({}), resetting watermark",
+                        sender_device_id, ack_op_id, our_last_sent
+                    );
+                    workspace.reset_peer_watermark(sender_device_id, Some(ack_op_id))?;
+                } else if !workspace.operation_exists(ack_op_id)? {
+                    // ACK references an operation we don't have (purged?) — force full resend.
+                    log::warn!(target: "krillnotes::sync",
+                        "peer {} ACK ({}) references unknown operation, resetting watermark",
+                        sender_device_id, ack_op_id
+                    );
+                    workspace.reset_peer_watermark(sender_device_id, None)?;
+                }
+            }
+        }
+    } else {
+        // Peer sent no ACK — they have never received anything from us.
+        // If our watermark says we've sent something, reset it for a full resend.
+        if let Some(peer) = workspace.get_sync_peer(sender_device_id)? {
+            if peer.last_sent_op.is_some() {
+                log::warn!(target: "krillnotes::sync",
+                    "peer {} sent no ACK but we have a watermark — resetting to force full delta",
+                    sender_device_id
+                );
+                workspace.reset_peer_watermark(sender_device_id, None)?;
+            }
+        }
+    }
+
     Ok(ApplyResult {
         operations_applied: applied,
         operations_skipped: skipped,
@@ -274,13 +317,13 @@ mod tests {
 
         // Parse and verify with Bob's key.
         let parsed =
-            crate::core::swarm::delta::parse_delta_bundle(&bundle, &bob_key).unwrap();
+            crate::core::swarm::delta::parse_delta_bundle(&bundle.bundle_bytes, &bob_key).unwrap();
         assert_eq!(parsed.workspace_id, alice_ws.workspace_id());
     }
 
-    /// generate_delta must fail when last_sent_op is None (no snapshot baseline).
+    /// generate_delta with last_sent_op = None includes ALL ops (force-resync path).
     #[test]
-    fn test_generate_delta_no_snapshot_errors() {
+    fn test_generate_delta_no_watermark_includes_all_ops() {
         let alice_key = make_key();
         let bob_key = make_key();
         let bob_pubkey_b64 = b64(&bob_key);
@@ -293,6 +336,11 @@ mod tests {
             SigningKey::from_bytes(&alice_key.to_bytes()),
         )
         .unwrap();
+
+        // Create some ops BEFORE registering the peer with no watermark.
+        ws.create_note_root("TextNote").unwrap();
+        ws.create_note_root("TextNote").unwrap();
+
         // Register peer WITHOUT a snapshot watermark (last_sent_op = None).
         ws.upsert_sync_peer("dev-bob", &bob_pubkey_b64, None, None)
             .unwrap();
@@ -301,7 +349,6 @@ mod tests {
         let cm =
             crate::core::contact::ContactManager::for_identity(cm_dir.path().to_path_buf(), [2u8; 32])
                 .unwrap();
-        // Also register Bob as a contact so we don't fail on that lookup first.
         cm.find_or_create_by_public_key(
             "Bob",
             &bob_pubkey_b64,
@@ -309,13 +356,16 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            super::generate_delta(&mut ws, "dev-bob", "TestWorkspace", &alice_key, "Alice", &cm);
-        assert!(result.is_err(), "must error when last_sent_op is None");
-        let err = result.unwrap_err().to_string();
+        let bundle =
+            super::generate_delta(&mut ws, "dev-bob", "TestWorkspace", &alice_key, "Alice", &cm)
+                .expect("generate_delta should succeed when last_sent_op is None");
+
+        // All ops (excluding dev-bob's own device_id, but alice owns all ops here)
+        // should be included.
         assert!(
-            err.contains("snapshot must precede delta"),
-            "unexpected error: {err}"
+            bundle.op_count >= 2,
+            "all ops should be included when watermark is None, got op_count={}",
+            bundle.op_count
         );
     }
 
@@ -386,7 +436,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = super::apply_delta(&bundle, &mut bob_ws, &bob_key, &mut bob_cm).unwrap();
+        let result = super::apply_delta(&bundle.bundle_bytes, &mut bob_ws, &bob_key, &mut bob_cm).unwrap();
 
         assert_eq!(
             result.operations_applied + result.operations_skipped,
@@ -455,7 +505,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = super::apply_delta(&bundle, &mut bob_ws, &bob_key, &mut bob_cm);
+        let result = super::apply_delta(&bundle.bundle_bytes, &mut bob_ws, &bob_key, &mut bob_cm);
         assert!(result.is_err(), "workspace_id mismatch must be an error");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("workspace_id mismatch"), "unexpected error: {err}");
