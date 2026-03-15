@@ -8,14 +8,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import type { PeerInfo, WorkspaceInfo, PendingPeer, ContactInfo, SyncEvent } from '../types';
+import type { PeerInfo, WorkspaceInfo, PendingPeer, ContactInfo, SyncEvent, RelayAccountInfo } from '../types';
 import AddPeerFromContactsDialog from './AddPeerFromContactsDialog';
 import AddContactDialog from './AddContactDialog';
 import { InviteManagerDialog } from './InviteManagerDialog';
 import { AcceptPeerDialog } from './AcceptPeerDialog';
 import { PostAcceptDialog } from './PostAcceptDialog';
 import { SendSnapshotDialog } from './SendSnapshotDialog';
-import ConfigureRelayDialog from './ConfigureRelayDialog';
 
 interface Props {
   identityUuid: string;
@@ -69,7 +68,9 @@ export default function WorkspacePeersDialog({
   const [sendSnapshotFor, setSendSnapshotFor] = useState<string[]>([]);
   // Per-peer pending channel type selection (before "Configure" is clicked)
   const [pendingChannelType, setPendingChannelType] = useState<Record<string, string>>({});
-  const [showConfigureRelay, setShowConfigureRelay] = useState<PeerInfo | null>(null);
+  const [relayAccounts, setRelayAccounts] = useState<RelayAccountInfo[]>([]);
+  // Per-peer selected relay account ID (for the dropdown)
+  const [pendingRelayAccount, setPendingRelayAccount] = useState<Record<string, string>>({});
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [resyncingPeer, setResyncingPeer] = useState<string | null>(null);
@@ -89,7 +90,13 @@ export default function WorkspacePeersDialog({
 
   useEffect(() => {
     loadPeers();
-  }, [loadPeers]);
+    // Load relay accounts for the bound identity
+    if (identityUuid) {
+      invoke<RelayAccountInfo[]>('list_relay_accounts', { identityUuid })
+        .then(accounts => setRelayAccounts(accounts))
+        .catch(() => {});
+    }
+  }, [loadPeers, identityUuid]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -270,25 +277,66 @@ export default function WorkspacePeersDialog({
                         <option value="folder">Folder</option>
                         <option value="manual">Manual</option>
                       </select>
-                      <button
-                        onClick={() => {
-                          if (selectedChannelType === 'relay') {
-                            setShowConfigureRelay(peer);
-                          } else {
-                            handleUpdateChannel(peer, selectedChannelType);
+                      {selectedChannelType !== 'relay' && (
+                        <button
+                          onClick={() => handleUpdateChannel(peer, selectedChannelType)}
+                          disabled={
+                            selectedChannelType !== 'folder' &&
+                            selectedChannelType === peer.channelType &&
+                            !(peer.peerDeviceId in pendingChannelType)
                           }
-                        }}
-                        disabled={
-                          selectedChannelType !== 'relay' &&
-                          selectedChannelType !== 'folder' &&
-                          selectedChannelType === peer.channelType &&
-                          !(peer.peerDeviceId in pendingChannelType)
-                        }
-                        className="text-xs px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-secondary)] disabled:opacity-40"
-                      >
-                        {t('peers.configure', 'Configure')}
-                      </button>
+                          className="text-xs px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-secondary)] disabled:opacity-40"
+                        >
+                          {t('peers.configure', 'Configure')}
+                        </button>
+                      )}
                     </div>
+                    {selectedChannelType === 'relay' && (
+                      relayAccounts.length === 0 ? (
+                        <p className="text-xs text-[var(--color-muted-foreground)] italic mt-0.5">
+                          {t('workspacePeers.noRelayAccounts')}
+                        </p>
+                      ) : (
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <select
+                            value={pendingRelayAccount[peer.peerDeviceId] ?? ''}
+                            onChange={e => setPendingRelayAccount(prev => ({ ...prev, [peer.peerDeviceId]: e.target.value }))}
+                            className="text-xs px-1.5 py-0.5 rounded border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-foreground)] flex-1 min-w-0"
+                          >
+                            <option value="" disabled>{t('workspacePeers.selectRelay')}</option>
+                            {relayAccounts.map(acct => (
+                              <option key={acct.relayAccountId} value={acct.relayAccountId}>
+                                {acct.email} @ {acct.relayUrl}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={async () => {
+                              const accountId = pendingRelayAccount[peer.peerDeviceId];
+                              if (!accountId) return;
+                              try {
+                                await invoke('set_peer_relay', {
+                                  peerDeviceId: peer.peerDeviceId,
+                                  relayAccountId: accountId,
+                                });
+                                setPendingRelayAccount(prev => {
+                                  const next = { ...prev };
+                                  delete next[peer.peerDeviceId];
+                                  return next;
+                                });
+                                await loadPeers();
+                              } catch (e) {
+                                setError(String(e));
+                              }
+                            }}
+                            disabled={!pendingRelayAccount[peer.peerDeviceId]}
+                            className="text-xs px-2 py-0.5 rounded border border-[var(--color-border)] hover:bg-[var(--color-secondary)] disabled:opacity-40"
+                          >
+                            {t('peers.configure', 'Configure')}
+                          </button>
+                        </div>
+                      )
+                    )}
                     {currentFolderPath && (
                       <span className="text-xs text-[var(--color-muted-foreground)] truncate font-mono" title={currentFolderPath}>
                         {currentFolderPath}
@@ -449,17 +497,6 @@ export default function WorkspacePeersDialog({
         onSuccess={() => {}}
       />
 
-      {showConfigureRelay && (
-        <ConfigureRelayDialog
-          identityUuid={identityUuid}
-          peerDeviceId={showConfigureRelay.peerDeviceId}
-          onClose={() => setShowConfigureRelay(null)}
-          onConfigured={async () => {
-            setShowConfigureRelay(null);
-            await loadPeers();
-          }}
-        />
-      )}
     </div>
   );
 }

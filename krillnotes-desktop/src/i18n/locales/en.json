@@ -457,6 +457,13 @@
     "configure": "Configure",
     "forceResync": "Force Resync"
   },
+  "workspacePeers": {
+    "noRelayAccounts": "No relay accounts configured. Add one in Identity Manager → Relays.",
+    "selectRelay": "Select relay account"
+  },
+  "identityManager": {
+    "relays": "Relays"
+  },
   "relayBook": {
     "title": "Relay Accounts",
     "addRelay": "Add Relay Account",
