@@ -5,7 +5,7 @@ All notable changes to Krillnotes will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.1] — 2026-03-15
 
 ### Changed
 - **Relay accounts moved to Identity Manager** — Relay server credentials are now managed per-identity (like contacts) instead of per-peer. A new "Relays" button in Identity Manager opens a relay account book for registering, viewing, and deleting relay accounts. Workspace peer configuration uses a simple dropdown picker instead of the old Configure Relay dialog. (PR #103)
