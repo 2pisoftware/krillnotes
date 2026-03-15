@@ -258,8 +258,10 @@ pub fn set_peer_relay(
     relay_account_id: String,
 ) -> Result<(), String> {
     log::debug!("set_peer_relay(peer={peer_device_id}, relay_account_id={relay_account_id})");
+    // Validate UUID to prevent malformed JSON
+    let _acct_uuid = Uuid::parse_str(&relay_account_id).map_err(|e| e.to_string())?;
     let workspace_label = window.label().to_string();
-    let channel_params = format!(r#"{{"relay_account_id":"{}"}}"#, relay_account_id);
+    let channel_params = serde_json::json!({ "relay_account_id": relay_account_id }).to_string();
     let workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
     let ws = workspaces
         .get(&workspace_label)
