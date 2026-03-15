@@ -120,6 +120,7 @@ pub fn generate_delta(
         recipient_peer_ids: vec![peer_device_id.to_string()],
         recipient_identity_id: peer.peer_identity_id.clone(),
         owner_pubkey: workspace.owner_pubkey().to_string(),
+        ack_operation_id: None, // populated in Task 4
     })?;
 
     // NOTE: watermark is NOT advanced here.

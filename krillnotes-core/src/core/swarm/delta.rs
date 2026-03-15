@@ -37,6 +37,9 @@ pub struct DeltaParams<'a> {
     pub recipient_identity_id: String,
     /// Base64 public key of the workspace owner.
     pub owner_pubkey: String,
+    /// ACK: the last operation we received FROM the recipient.
+    /// Lets the recipient self-correct its watermark if they're ahead of us.
+    pub ack_operation_id: Option<String>,
 }
 
 pub struct ParsedDelta {
@@ -46,6 +49,8 @@ pub struct ParsedDelta {
     pub sender_device_id: String,
     pub operations: Vec<Operation>,
     pub owner_pubkey: Option<String>,
+    /// ACK from the sender: the last operation they received FROM us.
+    pub ack_operation_id: Option<String>,
 }
 
 /// Generate a delta.swarm bundle.
@@ -79,7 +84,7 @@ pub fn create_delta_bundle(params: DeltaParams<'_>) -> Result<Vec<u8>> {
         as_of_operation_id: None,
         since_operation_id: Some(params.since_operation_id),
         target_peer: Some(params.recipient_identity_id),
-        ack_operation_id: None,
+        ack_operation_id: params.ack_operation_id.clone(),
         recipients: Some(entries),
         has_attachments: false,
         owner_pubkey: Some(params.owner_pubkey.clone()),
@@ -161,6 +166,7 @@ pub fn parse_delta_bundle(data: &[u8], recipient_key: &SigningKey) -> Result<Par
         sender_device_id: header.source_device_id,
         operations,
         owner_pubkey: header.owner_pubkey,
+        ack_operation_id: header.ack_operation_id,
     })
 }
 
@@ -204,6 +210,7 @@ mod tests {
             recipient_peer_ids: vec!["dev-2".to_string()],
             recipient_identity_id: "pk-dev-2".to_string(),
             owner_pubkey: "owner-pk".to_string(),
+            ack_operation_id: None,
         }).unwrap();
 
         let parsed = parse_delta_bundle(&bundle, &recipient_key).unwrap();
@@ -230,6 +237,7 @@ mod tests {
             recipient_peer_ids: vec!["dev-2".to_string()],
             recipient_identity_id: "pk-dev-2".to_string(),
             owner_pubkey: "owner-pk".to_string(),
+            ack_operation_id: None,
         }).unwrap();
 
         let parsed = parse_delta_bundle(&bundle, &recipient_key).unwrap();

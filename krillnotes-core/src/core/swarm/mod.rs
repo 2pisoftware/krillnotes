@@ -122,6 +122,7 @@ mod integration_tests {
             recipient_peer_ids: vec!["dev-bob".to_string()],
             recipient_identity_id: "pk-bob".to_string(),
             owner_pubkey: "owner-pk-alice".to_string(),
+            ack_operation_id: None,
         }).unwrap();
 
         // === Step 8: Bob applies delta ===
