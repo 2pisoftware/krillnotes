@@ -124,7 +124,7 @@ impl SyncChannel for FolderChannel {
             ));
         }
         let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-        let uuid_short = &Uuid::new_v4().to_string()[..8];
+        let uuid_short: String = Uuid::new_v4().to_string().chars().take(8).collect();
         let filename = format!("{}_{}_{}.swarm", recipient_short, timestamp, uuid_short);
 
         let path = dir.join(filename);
