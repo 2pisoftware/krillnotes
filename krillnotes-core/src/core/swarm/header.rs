@@ -67,6 +67,10 @@ pub struct SwarmHeader {
     // Delta only
     pub since_operation_id: Option<String>,
     pub target_peer: Option<String>,
+    /// ACK: the last operation this sender received FROM the recipient.
+    /// Lets the recipient detect missed deltas and self-correct its watermark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack_operation_id: Option<String>,
 
     // Snapshot + Delta
     pub recipients: Option<Vec<RecipientEntry>>,
@@ -149,6 +153,7 @@ mod tests {
             as_of_operation_id: None,
             since_operation_id: None,
             target_peer: None,
+            ack_operation_id: None,
             recipients: None,
             has_attachments: false,
             owner_pubkey: None,

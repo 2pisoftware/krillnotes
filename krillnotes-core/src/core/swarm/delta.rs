@@ -79,6 +79,7 @@ pub fn create_delta_bundle(params: DeltaParams<'_>) -> Result<Vec<u8>> {
         as_of_operation_id: None,
         since_operation_id: Some(params.since_operation_id),
         target_peer: Some(params.recipient_identity_id),
+        ack_operation_id: None,
         recipients: Some(entries),
         has_attachments: false,
         owner_pubkey: Some(params.owner_pubkey.clone()),
