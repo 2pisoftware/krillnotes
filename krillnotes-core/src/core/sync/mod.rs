@@ -117,7 +117,7 @@ impl SyncEngine {
         self.channels.insert(ct, channel);
     }
 
-    /// Run one full sync cycle: outbound deltas, then inbound bundles.
+    /// Run one full sync cycle: inbound bundles, then outbound deltas.
     ///
     /// Returns all events that occurred during the cycle. Errors from
     /// individual peers or bundles are captured as `SyncEvent` variants
@@ -162,146 +162,14 @@ impl SyncEngine {
             }
         }
 
-        // ── 1. Outbound: generate + send deltas ────────────────────────────
         let active_peers = workspace.get_active_sync_peers()?;
-        log::debug!(target: "krillnotes::sync", "outbound: {} active peers", active_peers.len());
 
-        for peer in &active_peers {
-            // Mark peer as syncing
-            let _ = workspace.update_peer_sync_status(
-                &peer.peer_device_id,
-                "syncing",
-                None,
-                None,
-            );
-
-            log::debug!(target: "krillnotes::sync", "generating delta for peer {} via {}", peer.peer_device_id, peer.channel_type);
-
-            // Find the channel for this peer
-            let channel = match self.channels.get(&peer.channel_type) {
-                Some(ch) => ch,
-                None => {
-                    log::error!(target: "krillnotes::sync", "no channel registered for {}", peer.channel_type);
-                    let _ = workspace.update_peer_sync_status(
-                        &peer.peer_device_id,
-                        "error",
-                        None,
-                        Some(&format!("no channel registered for {}", peer.channel_type)),
-                    );
-                    events.push(SyncEvent::SyncError {
-                        workspace_id: workspace_id.clone(),
-                        peer_device_id: peer.peer_device_id.clone(),
-                        error: format!("no channel registered for {}", peer.channel_type),
-                    });
-                    continue;
-                }
-            };
-
-            // Generate delta
-            let delta: DeltaBundle = match crate::core::swarm::sync::generate_delta(
-                workspace,
-                &peer.peer_device_id,
-                ctx.workspace_name,
-                ctx.signing_key,
-                ctx.sender_display_name,
-                ctx.contact_manager,
-            ) {
-                Ok(d) => d,
-                Err(e) => {
-                    log::error!(target: "krillnotes::sync", "generate_delta failed for peer {}: {e}", peer.peer_device_id);
-                    let _ = workspace.update_peer_sync_status(
-                        &peer.peer_device_id,
-                        "error",
-                        None,
-                        Some(&e.to_string()),
-                    );
-                    events.push(SyncEvent::SyncError {
-                        workspace_id: workspace_id.clone(),
-                        peer_device_id: peer.peer_device_id.clone(),
-                        error: format!("generate_delta: {e}"),
-                    });
-                    continue;
-                }
-            };
-
-            // Send via channel
-            log::debug!(target: "krillnotes::sync", "sending bundle ({} bytes, {} ops) to peer {}",
-                delta.bundle_bytes.len(), delta.op_count, peer.peer_device_id);
-            match channel.send_bundle(peer, &delta.bundle_bytes) {
-                Ok(SendResult::Delivered) => {
-                    log::info!(target: "krillnotes::sync", "delta sent to peer {} ({} ops)", peer.peer_device_id, delta.op_count);
-                    // Advance watermark only after confirmed delivery.
-                    if let Some(ref last_op_id) = delta.last_included_op {
-                        let _ = workspace.upsert_sync_peer(
-                            &peer.peer_device_id,
-                            &peer.peer_identity_id,
-                            Some(last_op_id.as_str()),
-                            None,
-                        );
-                    }
-                    let _ = workspace.update_peer_sync_status(
-                        &peer.peer_device_id,
-                        "idle",
-                        None,
-                        None,
-                    );
-                    events.push(SyncEvent::DeltaSent {
-                        workspace_id: workspace_id.clone(),
-                        peer_device_id: peer.peer_device_id.clone(),
-                        op_count: delta.op_count,
-                    });
-                }
-                Ok(SendResult::NotDelivered { reason }) => {
-                    log::warn!(target: "krillnotes::sync",
-                        "bundle not delivered to peer {}: {reason}", peer.peer_device_id);
-                    // Do NOT advance watermark — peer never received the bundle.
-                    let _ = workspace.update_peer_sync_status(
-                        &peer.peer_device_id,
-                        "not_delivered",
-                        Some(&reason),
-                        None,
-                    );
-                    events.push(SyncEvent::SendSkipped {
-                        workspace_id: workspace_id.clone(),
-                        peer_device_id: peer.peer_device_id.clone(),
-                        reason,
-                    });
-                }
-                Err(KrillnotesError::RelayAuthExpired(_)) => {
-                    log::warn!(target: "krillnotes::sync", "relay auth expired while sending to peer {}", peer.peer_device_id);
-                    let _ = workspace.update_peer_sync_status(
-                        &peer.peer_device_id,
-                        "auth_expired",
-                        None,
-                        Some("relay session expired"),
-                    );
-                    #[cfg(feature = "relay")]
-                    if let Some(ch) = self.channels.get(&ChannelType::Relay) {
-                        if let Some(relay) = ch.as_any().downcast_ref::<relay::RelayChannel>() {
-                            events.push(SyncEvent::AuthExpired {
-                                relay_url: relay.client().base_url.clone(),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!(target: "krillnotes::sync", "send_bundle failed for peer {}: {e}", peer.peer_device_id);
-                    let _ = workspace.update_peer_sync_status(
-                        &peer.peer_device_id,
-                        "error",
-                        None,
-                        Some(&e.to_string()),
-                    );
-                    events.push(SyncEvent::SyncError {
-                        workspace_id: workspace_id.clone(),
-                        peer_device_id: peer.peer_device_id.clone(),
-                        error: format!("send_bundle: {e}"),
-                    });
-                }
-            }
-        }
-
-        // ── 2. Inbound: receive + apply bundles ────────────────────────────
+        // ── 1. Inbound: receive + apply bundles ────────────────────────────
+        //    Process inbound BEFORE outbound so that:
+        //    (a) ACK-behind checks compare against the PRE-outbound watermark,
+        //        avoiding false resets from the one-cycle timing lag.
+        //    (b) Outbound deltas carry the freshest ACK from just-applied bundles.
+        //    (c) Ops from peer A can be forwarded to peer B in the same cycle.
         log::debug!(target: "krillnotes::sync", "inbound: checking for bundles");
 
         // Collect unique channel types from active peers (skip Manual)
@@ -449,6 +317,144 @@ impl SyncEngine {
                         });
                         let _ = channel.acknowledge(bundle_ref);
                     }
+                }
+            }
+        }
+
+        // ── 2. Outbound: generate + send deltas ────────────────────────────
+        log::debug!(target: "krillnotes::sync", "outbound: {} active peers", active_peers.len());
+
+        for peer in &active_peers {
+            // Mark peer as syncing
+            let _ = workspace.update_peer_sync_status(
+                &peer.peer_device_id,
+                "syncing",
+                None,
+                None,
+            );
+
+            log::debug!(target: "krillnotes::sync", "generating delta for peer {} via {}", peer.peer_device_id, peer.channel_type);
+
+            // Find the channel for this peer
+            let channel = match self.channels.get(&peer.channel_type) {
+                Some(ch) => ch,
+                None => {
+                    log::error!(target: "krillnotes::sync", "no channel registered for {}", peer.channel_type);
+                    let _ = workspace.update_peer_sync_status(
+                        &peer.peer_device_id,
+                        "error",
+                        None,
+                        Some(&format!("no channel registered for {}", peer.channel_type)),
+                    );
+                    events.push(SyncEvent::SyncError {
+                        workspace_id: workspace_id.clone(),
+                        peer_device_id: peer.peer_device_id.clone(),
+                        error: format!("no channel registered for {}", peer.channel_type),
+                    });
+                    continue;
+                }
+            };
+
+            // Generate delta
+            let delta: DeltaBundle = match crate::core::swarm::sync::generate_delta(
+                workspace,
+                &peer.peer_device_id,
+                ctx.workspace_name,
+                ctx.signing_key,
+                ctx.sender_display_name,
+                ctx.contact_manager,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!(target: "krillnotes::sync", "generate_delta failed for peer {}: {e}", peer.peer_device_id);
+                    let _ = workspace.update_peer_sync_status(
+                        &peer.peer_device_id,
+                        "error",
+                        None,
+                        Some(&e.to_string()),
+                    );
+                    events.push(SyncEvent::SyncError {
+                        workspace_id: workspace_id.clone(),
+                        peer_device_id: peer.peer_device_id.clone(),
+                        error: format!("generate_delta: {e}"),
+                    });
+                    continue;
+                }
+            };
+
+            // Send via channel
+            log::debug!(target: "krillnotes::sync", "sending bundle ({} bytes, {} ops) to peer {}",
+                delta.bundle_bytes.len(), delta.op_count, peer.peer_device_id);
+            match channel.send_bundle(peer, &delta.bundle_bytes) {
+                Ok(SendResult::Delivered) => {
+                    log::info!(target: "krillnotes::sync", "delta sent to peer {} ({} ops)", peer.peer_device_id, delta.op_count);
+                    // Advance watermark only after confirmed delivery.
+                    if let Some(ref last_op_id) = delta.last_included_op {
+                        let _ = workspace.upsert_sync_peer(
+                            &peer.peer_device_id,
+                            &peer.peer_identity_id,
+                            Some(last_op_id.as_str()),
+                            None,
+                        );
+                    }
+                    let _ = workspace.update_peer_sync_status(
+                        &peer.peer_device_id,
+                        "idle",
+                        None,
+                        None,
+                    );
+                    events.push(SyncEvent::DeltaSent {
+                        workspace_id: workspace_id.clone(),
+                        peer_device_id: peer.peer_device_id.clone(),
+                        op_count: delta.op_count,
+                    });
+                }
+                Ok(SendResult::NotDelivered { reason }) => {
+                    log::warn!(target: "krillnotes::sync",
+                        "bundle not delivered to peer {}: {reason}", peer.peer_device_id);
+                    // Do NOT advance watermark — peer never received the bundle.
+                    let _ = workspace.update_peer_sync_status(
+                        &peer.peer_device_id,
+                        "not_delivered",
+                        Some(&reason),
+                        None,
+                    );
+                    events.push(SyncEvent::SendSkipped {
+                        workspace_id: workspace_id.clone(),
+                        peer_device_id: peer.peer_device_id.clone(),
+                        reason,
+                    });
+                }
+                Err(KrillnotesError::RelayAuthExpired(_)) => {
+                    log::warn!(target: "krillnotes::sync", "relay auth expired while sending to peer {}", peer.peer_device_id);
+                    let _ = workspace.update_peer_sync_status(
+                        &peer.peer_device_id,
+                        "auth_expired",
+                        None,
+                        Some("relay session expired"),
+                    );
+                    #[cfg(feature = "relay")]
+                    if let Some(ch) = self.channels.get(&ChannelType::Relay) {
+                        if let Some(relay) = ch.as_any().downcast_ref::<relay::RelayChannel>() {
+                            events.push(SyncEvent::AuthExpired {
+                                relay_url: relay.client().base_url.clone(),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!(target: "krillnotes::sync", "send_bundle failed for peer {}: {e}", peer.peer_device_id);
+                    let _ = workspace.update_peer_sync_status(
+                        &peer.peer_device_id,
+                        "error",
+                        None,
+                        Some(&e.to_string()),
+                    );
+                    events.push(SyncEvent::SyncError {
+                        workspace_id: workspace_id.clone(),
+                        peer_device_id: peer.peer_device_id.clone(),
+                        error: format!("send_bundle: {e}"),
+                    });
                 }
             }
         }
