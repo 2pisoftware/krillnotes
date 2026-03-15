@@ -46,34 +46,58 @@ impl RelayChannel {
 #[cfg(feature = "relay")]
 impl SyncChannel for RelayChannel {
     fn send_bundle(&self, peer: &PeerSyncInfo, bundle_bytes: &[u8]) -> Result<(), KrillnotesError> {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        log::debug!(target: "krillnotes::relay", "sending bundle to peer {} via relay ({} bytes)", peer.peer_device_id, bundle_bytes.len());
+        // The relay stores device keys as hex-encoded Ed25519 public keys.
+        // Convert the peer's base64 identity key to hex to match.
+        let recipient_key_hex = {
+            let raw = BASE64.decode(&peer.peer_identity_id).map_err(|e| {
+                KrillnotesError::RelayUnavailable(format!(
+                    "failed to decode peer identity key: {e}"
+                ))
+            })?;
+            hex::encode(raw)
+        };
         let header = client::BundleHeader {
             workspace_id: self.workspace_id.clone(),
             sender_device_key: self.sender_device_key.clone(),
-            recipient_device_keys: vec![peer.peer_device_id.clone()],
+            recipient_device_keys: vec![recipient_key_hex],
             mode: None,
         };
         self.client.upload_bundle(&header, bundle_bytes)?;
+        log::info!(target: "krillnotes::relay", "bundle sent to peer {} via relay", peer.peer_device_id);
         Ok(())
     }
 
     fn receive_bundles(&self, workspace_id: &str) -> Result<Vec<BundleRef>, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "receiving bundles for workspace {workspace_id}");
         // Ensure a mailbox exists for this workspace so the relay routes bundles
         // to this account. The call is idempotent (201 on first call, 200 after).
         self.client.ensure_mailbox(workspace_id)?;
         let metas = self.client.list_bundles()?;
         let metas: Vec<_> = metas.into_iter().filter(|m| m.workspace_id == workspace_id).collect();
+        log::debug!(target: "krillnotes::relay", "{} bundles pending for workspace {workspace_id}", metas.len());
         let mut bundles = Vec::new();
-        for meta in metas {
-            let data = self.client.download_bundle(&meta.bundle_id)?;
-            bundles.push(BundleRef {
-                id: meta.bundle_id,
-                data,
-            });
+        for meta in &metas {
+            match self.client.download_bundle(&meta.bundle_id) {
+                Ok(data) => {
+                    bundles.push(BundleRef {
+                        id: meta.bundle_id.clone(),
+                        data,
+                    });
+                }
+                Err(e) => {
+                    log::error!(target: "krillnotes::relay", "failed to download bundle {}: {e}", meta.bundle_id);
+                    return Err(e);
+                }
+            }
         }
+        log::info!(target: "krillnotes::relay", "received {} bundles via relay for workspace {workspace_id}", bundles.len());
         Ok(bundles)
     }
 
     fn acknowledge(&self, bundle_ref: &BundleRef) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "acknowledging bundle {}", bundle_ref.id);
         self.client.delete_bundle(&bundle_ref.id)
     }
 

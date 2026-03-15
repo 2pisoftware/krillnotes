@@ -72,7 +72,10 @@ pub fn list_invites(
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
     let ims = state.invite_managers.lock().expect("Mutex poisoned");
     let im = ims.get(&uuid).ok_or("Identity not unlocked")?;
-    let records = im.list_invites().map_err(|e| e.to_string())?;
+    let records = im.list_invites().map_err(|e| {
+        log::error!("list_invites(identity={identity_uuid}) failed: {e}");
+        e.to_string()
+    })?;
     Ok(records.into_iter().map(InviteInfo::from).collect())
 }
 
@@ -129,10 +132,16 @@ pub fn create_invite(
             ws_license,
             ws_tags,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::error!("create_invite(identity={identity_uuid}) failed: {e}");
+            e.to_string()
+        })?;
 
     krillnotes_core::core::invite::InviteManager::save_invite_file(&file, std::path::Path::new(&save_path))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::error!("create_invite save_file failed: {e}");
+            e.to_string()
+        })?;
 
     Ok(InviteInfo::from(record))
 }
@@ -228,7 +237,10 @@ pub fn revoke_invite(
     let invite_uuid = Uuid::parse_str(&invite_id).map_err(|e| e.to_string())?;
     let mut ims = state.invite_managers.lock().expect("Mutex poisoned");
     let im = ims.get_mut(&uuid).ok_or("Identity not unlocked")?;
-    im.revoke_invite(invite_uuid).map_err(|e| e.to_string())
+    im.revoke_invite(invite_uuid).map_err(|e| {
+        log::error!("revoke_invite(invite={invite_id}) failed: {e}");
+        e.to_string()
+    })
 }
 
 #[tauri::command]
@@ -241,7 +253,10 @@ pub fn delete_invite(
     let invite_uuid = Uuid::parse_str(&invite_id).map_err(|e| e.to_string())?;
     let mut ims = state.invite_managers.lock().expect("Mutex poisoned");
     let im = ims.get_mut(&uuid).ok_or("Identity not unlocked")?;
-    im.delete_invite(invite_uuid).map_err(|e| e.to_string())
+    im.delete_invite(invite_uuid).map_err(|e| {
+        log::error!("delete_invite(invite={invite_id}) failed: {e}");
+        e.to_string()
+    })
 }
 
 #[tauri::command]
@@ -252,7 +267,10 @@ pub fn delete_revoked_invites(
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
     let mut ims = state.invite_managers.lock().expect("Mutex poisoned");
     let im = ims.get_mut(&uuid).ok_or("Identity not unlocked")?;
-    im.delete_revoked_invites().map_err(|e| e.to_string())
+    im.delete_revoked_invites().map_err(|e| {
+        log::error!("delete_revoked_invites(identity={identity_uuid}) failed: {e}");
+        e.to_string()
+    })
 }
 
 #[tauri::command]
@@ -266,7 +284,10 @@ pub fn import_invite_response(
 
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
     let response = InviteManager::parse_and_verify_response(std::path::Path::new(&path))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::error!("import_invite_response(identity={identity_uuid}) failed: {e}");
+            e.to_string()
+        })?;
 
     // Validate invite is still active and increment use count.
     let invite_uuid = Uuid::parse_str(&response.invite_id).map_err(|e| e.to_string())?;
@@ -304,7 +325,10 @@ pub fn import_invite(path: String) -> std::result::Result<InviteFileData, String
     use krillnotes_core::core::contact::generate_fingerprint;
 
     let invite = InviteManager::parse_and_verify_invite(std::path::Path::new(&path))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::error!("import_invite failed: {e}");
+            e.to_string()
+        })?;
 
     let fingerprint = generate_fingerprint(&invite.inviter_public_key).map_err(|e| e.to_string())?;
 
@@ -355,7 +379,10 @@ pub fn respond_to_invite(
         &declared_name,
         std::path::Path::new(&save_path),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| {
+        log::error!("respond_to_invite(identity={identity_uuid}) failed: {e}");
+        e.to_string()
+    })
 }
 
 #[tauri::command]

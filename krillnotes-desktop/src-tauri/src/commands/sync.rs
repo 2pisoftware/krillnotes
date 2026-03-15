@@ -47,13 +47,17 @@ pub async fn update_peer_channel(
     channel_type: String,
     channel_params: String,
 ) -> Result<(), String> {
+    log::debug!("update_peer_channel(peer={peer_device_id}, type={channel_type})");
     let workspace_label = window.label().to_string();
     let workspaces = state.workspaces.lock().map_err(|e| e.to_string())?;
     let ws = workspaces
         .get(&workspace_label)
         .ok_or_else(|| format!("Workspace not found: {workspace_label}"))?;
     ws.update_peer_channel(&peer_device_id, &channel_type, &channel_params)
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            log::error!("update_peer_channel(peer={peer_device_id}, type={channel_type}) failed: {e}");
+            e.to_string()
+        })
 }
 
 // ── poll_sync ──────────────────────────────────────────────────────────────
@@ -67,6 +71,7 @@ pub async fn poll_sync(
     window: Window,
     state: State<'_, AppState>,
 ) -> Result<Vec<SyncEvent>, String> {
+    log::debug!("poll_sync(window={})", window.label());
     let workspace_label = window.label().to_string();
 
     // -- Collect context data under brief locks (all guards released before spawn) --
@@ -146,11 +151,17 @@ pub async fn poll_sync(
             sender_display_name: &sender_display_name,
         };
 
-        engine.poll(workspace, &mut ctx).map_err(|e| e.to_string())
+        engine.poll(workspace, &mut ctx).map_err(|e| {
+            log::error!("poll_sync(window={workspace_label}) failed: {e}");
+            e.to_string()
+        })
         // engine (and RelayClient) dropped here — safe on a spawn_blocking thread
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| {
+        log::error!("poll_sync spawn_blocking join failed: {e}");
+        e.to_string()
+    })??;
 
     // If any bundles were applied, notify WorkspaceView to reload the note tree.
     let bundles_applied = events.iter().any(|e| matches!(e, SyncEvent::BundleApplied { .. }));
@@ -173,6 +184,8 @@ pub async fn configure_relay(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    log::debug!("configure_relay(identity={identity_uuid}, relay_url={relay_url})");
+    let identity_uuid_for_log = identity_uuid.clone();
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
 
     // Capture signing key, verifying key, and relay encryption key in one lock.
@@ -230,7 +243,10 @@ pub async fn configure_relay(
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| {
+        log::error!("configure_relay(identity={identity_uuid_for_log}) failed: {e}");
+        e.to_string()
+    })?
 }
 
 // ── relay_login ────────────────────────────────────────────────────────────
@@ -245,6 +261,8 @@ pub async fn relay_login(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    log::debug!("relay_login(identity={identity_uuid}, relay_url={relay_url})");
+    let identity_uuid_for_log = identity_uuid.clone();
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
 
     let relay_key = {
@@ -293,7 +311,10 @@ pub async fn relay_login(
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| {
+        log::error!("relay_login(identity={identity_uuid_for_log}) failed: {e}");
+        e.to_string()
+    })?
 }
 
 // ── create_relay_invite ────────────────────────────────────────────────────
@@ -340,6 +361,7 @@ pub async fn has_relay_credentials(
     window: Window,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
+    log::debug!("has_relay_credentials(window={})", window.label());
     let workspace_label = window.label().to_string();
     let identity_uuid: Uuid = {
         let m = state.workspace_identities.lock().map_err(|e| e.to_string())?;
@@ -353,7 +375,10 @@ pub async fn has_relay_credentials(
     };
     let relay_dir = crate::settings::config_dir().join("relay");
     let creds = load_relay_credentials(&relay_dir, &identity_uuid.to_string(), &relay_key)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::error!("has_relay_credentials(identity={identity_uuid}) failed: {e}");
+            e.to_string()
+        })?;
     Ok(creds.is_some())
 }
 
@@ -366,6 +391,7 @@ pub async fn get_relay_info(
     window: Window,
     state: State<'_, AppState>,
 ) -> Result<Option<RelayInfo>, String> {
+    log::debug!("get_relay_info(window={})", window.label());
     let workspace_label = window.label().to_string();
     let identity_uuid: Uuid = {
         let m = state.workspace_identities.lock().map_err(|e| e.to_string())?;
@@ -379,7 +405,10 @@ pub async fn get_relay_info(
     };
     let relay_dir = crate::settings::config_dir().join("relay");
     match load_relay_credentials(&relay_dir, &identity_uuid.to_string(), &relay_key)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| {
+            log::error!("get_relay_info(identity={identity_uuid}) failed: {e}");
+            e.to_string()
+        })?
     {
         Some(creds) => Ok(Some(RelayInfo {
             relay_url: creds.relay_url,

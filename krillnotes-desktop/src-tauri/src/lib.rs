@@ -147,6 +147,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -246,11 +255,11 @@ pub fn run() {
                     if new_folder.exists() { continue; } // already migrated
                     if std::fs::create_dir_all(&new_folder).is_ok() {
                         if let Err(e) = std::fs::rename(&path, new_folder.join("notes.db")) {
-                            eprintln!("[migration] Failed to move {:?}: {e}", path);
+                            log::warn!("[migration] Failed to move {:?}: {e}", path);
                             let _ = std::fs::remove_dir(&new_folder); // rollback folder
                         } else {
                             let _ = std::fs::create_dir_all(new_folder.join("attachments"));
-                            eprintln!("[migration] Migrated {:?} → {:?}", path, new_folder);
+                            log::info!("[migration] Migrated {:?} → {:?}", path, new_folder);
                         }
                     }
                 }

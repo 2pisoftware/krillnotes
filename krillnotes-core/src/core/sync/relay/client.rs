@@ -162,10 +162,22 @@ struct UploadBundleRequest {
 }
 
 #[derive(Deserialize)]
+struct UploadBundleSkipped {
+    #[serde(default)]
+    unknown: Vec<String>,
+    #[serde(default)]
+    unverified: Vec<String>,
+    #[serde(default)]
+    quota_exceeded: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct UploadBundleResponse {
     #[allow(dead_code)]
     routed_to: u32,
     bundle_ids: Vec<String>,
+    #[serde(default)]
+    skipped: Option<UploadBundleSkipped>,
 }
 
 #[derive(Deserialize)]
@@ -245,20 +257,26 @@ impl RelayClient {
     fn handle_response<T: DeserializeOwned>(
         resp: reqwest::blocking::Response,
     ) -> Result<T, KrillnotesError> {
-        if resp.status().is_success() {
+        let status = resp.status();
+        if status.is_success() {
+            log::debug!(target: "krillnotes::relay", "response {status}");
             let wrapper: RelayResponse<T> = resp
                 .json()
                 .map_err(|e| KrillnotesError::RelayUnavailable(format!("invalid response JSON: {e}")))?;
             Ok(wrapper.data)
         } else {
+            log::debug!(target: "krillnotes::relay", "error response {status}");
             Err(Self::map_error(resp))
         }
     }
 
     fn handle_empty(resp: reqwest::blocking::Response) -> Result<(), KrillnotesError> {
-        if resp.status().is_success() {
+        let status = resp.status();
+        if status.is_success() {
+            log::debug!(target: "krillnotes::relay", "response {status}");
             Ok(())
         } else {
+            log::debug!(target: "krillnotes::relay", "error response {status}");
             Err(Self::map_error(resp))
         }
     }
@@ -273,18 +291,23 @@ impl RelayClient {
         identity_uuid: &str,
         device_public_key: &str,
     ) -> Result<RegisterResult, KrillnotesError> {
+        log::info!(target: "krillnotes::relay", "registering account for {email}");
         let body = RegisterRequest {
             email,
             password,
             identity_uuid,
             device_public_key,
         };
+        log::debug!(target: "krillnotes::relay", "POST {}/auth/register", self.base_url);
         let resp = self
             .http
             .post(self.url("/auth/register"))
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "register request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
@@ -294,6 +317,7 @@ impl RelayClient {
         device_public_key: &str,
         nonce: &str,
     ) -> Result<SessionResponse, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/auth/register/verify", self.base_url);
         let body = RegisterVerifyRequest {
             device_public_key,
             nonce,
@@ -303,43 +327,59 @@ impl RelayClient {
             .post(self.url("/auth/register/verify"))
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "register_verify request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// Log in with email, password, and device key. Returns a session token.
     pub fn login(&self, email: &str, password: &str, device_public_key: &str) -> Result<SessionResponse, KrillnotesError> {
+        log::info!(target: "krillnotes::relay", "logging in as {email}");
+        log::debug!(target: "krillnotes::relay", "POST {}/auth/login", self.base_url);
         let body = LoginRequest { email, password, device_public_key };
         let resp = self
             .http
             .post(self.url("/auth/login"))
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "login request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// Log out the current session.
     pub fn logout(&self) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/auth/logout", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .post(self.url("/auth/logout"))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "logout request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_empty(resp)
     }
 
     /// Request a password reset email.
     pub fn reset_password(&self, email: &str) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/auth/reset-password", self.base_url);
         let body = ResetPasswordRequest { email };
         let resp = self
             .http
             .post(self.url("/auth/reset-password"))
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "reset_password request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_empty(resp)
     }
 
@@ -349,13 +389,17 @@ impl RelayClient {
         token: &str,
         new_password: &str,
     ) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/auth/reset-password/confirm", self.base_url);
         let body = ResetPasswordConfirmRequest { token, new_password };
         let resp = self
             .http
             .post(self.url("/auth/reset-password/confirm"))
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "reset_password_confirm request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_empty(resp)
     }
 
@@ -363,18 +407,23 @@ impl RelayClient {
 
     /// Fetch account information for the authenticated user.
     pub fn get_account(&self) -> Result<AccountInfo, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "GET {}/account", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .get(self.url("/account"))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "get_account request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// Add an additional device key to the account. Returns a challenge.
     pub fn add_device(&self, device_public_key: &str) -> Result<RegisterChallenge, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/account/devices", self.base_url);
         let auth = self.auth_header()?;
         let body = AddDeviceRequest { device_public_key };
         let resp = self
@@ -383,12 +432,16 @@ impl RelayClient {
             .header("Authorization", auth)
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "add_device request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// Verify a newly added device by proving knowledge of the challenge nonce.
     pub fn verify_device(&self, device_public_key: &str, nonce: &str) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/account/devices/verify", self.base_url);
         let auth = self.auth_header()?;
         let body = VerifyDeviceRequest { device_public_key, nonce };
         let resp = self
@@ -397,7 +450,10 @@ impl RelayClient {
             .header("Authorization", auth)
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "verify_device request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_empty(resp)
     }
 
@@ -405,6 +461,7 @@ impl RelayClient {
 
     /// Ensure a mailbox exists for the given workspace (idempotent — 200/201 both ok).
     pub fn ensure_mailbox(&self, workspace_id: &str) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/mailboxes (workspace_id={workspace_id})", self.base_url);
         let auth = self.auth_header()?;
         let body = EnsureMailboxRequest { workspace_id };
         let resp = self
@@ -413,24 +470,34 @@ impl RelayClient {
             .header("Authorization", auth)
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "ensure_mailbox request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         // 200 or 201 both indicate success
-        if resp.status().as_u16() == 200 || resp.status().as_u16() == 201 {
+        let status = resp.status().as_u16();
+        if status == 200 || status == 201 {
+            log::debug!(target: "krillnotes::relay", "mailbox ensured (HTTP {status})");
             Ok(())
         } else {
+            log::error!(target: "krillnotes::relay", "ensure_mailbox failed (HTTP {status})");
             Err(Self::map_error(resp))
         }
     }
 
     /// List all mailboxes for the authenticated account.
     pub fn list_mailboxes(&self) -> Result<Vec<MailboxInfo>, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "GET {}/mailboxes", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .get(self.url("/mailboxes"))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "list_mailboxes request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
@@ -443,6 +510,7 @@ impl RelayClient {
         bundle_bytes: &[u8],
     ) -> Result<Vec<String>, KrillnotesError> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        log::debug!(target: "krillnotes::relay", "POST {}/bundles ({} bytes, {} recipients)", self.base_url, bundle_bytes.len(), header.recipient_device_keys.len());
         let auth = self.auth_header()?;
         let payload = BASE64.encode(bundle_bytes);
         let header_json = serde_json::to_string(header).map_err(|e| {
@@ -455,48 +523,80 @@ impl RelayClient {
             .header("Authorization", auth)
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "upload_bundle request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         let result: UploadBundleResponse = Self::handle_response(resp)?;
+        log::info!(target: "krillnotes::relay", "uploaded bundle, {} bundle IDs created", result.bundle_ids.len());
+        if let Some(skipped) = &result.skipped {
+            if !skipped.unknown.is_empty() {
+                log::warn!(target: "krillnotes::relay", "relay skipped unknown device keys: {:?}", skipped.unknown);
+            }
+            if !skipped.unverified.is_empty() {
+                log::warn!(target: "krillnotes::relay", "relay skipped unverified device keys: {:?}", skipped.unverified);
+            }
+            if !skipped.quota_exceeded.is_empty() {
+                log::warn!(target: "krillnotes::relay", "relay skipped device keys (quota exceeded): {:?}", skipped.quota_exceeded);
+            }
+        }
         Ok(result.bundle_ids)
     }
 
     /// List all pending bundles for the authenticated account.
     pub fn list_bundles(&self) -> Result<Vec<BundleMeta>, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "GET {}/bundles", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .get(self.url("/bundles"))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
-        Self::handle_response(resp)
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "list_bundles request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
+        let bundles: Vec<BundleMeta> = Self::handle_response(resp)?;
+        log::info!(target: "krillnotes::relay", "listed {} pending bundles", bundles.len());
+        Ok(bundles)
     }
 
     /// Download a bundle by ID. Returns the raw bytes.
     pub fn download_bundle(&self, bundle_id: &str) -> Result<Vec<u8>, KrillnotesError> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        log::debug!(target: "krillnotes::relay", "GET {}/bundles/{bundle_id}", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .get(self.url(&format!("/bundles/{bundle_id}")))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "download_bundle request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         let result: BundleDownloadResponse = Self::handle_response(resp)?;
-        BASE64.decode(&result.payload).map_err(|e| {
+        let data = BASE64.decode(&result.payload).map_err(|e| {
+            log::error!(target: "krillnotes::relay", "invalid bundle payload base64: {e}");
             KrillnotesError::RelayUnavailable(format!("invalid bundle payload base64: {e}"))
-        })
+        })?;
+        log::debug!(target: "krillnotes::relay", "downloaded bundle {bundle_id} ({} bytes)", data.len());
+        Ok(data)
     }
 
     /// Delete a bundle by ID.
     pub fn delete_bundle(&self, bundle_id: &str) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "DELETE {}/bundles/{bundle_id}", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .delete(self.url(&format!("/bundles/{bundle_id}")))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "delete_bundle request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_empty(resp)
     }
 
@@ -508,6 +608,7 @@ impl RelayClient {
         payload_base64: &str,
         expires_at: &str,
     ) -> Result<InviteInfo, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "POST {}/invites", self.base_url);
         let auth = self.auth_header()?;
         let body = CreateInviteRequest {
             payload: payload_base64,
@@ -519,42 +620,57 @@ impl RelayClient {
             .header("Authorization", auth)
             .json(&body)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "create_invite request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// List all active invites for the authenticated account.
     pub fn list_invites(&self) -> Result<Vec<InviteInfo>, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "GET {}/invites", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .get(self.url("/invites"))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "list_invites request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// Fetch an invite payload by token (no auth required).
     pub fn fetch_invite(&self, token: &str) -> Result<InvitePayload, KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "GET {}/invites/<token>", self.base_url);
         let resp = self
             .http
             .get(self.url(&format!("/invites/{token}")))
             .header("Accept", "application/json")
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "fetch_invite request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_response(resp)
     }
 
     /// Delete an invite by token.
     pub fn delete_invite(&self, token: &str) -> Result<(), KrillnotesError> {
+        log::debug!(target: "krillnotes::relay", "DELETE {}/invites/<token>", self.base_url);
         let auth = self.auth_header()?;
         let resp = self
             .http
             .delete(self.url(&format!("/invites/{token}")))
             .header("Authorization", auth)
             .send()
-            .map_err(|e| KrillnotesError::RelayUnavailable(e.to_string()))?;
+            .map_err(|e| {
+                log::error!(target: "krillnotes::relay", "delete_invite request failed: {e}");
+                KrillnotesError::RelayUnavailable(e.to_string())
+            })?;
         Self::handle_empty(resp)
     }
 }

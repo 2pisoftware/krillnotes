@@ -54,7 +54,7 @@ pub fn create_user_script(
     let (data, load_errors) = match category {
         Some(cat) => workspace.create_user_script_with_category(&source_code, &cat),
         None => workspace.create_user_script(&source_code),
-    }.map_err(|e| e.to_string())?;
+    }.map_err(|e| { log::error!("create_user_script failed: {e}"); e.to_string() })?;
     Ok(ScriptMutationResult { data, load_errors })
 }
 
@@ -72,7 +72,7 @@ pub fn update_user_script(
     let workspace = workspaces.get_mut(label)
         .ok_or("No workspace open")?;
     let (data, load_errors) = workspace.update_user_script(&script_id, &source_code)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::error!("update_user_script failed: {e}"); e.to_string() })?;
     Ok(ScriptMutationResult { data, load_errors })
 }
 
@@ -89,7 +89,7 @@ pub fn delete_user_script(
     let workspace = workspaces.get_mut(label)
         .ok_or("No workspace open")?;
     workspace.delete_user_script(&script_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("delete_user_script failed: {e}"); e.to_string() })
 }
 
 /// Toggles the enabled state of a user script.

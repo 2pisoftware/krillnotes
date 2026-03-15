@@ -15,9 +15,11 @@ impl Workspace {
 
     /// Serialise all notes, user scripts, and attachment metadata to JSON bytes for a snapshot bundle.
     pub fn to_snapshot_json(&self) -> Result<Vec<u8>> {
+        log::info!(target: "krillnotes::sync", "generating snapshot JSON");
         let notes = self.list_all_notes()?;
         let user_scripts = self.list_user_scripts()?;
         let attachments = self.list_all_attachments()?;
+        log::debug!(target: "krillnotes::sync", "snapshot: {} notes, {} scripts, {} attachments", notes.len(), user_scripts.len(), attachments.len());
         let snapshot = WorkspaceSnapshot {
             version: 1,
             notes,
@@ -129,8 +131,10 @@ impl Workspace {
     pub fn apply_incoming_operation(&mut self, op: Operation) -> Result<bool> {
         // 1. Skip local-only retracts — they must never cross device boundaries.
         if matches!(op, Operation::RetractOperation { propagate: false, .. }) {
+            log::debug!(target: "krillnotes::sync", "skipping local-only retract operation {}", op.operation_id());
             return Ok(false);
         }
+        log::debug!(target: "krillnotes::sync", "applying incoming operation {} ({})", op.operation_id(), Self::operation_type_str(&op));
 
         // 2. Advance the local HLC by observing the incoming timestamp.
         self.hlc.observe(op.timestamp());
@@ -164,6 +168,7 @@ impl Workspace {
 
         // 4. Duplicate — already applied.
         if rows == 0 {
+            log::debug!(target: "krillnotes::sync", "duplicate operation {}, skipping", op.operation_id());
             return Ok(false);
         }
 
@@ -302,9 +307,11 @@ impl Workspace {
 
         // Re-register scripts with the Rhai engine after applying script ops.
         if scripts_changed {
+            log::info!(target: "krillnotes::sync", "scripts changed, reloading Rhai engine");
             self.reload_scripts()?;
         }
 
+        log::debug!(target: "krillnotes::sync", "operation {} applied successfully", op.operation_id());
         Ok(true)
     }
 
@@ -333,10 +340,12 @@ impl Workspace {
     /// Notes and user scripts are inserted. Returns the number of notes imported.
     /// Designed for freshly created workspaces — duplicates will be skipped via INSERT OR IGNORE.
     pub fn import_snapshot_json(&mut self, data: &[u8]) -> Result<usize> {
+        log::info!(target: "krillnotes::sync", "importing snapshot ({} bytes)", data.len());
         let snapshot: WorkspaceSnapshot = serde_json::from_slice(data)
             .map_err(|e| KrillnotesError::Json(e))?;
 
         let note_count = snapshot.notes.len();
+        log::debug!(target: "krillnotes::sync", "snapshot contains {} notes, {} scripts", note_count, snapshot.user_scripts.len());
 
         // Bulk-insert notes preserving original IDs.
         // Defer foreign-key checks so children can be inserted before parents.
@@ -398,9 +407,11 @@ impl Workspace {
             tx.commit()?;
 
             // Re-register imported scripts with the Rhai engine.
+            log::info!(target: "krillnotes::sync", "reloading scripts after snapshot import");
             self.reload_scripts()?;
         }
 
+        log::info!(target: "krillnotes::sync", "snapshot import complete: {} notes", note_count);
         Ok(note_count)
     }
 

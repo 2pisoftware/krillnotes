@@ -45,6 +45,7 @@ pub fn save_relay_credentials(
     creds: &RelayCredentials,
     encryption_key: &[u8; 32],
 ) -> Result<(), KrillnotesError> {
+    log::info!(target: "krillnotes::relay", "saving relay credentials for identity {identity_uuid}");
     std::fs::create_dir_all(relay_dir)?;
 
     let plaintext = serde_json::to_vec(creds)?;
@@ -69,6 +70,7 @@ pub fn save_relay_credentials(
     let json = serde_json::to_string(&envelope)?;
     std::fs::write(&path, json)?;
 
+    log::debug!(target: "krillnotes::relay", "relay credentials saved to {}", path.display());
     Ok(())
 }
 
@@ -80,9 +82,11 @@ pub fn load_relay_credentials(
     identity_uuid: &str,
     encryption_key: &[u8; 32],
 ) -> Result<Option<RelayCredentials>, KrillnotesError> {
+    log::debug!(target: "krillnotes::relay", "loading relay credentials for identity {identity_uuid}");
     let path = relay_dir.join(format!("{identity_uuid}.json"));
 
     if !path.exists() {
+        log::debug!(target: "krillnotes::relay", "no relay credentials found at {}", path.display());
         return Ok(None);
     }
 
@@ -110,10 +114,14 @@ pub fn load_relay_credentials(
 
     let plaintext = cipher
         .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|e| KrillnotesError::ContactEncryption(format!("relay credential decryption failed: {e}")))?;
+        .map_err(|e| {
+            log::error!(target: "krillnotes::relay", "relay credential decryption failed: {e}");
+            KrillnotesError::ContactEncryption(format!("relay credential decryption failed: {e}"))
+        })?;
 
     let creds: RelayCredentials = serde_json::from_slice(&plaintext)?;
 
+    log::debug!(target: "krillnotes::relay", "relay credentials loaded for relay_url={}", creds.relay_url);
     Ok(Some(creds))
 }
 
@@ -124,9 +132,11 @@ pub fn delete_relay_credentials(
     relay_dir: &Path,
     identity_uuid: &str,
 ) -> Result<(), KrillnotesError> {
+    log::info!(target: "krillnotes::relay", "deleting relay credentials for identity {identity_uuid}");
     let path = relay_dir.join(format!("{identity_uuid}.json"));
     if path.exists() {
         std::fs::remove_file(&path)?;
+        log::debug!(target: "krillnotes::relay", "relay credentials deleted from {}", path.display());
     }
     Ok(())
 }
@@ -146,6 +156,7 @@ pub fn decrypt_pop_challenge(
     encrypted_nonce_hex: &str,
     server_public_key_hex: &str,
 ) -> Result<Vec<u8>, KrillnotesError> {
+    log::debug!(target: "krillnotes::relay", "decrypting PoP challenge");
     use crate::core::swarm::crypto::ed25519_sk_to_x25519;
     use crypto_box::{aead::Aead, PublicKey, SalsaBox, SecretKey};
 
@@ -175,7 +186,10 @@ pub fn decrypt_pop_challenge(
     let salsa_box = SalsaBox::new(&server_pk, &client_sk);
     salsa_box
         .decrypt(nonce, ciphertext)
-        .map_err(|_| KrillnotesError::Crypto("PoP challenge decryption failed".to_string()))
+        .map_err(|_| {
+            log::error!(target: "krillnotes::relay", "PoP challenge decryption failed");
+            KrillnotesError::Crypto("PoP challenge decryption failed".to_string())
+        })
 }
 
 #[cfg(test)]

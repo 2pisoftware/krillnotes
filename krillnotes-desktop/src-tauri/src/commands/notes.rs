@@ -21,7 +21,7 @@ pub fn list_notes(
         .get(label)
         .ok_or("No workspace open")?
         .list_all_notes()
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("list_notes failed: {e}"); e.to_string() })
 }
 
 /// Returns a single note by ID from the calling window's workspace.
@@ -37,7 +37,7 @@ pub fn get_note(
     let workspace = workspaces.get(label)
         .ok_or("No workspace open")?;
     workspace.get_note(&note_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("get_note failed: {e}"); e.to_string() })
 }
 
 /// Returns the registered note types for the calling window's workspace.
@@ -54,7 +54,7 @@ pub fn get_node_types(
         .ok_or("No workspace open")?;
 
     let types = workspace.list_node_types()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::error!("get_node_types failed: {e}"); e.to_string() })?;
 
     Ok(types)
 }
@@ -74,7 +74,7 @@ pub fn toggle_note_expansion(
         .ok_or("No workspace open")?;
 
     workspace.toggle_note_expansion(&note_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("toggle_note_expansion failed: {e}"); e.to_string() })
 }
 
 /// Persists the selected note ID for the calling window's workspace.
@@ -92,7 +92,7 @@ pub fn set_selected_note(
         .ok_or("No workspace open")?;
 
     workspace.set_selected_note(note_id.as_deref())
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("set_selected_note failed: {e}"); e.to_string() })
 }
 
 /// Creates a new note and returns it; uses root insertion when `parent_id` is `None`.
@@ -121,16 +121,16 @@ pub async fn create_note_with_type(
     // If no parent_id, create root note
     let note_id = if let Some(pid) = parent_id {
         workspace.create_note(&pid, add_position, &schema)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| { log::error!("create_note_with_type failed: {e}"); e.to_string() })?
     } else {
         // Create root note (parent_id = null, position = 0)
         workspace.create_note_root(&schema)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| { log::error!("create_note_with_type failed: {e}"); e.to_string() })?
     };
 
     // Fetch and return the created note
     workspace.get_note(&note_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("create_note_with_type get_note failed: {e}"); e.to_string() })
 }
 
 /// Updates the title and fields of an existing note, returning the updated note.
@@ -149,7 +149,7 @@ pub fn update_note(
         .ok_or("No workspace open")?;
 
     workspace.update_note(&note_id, title, fields)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("update_note failed: {e}"); e.to_string() })
 }
 
 /// Full save pipeline: runs group visibility, field validation, required checks,
@@ -169,7 +169,7 @@ pub fn save_note(
         .ok_or("No workspace open")?;
 
     workspace.save_note_with_pipeline(&note_id, title, fields)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("save_note failed: {e}"); e.to_string() })
 }
 
 /// Searches for notes whose title or text-like field values contain `query`.
@@ -186,7 +186,7 @@ pub fn search_notes(
     let workspace = workspaces.get(label)
         .ok_or("No workspace open")?;
     workspace.search_notes(&query, target_schema.as_deref())
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("search_notes failed: {e}"); e.to_string() })
 }
 
 /// Returns the number of direct children of the note identified by `note_id`.
@@ -203,7 +203,7 @@ pub fn count_children(
         .ok_or("No workspace open")?;
 
     workspace.count_children(&note_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("count_children failed: {e}"); e.to_string() })
 }
 
 /// Deletes the note identified by `note_id` using the specified [`DeleteStrategy`].
@@ -221,7 +221,7 @@ pub fn delete_note(
         .ok_or("No workspace open")?;
 
     workspace.delete_note(&note_id, strategy)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("delete_note failed: {e}"); e.to_string() })
 }
 
 /// Moves a note to a new parent and/or position.
@@ -244,7 +244,7 @@ pub fn move_note(
         new_parent_id.as_deref(),
         new_position,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| { log::error!("move_note failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -266,7 +266,7 @@ pub fn deep_copy_note_cmd(
         crate::AddPosition::AsSibling
     };
     ws.deep_copy_note(&source_note_id, &target_note_id, pos)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("deep_copy_note failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -282,7 +282,7 @@ pub fn update_note_tags(
     let workspace = workspaces.get_mut(label)
         .ok_or("No workspace open")?;
     workspace.update_note_tags(&note_id, tags)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("update_note_tags failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -296,7 +296,7 @@ pub fn get_all_tags(
     let workspace = workspaces.get(label)
         .ok_or("No workspace open")?;
     workspace.get_all_tags()
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("get_all_tags failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -311,7 +311,7 @@ pub fn get_notes_for_tag(
     let workspace = workspaces.get(label)
         .ok_or("No workspace open")?;
     workspace.get_notes_for_tag(&tags)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("get_notes_for_tag failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -359,7 +359,7 @@ pub fn list_operations(
         .get(label)
         .ok_or("No workspace open")?
         .list_operations(type_filter.as_deref(), since, until)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::error!("list_operations failed: {e}"); e.to_string() })?;
 
     // Resolve raw base64 public keys to display names where possible.
     let mut resolved_indices = vec![false; summaries.len()];
@@ -414,7 +414,7 @@ pub fn get_operation_detail(
         .get(label)
         .ok_or("No workspace open")?
         .get_operation_detail(&operation_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("get_operation_detail failed: {e}"); e.to_string() })
 }
 
 /// Deletes all operations from the log.
@@ -429,7 +429,7 @@ pub fn purge_operations(
         .get(label)
         .ok_or("No workspace open")?
         .purge_all_operations()
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("purge_operations failed: {e}"); e.to_string() })
 }
 
 // ── Undo / Redo commands ──────────────────────────────────────────
@@ -443,7 +443,7 @@ pub fn undo(
     let label = window.label();
     let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
-    workspace.undo().map_err(|e| e.to_string())
+    workspace.undo().map_err(|e| { log::error!("undo failed: {e}"); e.to_string() })
 }
 
 /// Re-applies the most recently undone mutation.
@@ -455,7 +455,7 @@ pub fn redo(
     let label = window.label();
     let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
-    workspace.redo().map_err(|e| e.to_string())
+    workspace.redo().map_err(|e| { log::error!("redo failed: {e}"); e.to_string() })
 }
 
 /// Returns true if there is an action to undo.
@@ -502,7 +502,7 @@ pub fn set_undo_limit(
     let label = window.label();
     let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let ws = workspaces.get_mut(label).ok_or("No workspace open")?;
-    ws.set_undo_limit(limit).map_err(|e| e.to_string())
+    ws.set_undo_limit(limit).map_err(|e| { log::error!("set_undo_limit failed: {e}"); e.to_string() })
 }
 
 /// Opens an undo group.
@@ -540,7 +540,7 @@ pub fn script_undo(
     let label = window.label();
     let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
-    workspace.script_undo().map_err(|e| e.to_string())
+    workspace.script_undo().map_err(|e| { log::error!("script_undo failed: {e}"); e.to_string() })
 }
 
 /// Re-applies the most recently undone script mutation.
@@ -552,7 +552,7 @@ pub fn script_redo(
     let label = window.label();
     let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let workspace = workspaces.get_mut(label).ok_or("No workspace open")?;
-    workspace.script_redo().map_err(|e| e.to_string())
+    workspace.script_redo().map_err(|e| { log::error!("script_redo failed: {e}"); e.to_string() })
 }
 
 /// Returns true if there is a script action to undo.

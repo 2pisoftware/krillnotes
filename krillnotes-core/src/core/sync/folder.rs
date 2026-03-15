@@ -32,6 +32,7 @@ impl FolderChannel {
     /// Update the set of folder paths to scan. Called by SyncEngine
     /// before each poll cycle with paths from all folder-channel peers.
     pub fn set_folder_paths(&self, paths: Vec<String>) {
+        log::debug!(target: "krillnotes::sync::folder", "set_folder_paths: {} paths", paths.len());
         *self.folder_paths.lock().unwrap() = paths;
     }
 
@@ -45,7 +46,9 @@ impl FolderChannel {
 
     /// Receive bundles from a specific directory (for testing and internal use).
     pub fn receive_bundles_from_dir(&self, dir: &Path) -> Result<Vec<BundleRef>, KrillnotesError> {
+        log::debug!(target: "krillnotes::sync::folder", "scanning directory {}", dir.display());
         if !dir.exists() {
+            log::error!(target: "krillnotes::sync::folder", "folder not found: {}", dir.display());
             return Err(KrillnotesError::Swarm(format!("Folder not found: {}", dir.display())));
         }
 
@@ -73,15 +76,20 @@ impl FolderChannel {
             // Try to read the file; skip if it fails (partially written)
             match std::fs::read(&path) {
                 Ok(data) => {
+                    log::debug!(target: "krillnotes::sync::folder", "read bundle {} ({} bytes)", path.display(), data.len());
                     bundles.push(BundleRef {
                         id: path.to_string_lossy().to_string(),
                         data,
                     });
                 }
-                Err(_) => continue, // Skip partially written files
+                Err(e) => {
+                    log::debug!(target: "krillnotes::sync::folder", "skipping partially written file {}: {e}", path.display());
+                    continue;
+                }
             }
         }
 
+        log::info!(target: "krillnotes::sync::folder", "found {} bundles in {}", bundles.len(), dir.display());
         Ok(bundles)
     }
 }
@@ -92,6 +100,7 @@ impl SyncChannel for FolderChannel {
         let dir = Path::new(folder_path);
 
         if !dir.exists() {
+            log::error!(target: "krillnotes::sync::folder", "folder not found for send: {}", dir.display());
             return Err(KrillnotesError::Swarm(format!("Folder not found: {}", dir.display())));
         }
 
@@ -103,19 +112,25 @@ impl SyncChannel for FolderChannel {
 
         let path = dir.join(filename);
         std::fs::write(&path, bundle_bytes).map_err(|e| {
+            log::error!(target: "krillnotes::sync::folder", "failed to write bundle to {}: {e}", path.display());
             KrillnotesError::Swarm(format!("Failed to write bundle to {}: {}", path.display(), e))
         })?;
 
+        log::info!(target: "krillnotes::sync::folder", "wrote bundle to {} ({} bytes)", path.display(), bundle_bytes.len());
         Ok(())
     }
 
     fn receive_bundles(&self, _workspace_id: &str) -> Result<Vec<BundleRef>, KrillnotesError> {
         let paths = self.folder_paths.lock().unwrap().clone();
+        log::debug!(target: "krillnotes::sync::folder", "receiving bundles from {} folder paths", paths.len());
         let mut all_bundles = Vec::new();
         for path in &paths {
             match self.receive_bundles_from_dir(Path::new(path)) {
                 Ok(bundles) => all_bundles.extend(bundles),
-                Err(_) => continue, // Skip inaccessible folders
+                Err(e) => {
+                    log::warn!(target: "krillnotes::sync::folder", "skipping inaccessible folder {path}: {e}");
+                    continue;
+                }
             }
         }
         Ok(all_bundles)
@@ -125,8 +140,10 @@ impl SyncChannel for FolderChannel {
         let path = Path::new(&bundle_ref.id);
         if path.exists() {
             std::fs::remove_file(path).map_err(|e| {
+                log::error!(target: "krillnotes::sync::folder", "failed to delete {}: {e}", path.display());
                 KrillnotesError::Swarm(format!("Failed to delete {}: {}", path.display(), e))
             })?;
+            log::debug!(target: "krillnotes::sync::folder", "acknowledged and deleted {}", path.display());
         }
         Ok(())
     }

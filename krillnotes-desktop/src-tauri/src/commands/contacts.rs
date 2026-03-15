@@ -68,7 +68,7 @@ pub fn list_contacts(
     let uuid = Uuid::parse_str(&identity_uuid).map_err(|e| e.to_string())?;
     let cms = state.contact_managers.lock().expect("Mutex poisoned");
     let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
-    let contacts = cm.list_contacts().map_err(|e| e.to_string())?;
+    let contacts = cm.list_contacts().map_err(|e| { log::error!("list_contacts failed: {e}"); e.to_string() })?;
     Ok(contacts.into_iter().map(ContactInfo::from_contact).collect())
 }
 
@@ -82,7 +82,7 @@ pub fn get_contact(
     let cid = Uuid::parse_str(&contact_id).map_err(|e| e.to_string())?;
     let cms = state.contact_managers.lock().expect("Mutex poisoned");
     let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
-    let contact = cm.get_contact(cid).map_err(|e| e.to_string())?;
+    let contact = cm.get_contact(cid).map_err(|e| { log::error!("get_contact failed: {e}"); e.to_string() })?;
     Ok(contact.map(ContactInfo::from_contact))
 }
 
@@ -99,7 +99,7 @@ pub fn create_contact(
     let cms = state.contact_managers.lock().expect("Mutex poisoned");
     let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
     let contact = cm.create_contact(&declared_name, &public_key, tl)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { log::error!("create_contact failed: {e}"); e.to_string() })?;
     Ok(ContactInfo::from_contact(contact))
 }
 
@@ -137,7 +137,7 @@ pub fn delete_contact(
     let cid = Uuid::parse_str(&contact_id).map_err(|e| e.to_string())?;
     let cms = state.contact_managers.lock().expect("Mutex poisoned");
     let cm = cms.get(&uuid).ok_or("Identity not unlocked")?;
-    cm.delete_contact(cid).map_err(|e| e.to_string())
+    cm.delete_contact(cid).map_err(|e| { log::error!("delete_contact failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -178,7 +178,7 @@ pub fn list_workspace_peers(
     let cm = contact_managers
         .get(&identity_uuid)
         .ok_or("Contact manager not found — identity must be unlocked")?;
-    workspace.list_peers_info(cm).map_err(|e| e.to_string())
+    workspace.list_peers_info(cm).map_err(|e| { log::error!("list_workspace_peers failed: {e}"); e.to_string() })
 }
 
 /// Returns resolved peer info for the current workspace's sync_peers.
@@ -211,7 +211,7 @@ pub fn remove_workspace_peer(
     let window_label = window.label().to_string();
     let workspaces = state.workspaces.lock().expect("Mutex poisoned");
     let workspace = workspaces.get(&window_label).ok_or("Workspace not found")?;
-    workspace.remove_peer(&peer_device_id).map_err(|e| e.to_string())
+    workspace.remove_peer(&peer_device_id).map_err(|e| { log::error!("remove_workspace_peer failed: {e}"); e.to_string() })
 }
 
 /// Pre-authorises a contact as a sync peer for the calling window's workspace.

@@ -565,7 +565,7 @@ pub fn get_workspace_metadata(
     let workspace = workspaces.get(label)
         .ok_or("No workspace open")?;
     workspace.get_workspace_metadata()
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("get_workspace_metadata failed: {e}"); e.to_string() })
 }
 
 #[tauri::command]
@@ -580,7 +580,7 @@ pub fn set_workspace_metadata(
     let workspace = workspaces.get_mut(label)
         .ok_or("No workspace open")?;
     workspace.set_workspace_metadata(&metadata)
-        .map_err(|e| e.to_string())
+        .map_err(|e| { log::error!("set_workspace_metadata failed: {e}"); e.to_string() })
 }
 
 
@@ -599,7 +599,7 @@ pub fn export_workspace_cmd(
     let workspace = workspaces.get(label).ok_or("No workspace open")?;
 
     let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-    krillnotes_core::export_workspace(workspace, file, password.as_deref()).map_err(|e| e.to_string())
+    krillnotes_core::export_workspace(workspace, file, password.as_deref()).map_err(|e| { log::error!("export_workspace failed: {e}"); e.to_string() })
 }
 
 /// Reads metadata from an export archive without creating a workspace.

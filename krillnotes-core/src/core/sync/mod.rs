@@ -95,6 +95,7 @@ pub struct SyncEngine {
 
 impl SyncEngine {
     pub fn new() -> Self {
+        log::info!(target: "krillnotes::sync", "sync engine created");
         Self {
             channels: HashMap::new(),
         }
@@ -103,7 +104,9 @@ impl SyncEngine {
     /// Register a transport channel. Replaces any existing channel of the
     /// same `ChannelType`.
     pub fn register_channel(&mut self, channel: Box<dyn SyncChannel>) {
-        self.channels.insert(channel.channel_type(), channel);
+        let ct = channel.channel_type();
+        log::info!(target: "krillnotes::sync", "registered channel: {ct}");
+        self.channels.insert(ct, channel);
     }
 
     /// Run one full sync cycle: outbound deltas, then inbound bundles.
@@ -118,21 +121,27 @@ impl SyncEngine {
     ) -> Result<Vec<SyncEvent>, KrillnotesError> {
         let mut events = Vec::new();
         let workspace_id = workspace.workspace_id().to_string();
+        log::info!(target: "krillnotes::sync", "poll started for workspace {workspace_id}");
 
         // ── 0. Ensure relay mailbox (if relay channel is registered) ────────
         #[cfg(feature = "relay")]
         {
             if let Some(channel) = self.channels.get(&ChannelType::Relay) {
                 if let Some(relay) = channel.as_any().downcast_ref::<relay::RelayChannel>() {
+                    log::debug!(target: "krillnotes::sync", "ensuring relay mailbox for workspace {workspace_id}");
                     match relay.client().ensure_mailbox(&workspace_id) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            log::debug!(target: "krillnotes::sync", "relay mailbox ensured");
+                        }
                         Err(KrillnotesError::RelayAuthExpired(_)) => {
+                            log::warn!(target: "krillnotes::sync", "relay auth expired for {}", relay.client().base_url);
                             events.push(SyncEvent::AuthExpired {
                                 relay_url: relay.client().base_url.clone(),
                             });
                             // Don't abort — folder channel peers can still sync.
                         }
                         Err(e) => {
+                            log::error!(target: "krillnotes::sync", "ensure_mailbox failed: {e}");
                             // Non-fatal: log as a generic sync error with empty peer
                             events.push(SyncEvent::SyncError {
                                 workspace_id: workspace_id.clone(),
@@ -147,6 +156,7 @@ impl SyncEngine {
 
         // ── 1. Outbound: generate + send deltas ────────────────────────────
         let active_peers = workspace.get_active_sync_peers()?;
+        log::debug!(target: "krillnotes::sync", "outbound: {} active peers", active_peers.len());
 
         for peer in &active_peers {
             // Mark peer as syncing
@@ -157,10 +167,13 @@ impl SyncEngine {
                 None,
             );
 
+            log::debug!(target: "krillnotes::sync", "generating delta for peer {} via {}", peer.peer_device_id, peer.channel_type);
+
             // Find the channel for this peer
             let channel = match self.channels.get(&peer.channel_type) {
                 Some(ch) => ch,
                 None => {
+                    log::error!(target: "krillnotes::sync", "no channel registered for {}", peer.channel_type);
                     let _ = workspace.update_peer_sync_status(
                         &peer.peer_device_id,
                         "error",
@@ -187,6 +200,7 @@ impl SyncEngine {
             ) {
                 Ok(bytes) => bytes,
                 Err(e) => {
+                    log::error!(target: "krillnotes::sync", "generate_delta failed for peer {}: {e}", peer.peer_device_id);
                     let _ = workspace.update_peer_sync_status(
                         &peer.peer_device_id,
                         "error",
@@ -206,8 +220,10 @@ impl SyncEngine {
             let op_count = Self::peek_op_count_from_header(&bundle_bytes).unwrap_or(0);
 
             // Send via channel
+            log::debug!(target: "krillnotes::sync", "sending bundle ({} bytes) to peer {}", bundle_bytes.len(), peer.peer_device_id);
             match channel.send_bundle(peer, &bundle_bytes) {
                 Ok(()) => {
+                    log::info!(target: "krillnotes::sync", "delta sent to peer {} ({} ops)", peer.peer_device_id, op_count);
                     let _ = workspace.update_peer_sync_status(
                         &peer.peer_device_id,
                         "idle",
@@ -221,6 +237,7 @@ impl SyncEngine {
                     });
                 }
                 Err(KrillnotesError::RelayAuthExpired(_)) => {
+                    log::warn!(target: "krillnotes::sync", "relay auth expired while sending to peer {}", peer.peer_device_id);
                     let _ = workspace.update_peer_sync_status(
                         &peer.peer_device_id,
                         "auth_expired",
@@ -237,6 +254,7 @@ impl SyncEngine {
                     }
                 }
                 Err(e) => {
+                    log::error!(target: "krillnotes::sync", "send_bundle failed for peer {}: {e}", peer.peer_device_id);
                     let _ = workspace.update_peer_sync_status(
                         &peer.peer_device_id,
                         "error",
@@ -253,6 +271,7 @@ impl SyncEngine {
         }
 
         // ── 2. Inbound: receive + apply bundles ────────────────────────────
+        log::debug!(target: "krillnotes::sync", "inbound: checking for bundles");
 
         // Collect unique channel types from active peers (skip Manual)
         let inbound_channel_types: HashSet<ChannelType> = active_peers
@@ -287,9 +306,14 @@ impl SyncEngine {
             }
 
             // Receive bundles from channel
+            log::debug!(target: "krillnotes::sync", "receiving bundles from channel {ct}");
             let bundles = match channel.receive_bundles(&workspace_id) {
-                Ok(b) => b,
+                Ok(b) => {
+                    log::debug!(target: "krillnotes::sync", "received {} bundles from channel {ct}", b.len());
+                    b
+                }
                 Err(e) => {
+                    log::error!(target: "krillnotes::sync", "receive_bundles({ct}) failed: {e}");
                     events.push(SyncEvent::SyncError {
                         workspace_id: workspace_id.clone(),
                         peer_device_id: String::new(),
@@ -304,6 +328,7 @@ impl SyncEngine {
                 let header = match Self::read_header_from_bundle(&bundle_ref.data) {
                     Ok(h) => h,
                     Err(e) => {
+                        log::error!(target: "krillnotes::sync", "failed to read bundle header: {e}");
                         events.push(SyncEvent::IngestError {
                             workspace_id: workspace_id.clone(),
                             peer_device_id: String::new(),
@@ -315,6 +340,8 @@ impl SyncEngine {
                     }
                 };
 
+                log::debug!(target: "krillnotes::sync", "processing {:?} bundle from peer {}", header.mode, header.source_device_id);
+
                 match header.mode {
                     SwarmMode::Delta => {
                         match crate::core::swarm::sync::apply_delta(
@@ -324,6 +351,7 @@ impl SyncEngine {
                             ctx.contact_manager,
                         ) {
                             Ok(result) => {
+                                log::info!(target: "krillnotes::sync", "applied delta from peer {}: {} ops", result.sender_device_id, result.operations_applied);
                                 let _ = channel.acknowledge(bundle_ref);
                                 events.push(SyncEvent::BundleApplied {
                                     workspace_id: workspace_id.clone(),
@@ -332,6 +360,7 @@ impl SyncEngine {
                                 });
                             }
                             Err(e) => {
+                                log::error!(target: "krillnotes::sync", "apply_delta failed for peer {}: {e}", header.source_device_id);
                                 // Do NOT acknowledge — retry on next poll
                                 events.push(SyncEvent::IngestError {
                                     workspace_id: workspace_id.clone(),
@@ -348,8 +377,10 @@ impl SyncEngine {
                             ctx.signing_key,
                         ) {
                             Ok(parsed) => {
+                                log::info!(target: "krillnotes::sync", "importing snapshot from peer {}", header.source_device_id);
                                 match workspace.import_snapshot_json(&parsed.workspace_json) {
                                     Ok(_) => {
+                                        log::info!(target: "krillnotes::sync", "snapshot imported from peer {}", header.source_device_id);
                                         let _ = channel.acknowledge(bundle_ref);
                                         events.push(SyncEvent::BundleApplied {
                                             workspace_id: workspace_id.clone(),
@@ -358,6 +389,7 @@ impl SyncEngine {
                                         });
                                     }
                                     Err(e) => {
+                                        log::error!(target: "krillnotes::sync", "import_snapshot_json failed for peer {}: {e}", header.source_device_id);
                                         events.push(SyncEvent::IngestError {
                                             workspace_id: workspace_id.clone(),
                                             peer_device_id: header.source_device_id.clone(),
@@ -367,6 +399,7 @@ impl SyncEngine {
                                 }
                             }
                             Err(e) => {
+                                log::error!(target: "krillnotes::sync", "parse_snapshot_bundle failed for peer {}: {e}", header.source_device_id);
                                 events.push(SyncEvent::IngestError {
                                     workspace_id: workspace_id.clone(),
                                     peer_device_id: header.source_device_id.clone(),
@@ -378,6 +411,7 @@ impl SyncEngine {
                         }
                     }
                     other => {
+                        log::warn!(target: "krillnotes::sync", "unexpected bundle mode: {:?}", other);
                         events.push(SyncEvent::UnexpectedBundleMode {
                             workspace_id: workspace_id.clone(),
                             mode: format!("{:?}", other).to_lowercase(),
@@ -388,6 +422,7 @@ impl SyncEngine {
             }
         }
 
+        log::info!(target: "krillnotes::sync", "poll complete for workspace {workspace_id}: {} events", events.len());
         Ok(events)
     }
 

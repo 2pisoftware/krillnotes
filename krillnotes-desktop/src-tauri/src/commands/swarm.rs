@@ -117,7 +117,7 @@ pub fn open_swarm_file_cmd(
     path: String,
 ) -> std::result::Result<SwarmFileInfo, String> {
     use krillnotes_core::core::swarm::header::SwarmMode;
-    let data = std::fs::read(&path).map_err(|e| format!("Cannot read file: {e}"))?;
+    let data = std::fs::read(&path).map_err(|e| { log::error!("open_swarm_file failed: {e}"); format!("Cannot read file: {e}") })?;
     let header = peek_swarm_header(&data)?;
 
     let fingerprint = krillnotes_core::core::contact::generate_fingerprint(&header.source_identity)
@@ -339,7 +339,7 @@ pub async fn create_snapshot_for_peers(
         recipient_peer_ids: peer_public_keys.clone(),
         attachment_blobs,
         owner_pubkey,
-    }).map_err(|e| e.to_string())?;
+    }).map_err(|e| { log::error!("create_snapshot_for_peers failed: {e}"); e.to_string() })?;
 
     // 5. Write to file.
     std::fs::write(&save_path, &bundle_bytes).map_err(|e| e.to_string())?;
@@ -393,7 +393,7 @@ pub async fn apply_swarm_snapshot(
         id.signing_key.to_bytes()
     };
     let recipient_key = Ed25519SigningKey::from_bytes(&import_seed);
-    let parsed = parse_snapshot_bundle(&data, &recipient_key).map_err(|e| e.to_string())?;
+    let parsed = parse_snapshot_bundle(&data, &recipient_key).map_err(|e| { log::error!("apply_swarm_snapshot failed: {e}"); e.to_string() })?;
 
     // Deserialise snapshot JSON now so we can look up attachment metadata later.
     let snapshot: WorkspaceSnapshot = serde_json::from_slice(&parsed.workspace_json)
@@ -556,7 +556,7 @@ pub async fn apply_swarm_delta(
         let mut workspaces = state.workspaces.lock().expect("Mutex poisoned");
         let ws = workspaces.get_mut(&target_label).ok_or("Workspace not open")?;
         let cm = cm_guard.get_mut(&identity_uuid_parsed).ok_or("Contact manager not available")?;
-        apply_delta(&bundle_bytes, ws, &recipient_key, cm).map_err(|e| e.to_string())?
+        apply_delta(&bundle_bytes, ws, &recipient_key, cm).map_err(|e| { log::error!("apply_swarm_delta failed: {e}"); e.to_string() })?
     };
 
     // Emit workspace-updated on the target workspace's window so it refreshes.
